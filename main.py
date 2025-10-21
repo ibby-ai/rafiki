@@ -19,7 +19,10 @@ sb = modal.Sandbox.create(
         )
         .workdir("/root/app") # Declare the working directory for the sandbox.
         .add_local_dir(".", remote_path="/root/app")
-    )
+    ),
+    secrets=[modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])],
+    timeout=60 * 10, # 10 minutes
+    verbose=True,
 )
 
 p = sb.exec("python", "-c", "print('hello')", timeout=3)
@@ -31,15 +34,16 @@ print(sb.exec("pwd").stdout.read())
 # Print available files in the working directory
 print(sb.exec("ls", "-la").stdout.read())
 
-# Try to run a function from the tool.py file, but pass the code string via a variable.
+# Run the runner.py file
+p = sb.exec("python", "runner.py", timeout=60 * 10)
+# print(p.stdout.read())
+print("=== STDOUT ===")
+for line in p.stdout:
+    print(line, end="")
+print("\n=== STDERR ===")
+for line in p.stderr:
+    print(line, end="")
 
-
-#TODO: Is there a way to pass the code to be ran to the sandbox?
-# So we don't need to write a long string of code to be ran?
-# I'm thinking of using a file and then reading the file contents and passing it to the sandbox.
-
-p = sb.exec("python", "runner.py", timeout=3)
-print(p.stdout.read())
 
 p = sb.exec("bash", "-c", "for i in {1..10}; do date +%T; sleep 0.5; done", timeout=5)
 for line in p.stdout:
