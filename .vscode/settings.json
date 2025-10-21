@@ -1,0 +1,71 @@
+{
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/*.pyo": true,
+      "**/*.pyd": true,
+      "**/.Python": true,
+      "**/node_modules": true,
+      "**/.pytest_cache": true,
+      "**/.mypy_cache": true,
+      "**/.ruff_cache": true,
+      "**/.venv": false,
+      "**/venv": false,
+      "**/env": false,
+      "**/.env": false,
+      "**/.DS_Store": true,
+      "**/Thumbs.db": true,
+      "**/.ipynb_checkpoints": true,
+      "**/dist": true,
+      "**/build": true,
+      "**/*.egg-info": true,
+      "**/.coverage": true,
+      "**/htmlcov": true,
+      "**/.tox": true,
+      "**/.nox": true
+    },
+    "python.defaultInterpreterPath": "./.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": false,
+    "python.linting.flake8Enabled": false,
+    "python.formatting.provider": "black",
+    "python.sortImports.args": [
+      "--profile",
+      "black"
+    ],
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit",
+      "source.fixAll.biome": "explicit",
+      "source.organizeImports.biome": "explicit"
+    },
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "[javascript]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[typescript]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[javascriptreact]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[typescriptreact]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[json]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[jsonc]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[css]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[graphql]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "typescript.tsdk": "node_modules/typescript/lib",
+    "editor.formatOnPaste": true,
+    "emmet.showExpandedAbbreviation": "never"
+  }
