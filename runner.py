@@ -2,26 +2,31 @@
 The code responsible for running the agent.
 """
 
-from utils.tools import multi_tool_server
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 import anyio
+from typing import Any, Dict, List
+from utils.prompts import SYSTEM_PROMPT
+from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
+from utils.prompts import DEFAULT_QUESTION
+
 # Use the custom tools with Claude
-options = ClaudeAgentOptions(
-    mcp_servers={"utilities": multi_tool_server},
-    allowed_tools=[
-        "mcp__utilities__calculate",  # Allow the calculator tool
-        "mcp__utilities__translate",  # Allow the translator tool
-        # Add other tools as needed
-        "Read",
-        "Write",
-    ]
+
+def build_agent_options(
+    mcp_servers: Dict[str, Any],
+    allowed_tools: List[str],
+    system_prompt: str = SYSTEM_PROMPT,
+) -> ClaudeAgentOptions:
+    return ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
 )
 
-DEFAULT_QUESTION = "What is the capital of France?"
+options = build_agent_options(MCP_SERVERS, ALLOWED_TOOLS, SYSTEM_PROMPT)
 
-async def run_agent():
+async def run_agent(question: str = DEFAULT_QUESTION):
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(DEFAULT_QUESTION)
+        await client.query(question)
 
         # Extract and print response
         async for msg in client.receive_response():

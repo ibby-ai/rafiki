@@ -1,6 +1,5 @@
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, tool, create_sdk_mcp_server
-from typing import Any
-import asyncio
+from claude_agent_sdk import tool, create_sdk_mcp_server
+from typing import Any, Dict, List
 
 # Define multiple tools using the @tool decorator
 @tool("calculate", "Perform calculations", {"expression": str})
@@ -23,3 +22,14 @@ multi_tool_server = create_sdk_mcp_server(
     version="1.0.0",
     tools=[calculate, translate, search_web]  # Pass decorated functions
 )
+
+MCP_SERVERS: Dict[str, Any] = {"utilities": multi_tool_server}
+
+ALLOWED_TOOLS: List[str] = [
+    "mcp__utilities__calculate",
+    "mcp__utilities__translate",
+    "Read",
+    "Write",
+    "WebSearch(*)",
+    "WebFetch(*)",
+]
