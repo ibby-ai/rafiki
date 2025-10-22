@@ -8,9 +8,9 @@ from typing import Any, Dict, List
 from utils.prompts import SYSTEM_PROMPT
 from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
 from utils.prompts import DEFAULT_QUESTION
+import argparse
 
 # Use the custom tools with Claude
-
 def build_agent_options(
     mcp_servers: Dict[str, Any],
     allowed_tools: List[str],
@@ -33,4 +33,7 @@ async def run_agent(question: str = DEFAULT_QUESTION):
             print(msg)
 
 if __name__ == "__main__":
-    anyio.run(run_agent)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--question", type=str, default=DEFAULT_QUESTION)
+    args = parser.parse_args()
+    anyio.run(run_agent, args.question)
