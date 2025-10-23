@@ -35,4 +35,4 @@ def get_env_template(name: str = "base-anthropic-sdk") -> AgentEnvTemplate:
     try:
         return ENV_TEMPLATES[name]
     except KeyError:
-        raise ValueError(f"Unknown env template {name}. Available: {list(TEMPLATES)}")
+        raise ValueError(f"Unknown env template {name}. Available: {list(ENV_TEMPLATES)}")

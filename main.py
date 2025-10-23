@@ -30,9 +30,9 @@ def run_agent_remote(question: str =  DEFAULT_QUESTION) -> None:
 
 
 @app.function(
-    schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
     image=agent_sdk_env.image,
     secrets=agent_sdk_env.secrets,
+    # schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
 )
 def sandbox_controller(question: str = DEFAULT_QUESTION) -> None:
     import modal
@@ -43,17 +43,16 @@ def sandbox_controller(question: str = DEFAULT_QUESTION) -> None:
         workdir=agent_sdk_env.workdir,
         timeout=60 * 10, # 10 minutes
     )
-    try:
-        print("\n=== EXECUTING RUNNER ===")
-        p = sb.exec("python", "runner.py", "--question", question, timeout=60)
-        print("=== STDOUT ===")
-        for line in p.stdout:
-            print(line, end="")
-        print("\n=== STDERR ===")
-        for line in p.stderr:
-            print(line, end="")
-    finally:
-        sb.terminate()
+    print("\n=== EXECUTING RUNNER ===")
+    p = sb.exec("python", "runner.py", "--question", question, timeout=60)
+    print("=== STDOUT ===")
+    for line in p.stdout:
+        print(line, end="")
+    print("\n=== STDERR ===")
+    for line in p.stderr:
+        print(line, end="")
+
+    sb.terminate()
 
 
 
