@@ -1,6 +1,6 @@
 # Agent Sandbox Starter (Modal + Claude Agent SDK)
 
-A minimal starter to run an agent in an ephemeral Modal Sandbox.
+A minimal starter to run an agent in a Modal Sandbox.
 
 ## Requirements
 
