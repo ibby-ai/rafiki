@@ -1,10 +1,10 @@
 [project]
-name = "test-sandbox"
+name = "agent-sandbox-starter"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk>=0.1.4",
-    "modal>=1.2.0",
+    "fastapi>=0.119.1",
+    "modal>=1.2.1",
 ]
