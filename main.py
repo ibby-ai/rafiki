@@ -12,6 +12,12 @@ from utils.env_templates import get_env_template
 from utils.prompts import DEFAULT_QUESTION
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional
+import urllib.request
+import time
+import json
+import httpx
+import socket
 
 app = modal.App("test-sandbox")
 
@@ -27,6 +33,58 @@ web_app.add_middleware(
 
 
 agent_sdk_env = get_env_template("base-anthropic-sdk")
+SANDBOX: Optional[modal.Sandbox] = None
+SERVICE_URL: Optional[str] = None
+
+def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") -> None:
+    check_url = f"{url.rstrip('/')}{path}"
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with urllib.request.urlopen(check_url, timeout=1) as resp:
+                if resp.status == 200:
+                    return
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
+            time.sleep(1)
+    raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
+
+def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
+    global SANDBOX, SERVICE_URL
+    if SANDBOX is not None and SERVICE_URL:
+        return SANDBOX, SERVICE_URL
+    SANDBOX = modal.Sandbox.create(
+        # Command to run persistently in the background
+        "uvicorn", 
+        "runner_service:app", 
+        "--host", 
+        "0.0.0.0", 
+        "--port",
+        "8001",
+        app=app,
+        image=agent_sdk_env.image,
+        secrets=agent_sdk_env.secrets,
+        workdir=agent_sdk_env.workdir,
+        encrypted_ports=[8001],
+        timeout=60 * 60 * 6, # 6 hours
+        idle_timeout=60 * 10, # 10 minutes idle shutdown
+        verbose=True,
+    )
+
+    SERVICE_URL = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        tunnels = SANDBOX.tunnels()
+        if 8001 in tunnels and getattr(tunnels[8001], "url", None):
+            SERVICE_URL = tunnels[8001].url
+            break
+        time.sleep(0.5)
+
+    if SERVICE_URL:
+        _wait_for_service(SERVICE_URL)
+        return SANDBOX, SERVICE_URL
+
+    raise RuntimeError("Failed to start background sandbox or get service URL")
+
 
 
 @app.function(
@@ -45,38 +103,32 @@ def run_agent_remote(question: str =  DEFAULT_QUESTION) -> None:
 @app.function(
     image=agent_sdk_env.image,
     secrets=agent_sdk_env.secrets,
+    timeout=300,
     # schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
 )
 @modal.fastapi_endpoint(method="POST")
 async def test_endpoint(request: Request) -> Response:
-    """
-    To test this endpoint using curl, run:
-
-    curl -X POST http://localhost:8000/test_endpoint \
-        -H 'Content-Type: application/json' \
-        -d '"What is the capital of France?"'
-
-    (If running in Modal's local dev server, replace the URL if needed.)
-
-    The body should be a JSON-encoded string, e.g. "\"Your question here\""
-    """
     question = await request.json()
-    print(question)
-    sb = modal.Sandbox.create(
-        app=app,
-        image=agent_sdk_env.image,
-        secrets=agent_sdk_env.secrets,
-        workdir=agent_sdk_env.workdir,
-        timeout=60 * 10, # 10 minutes
-    )
-    print("=== STDOUT ===")
-    p = sb.exec("python", "runner.py", "--question", question, timeout=60)
-    
-    # Read the stdout content from the StreamReader
-    stdout_content = "".join(p.stdout)
-    
-    return Response(content=stdout_content, status_code=200)
+    _, url = get_or_start_background_sandbox()
 
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+            r = await client.post(f"{url.rstrip('/')}/query", json={"question": question})
+            r.raise_for_status()
+            data = r.json()
+        return Response(content=json.dumps(data), media_type="application/json", status_code=200)
+    except httpx.TimeoutException:
+        return Response(
+            content=json.dumps({"error": "Upstream timed out contacting the sandbox service"}),
+            media_type="application/json",
+            status_code=504,
+        )
+    except httpx.HTTPError as e:
+        return Response(
+            content=json.dumps({"error": f"Upstream HTTP error: {str(e)}"}),
+            media_type="application/json",
+            status_code=502,
+        )            
 
 
 # @app.function(

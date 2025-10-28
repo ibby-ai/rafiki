@@ -11,7 +11,7 @@ class AgentEnvTemplate:
 
 def _base_anthropic_sdk_image() -> modal.Image:
     return (
-        modal.Image.debian_slim(python_version="3.11").pip_install("claude-agent-sdk", "fastapi", "uvicorn")
+        modal.Image.debian_slim(python_version="3.11").pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
         .apt_install("curl")
         .run_commands(
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
