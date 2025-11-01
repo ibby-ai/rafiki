@@ -1,3 +1,10 @@
+"""
+Prompt utilities used to configure the agent's default behavior.
+
+Adjust `SYSTEM_PROMPT` to steer the assistant's overall tone and tool usage
+preferences. `DEFAULT_QUESTION` is used as a fallback when no input is
+provided.
+"""
 SYSTEM_PROMPT = (
     "You are a helpful coding agent. Prefer using available tools when beneficiak."
 )
