@@ -217,3 +217,5 @@ __marimo__/
 
 # Other
 .DS_Store
+code_snapshot.md
+.codesnapshot.json
