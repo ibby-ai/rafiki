@@ -20,13 +20,20 @@ Important:
 """
 from fastapi import FastAPI
 from pydantic import BaseModel
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-import anyio
-from typing import Any, Dict, List
+from claude_agent_sdk import (
+    ClaudeSDKClient, 
+    ClaudeAgentOptions,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+    PermissionUpdate,
+)
+from claude_agent_sdk.types import PermissionRuleValue
+from typing import Any, Dict
 from utils.prompts import SYSTEM_PROMPT
 from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
-from utils.prompts import DEFAULT_QUESTION
-import argparse
+from utils.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from typing import Any
 
 app = FastAPI()
 
@@ -37,6 +44,40 @@ class QueryBody(BaseModel):
     Attributes:
         question: Natural-language prompt to send to the agent.
     """
+
+async def allow_web_only(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    # ctx: ToolPermissionContext,
+):
+    if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
+        return PermissionResultAllow(updated_input=tool_input)
+    return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
+
+
+#  Not being used yet. Experimenting with different permission modes.
+async def allow_web_only_with_updates(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    # ctx: ToolPermissionContext,
+):
+    if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
+        updates = [
+            PermissionUpdate(
+                type="addRules",
+                rules=[
+                    PermissionRuleValue(tool_name="WebSearch(*)"),
+                    PermissionRuleValue(tool_name="WebFetch(*)"),
+                ],
+                behavior="allow",
+                destination="session",
+            )
+        ]
+        return PermissionResultAllow(
+            updated_input=tool_input,
+            updated_permissions=updates,
+        )
+    return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 # Use the custom tools with Claude
 def _options() -> ClaudeAgentOptions:
@@ -52,7 +93,9 @@ def _options() -> ClaudeAgentOptions:
         allowed_tools=ALLOWED_TOOLS,
         # Running in a sandbox, so we can bypass permissions
         # Making the agent truly autonomous
-        permission_mode="bypassPermissions"
+        #permission_mode="bypassPermissions" # Not allowed when have root access
+        can_use_tool=allow_web_only,
+        permission_mode="acceptEdits"
     )
 
 

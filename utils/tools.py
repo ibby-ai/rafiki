@@ -55,8 +55,8 @@ MCP_SERVERS: Dict[str, Any] = {"utilities": multi_tool_server}
 
 ALLOWED_TOOLS: List[str] = [
     # MCP tools exposed by this package's server
-    "mcp__utilities__calculate",
-    "mcp__utilities__translate",
+    # "mcp__utilities__calculate",
+    # "mcp__utilities__translate",
     # Built-in tools (examples) that may be available in runtime
     "Read",
     "Write",

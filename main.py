@@ -231,48 +231,6 @@ async def test_endpoint(request: Request) -> Response:
         )            
 
 
-# @app.function(
-#     image=agent_sdk_env.image
-# )
-# @modal.fastapi_endpoint()
-# def square(x: int):
-#     return {"square": x**2}
-
-
-@app.function(
-    image=agent_sdk_env.image,
-    secrets=agent_sdk_env.secrets,
-    schedule=modal.Cron("*/5 * * * *"), # Run every 5 minutes
-)
-def sandbox_controller(question: str = DEFAULT_QUESTION) -> None:
-    """Periodic job that spins up a sandbox and executes `runner.py` inside it.
-
-    This demonstrates driving a sandbox with a command (here `python runner.py`)
-    and capturing its stdout/stderr. Useful for batch or scheduled workflows.
-
-    Args:
-        question: Passed through to `runner.py` via `--question`.
-    """
-    import modal
-    sb = modal.Sandbox.create(
-        app=app,
-        image=agent_sdk_env.image,
-        secrets=agent_sdk_env.secrets,
-        workdir=agent_sdk_env.workdir,
-        timeout=60 * 10, # 10 minutes
-    )
-    print("\n=== EXECUTING RUNNER ===")
-    p = sb.exec("python", "runner.py", "--question", question, timeout=60)
-    print("=== STDOUT ===")
-    for line in p.stdout:
-        print(line, end="")
-    print("\n=== STDERR ===")
-    for line in p.stderr:
-        print(line, end="")
-
-    sb.terminate()
-
-
 
 # For 'modal run' command
 @app.local_entrypoint()
