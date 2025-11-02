@@ -36,6 +36,7 @@ import time
 import json
 import httpx
 import socket
+import anyio
 
 app = modal.App("test-sandbox")
 
@@ -51,6 +52,19 @@ web_app.add_middleware(
 
 
 agent_sdk_env = get_env_template("base-anthropic-sdk")
+
+# Persistent registry for sandbox metadata (survives sandbox restarts)
+SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
+
+# Service sandbox identity and config
+SANDBOX_NAME = "svc-runner-8001"
+SERVICE_PORT = 8001
+PERSIST_VOL_NAME = f"{SANDBOX_NAME}-vol"
+
+
+# Toggle optional auth with connect tokens
+ENFORCE_CONNECT_TOKEN = False
+
 # Global handles to a background sandbox and its encrypted tunnel URL. We keep
 # these in module scope so repeated calls within the same worker reuse the
 # long-lived process.
@@ -59,7 +73,6 @@ SERVICE_URL: Optional[str] = None
 
 def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") -> None:
     """Block until an HTTP health check returns 200 OK.
-
     - Builds the absolute check URL by appending `path` to the provided base
       `url` (which should include scheme and host from the sandbox tunnel).
     - Polls until `timeout` seconds have elapsed.
@@ -118,6 +131,20 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
     global SANDBOX, SERVICE_URL
     if SANDBOX is not None and SERVICE_URL:
         return SANDBOX, SERVICE_URL
+    
+    # Attempt global reuse by name across workers/processes
+    try:
+        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        tunnels = sb.tunnels()
+        if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+            SANDBOX = sb
+            SERVICE_URL = tunnels[SERVICE_PORT].url
+            _wait_for_service(SERVICE_URL)
+            return SANDBOX, SERVICE_URL
+    except Exception as e:
+        pass
+
+    svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
     SANDBOX = modal.Sandbox.create(
         # Command to run persistently in the background
         "uvicorn", 
@@ -125,34 +152,149 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         "--host", 
         "0.0.0.0", 
         "--port",
-        "8001",
+        str(SERVICE_PORT),
         app=app,
         image=agent_sdk_env.image,
         secrets=agent_sdk_env.secrets,
         workdir=agent_sdk_env.workdir,
-        encrypted_ports=[8001],
-        timeout=60 * 60 * 6, # 6 hours
+        name=SANDBOX_NAME,
+        # tags={"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
+        encrypted_ports=[SERVICE_PORT],
+        volumes={"/workspace": svc_vol},
+        timeout=60 * 60 * 12, # 12 hours
         idle_timeout=60 * 10, # 10 minutes idle shutdown
+        cpu=1.0,              # vCPU
+        memory=2048,          # MB
         verbose=True,
+        # block_network=False,   # Allow all network access
+        # cidr_allowlist=["1.2.3.4/32"], # Allow specific IP ranges
     )
+
+    # Optional: set tags after creation
+    SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
 
     SERVICE_URL = None
     # Give the tunnel a moment to provision; then find the encrypted URL for 8001
     deadline = time.time() + 30
     while time.time() < deadline:
         tunnels = SANDBOX.tunnels()
-        if 8001 in tunnels and getattr(tunnels[8001], "url", None):
-            SERVICE_URL = tunnels[8001].url
+        if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+            SERVICE_URL = tunnels[SERVICE_PORT].url
             break
         time.sleep(0.5)
 
-    if SERVICE_URL:
-        _wait_for_service(SERVICE_URL)
+    if not SERVICE_URL:
+        raise RuntimeError("Failed to start background sandbox or get service URL")
+
+    _wait_for_service(SERVICE_URL)
+    try:
+        SESSIONS[SANDBOX_NAME] = {
+            "id": SANDBOX.object_id,
+            "url": SERVICE_URL,
+            "volume": PERSIST_VOL_NAME,
+            "created_at": int(time.time()),
+            "tags": {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
+            "status": "running",
+        }
+    except Exception as e:
+        pass
+
+    return SANDBOX, SERVICE_URL
+
+
+
+async def _wait_for_service_aio(url: str, timeout: int = 60, path: str = "/health_check") -> None:
+    check_url = f"{url.rstrip('/')}{path}"
+    deadline = anyio.current_time() + timeout
+    async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=2.0)) as client:
+        while anyio.current_time() < deadline:
+            try:
+                r = await client.get(check_url)
+                if r.status_code == 200:
+                    return
+            except Exception:
+                pass
+            await anyio.sleep(1)
+    raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
+
+
+async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
+    global SANDBOX, SERVICE_URL
+
+    if SANDBOX and SERVICE_URL:
         return SANDBOX, SERVICE_URL
 
-    raise RuntimeError("Failed to start background sandbox or get service URL")
+    # Attempt global reuse by name across workers/processes
+    try:
+        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        # Poll tunnels until URL appears (mirrors sync behavior)
+        deadline = anyio.current_time() + 30
+        url = None
+        while anyio.current_time() < deadline:
+            tunnels = await sb.tunnels.aio()
+            if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+                url = tunnels[SERVICE_PORT].url
+                break
+            await anyio.sleep(0.5)
+        if url:
+            SANDBOX, SERVICE_URL = sb, url
+            await _wait_for_service_aio(SERVICE_URL)
+            return SANDBOX, SERVICE_URL
+    except Exception:
+        pass
+
+    # Create with persistent volume
+    svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
+    SANDBOX = await modal.Sandbox.create.aio(
+        "uvicorn", "runner_service:app", "--host", "0.0.0.0", "--port", str(SERVICE_PORT),
+        app=app,
+        image=agent_sdk_env.image,
+        secrets=agent_sdk_env.secrets,
+        workdir=agent_sdk_env.workdir,
+        name=SANDBOX_NAME,
+        # tags={"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
+        encrypted_ports=[SERVICE_PORT],
+        volumes={"/workspace": svc_vol},
+        timeout=60 * 60 * 12,
+        idle_timeout=60 * 10,
+        cpu=1.0,
+        memory=2048,
+        verbose=True,
+    )
+
+    # Optional: set tags after creation
+    await SANDBOX.set_tags.aio({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
 
 
+    # Poll tunnels until URL appears
+    deadline = anyio.current_time() + 30
+    SERVICE_URL = None
+    while anyio.current_time() < deadline:
+        tunnels = await SANDBOX.tunnels.aio()
+        if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+            SERVICE_URL = tunnels[SERVICE_PORT].url
+            break
+        await anyio.sleep(0.5)
+
+    if not SERVICE_URL:
+        raise RuntimeError("Failed to start background sandbox or get service URL")
+
+    await _wait_for_service_aio(SERVICE_URL)
+
+    # Persist session metadata
+    try:
+        SESSIONS[SANDBOX_NAME] = {
+            "id": SANDBOX.object_id,
+            "url": SERVICE_URL,
+            "volume": PERSIST_VOL_NAME,
+            "created_at": int(time.time()),
+            "tags": {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
+            "status": "running",
+        }
+    except Exception: #TODO: Better error handling
+        pass
+
+    return SANDBOX, SERVICE_URL
 
 @app.function(
     image=agent_sdk_env.image,
@@ -209,11 +351,17 @@ async def test_endpoint(request: Request) -> Response:
           `modal serve main.py` (or deploy with `modal deploy main.py`).
     """
     question = await request.json()
-    _, url = get_or_start_background_sandbox()
+    # sb, url = get_or_start_background_sandbox()
+    sb, url = await get_or_start_background_sandbox_aio()
+    # Optional: per-request connect token (verified in sandbox service)
+    headers = {}
+    if ENFORCE_CONNECT_TOKEN:
+        token = sb.create_connect_token(user_metadata={"ip": request.client.host or "unknown"})
+        headers = {"Authorization": f"Bearer {token}"}
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
-            r = await client.post(f"{url.rstrip('/')}/query", json={"question": question})
+            r = await client.post(f"{url.rstrip('/')}/query", json={"question": question}, headers=headers)
             r.raise_for_status()
             data = r.json()
         return Response(content=json.dumps(data), media_type="application/json", status_code=200)
@@ -230,7 +378,17 @@ async def test_endpoint(request: Request) -> Response:
             status_code=502,
         )            
 
-
+# Snapshot function to capture filesystem diffs and store snapshot metadata
+@app.function(image=agent_sdk_env.image, secrets=agent_sdk_env.secrets, timeout=300)
+def snapshot_service() -> dict:
+    sb, _ = get_or_start_background_sandbox()
+    img = sb.snapshot_filesystem()
+    info = {"image_id": img.object_id, "ts": int(time.time()), "base": SANDBOX_NAME}
+    try:
+        SESSIONS[f"{SANDBOX_NAME}-snapshot"] = info
+    except Exception: #TODO: Better error handling
+        pass
+    return info
 
 # For 'modal run' command
 @app.local_entrypoint()

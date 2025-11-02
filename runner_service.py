@@ -18,24 +18,23 @@ Important:
   app is running with `modal serve main.py` (dev) or has been deployed with
   `modal deploy main.py`.
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from claude_agent_sdk import (
     ClaudeSDKClient, 
     ClaudeAgentOptions,
     PermissionResultAllow,
     PermissionResultDeny,
-    ToolPermissionContext,
     PermissionUpdate,
+    ToolPermissionContext,
 )
 from claude_agent_sdk.types import PermissionRuleValue
 from typing import Any, Dict
-from utils.prompts import SYSTEM_PROMPT
 from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
 from utils.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
-from typing import Any
 
 app = FastAPI()
+ENFORCE_CONNECT_TOKEN = False
 
 class QueryBody(BaseModel):
     question: str = DEFAULT_QUESTION
@@ -48,7 +47,7 @@ class QueryBody(BaseModel):
 async def allow_web_only(
     tool_name: str,
     tool_input: Dict[str, Any],
-    # ctx: ToolPermissionContext,
+    ctx: ToolPermissionContext,
 ):
     if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
         return PermissionResultAllow(updated_input=tool_input)
@@ -59,7 +58,6 @@ async def allow_web_only(
 async def allow_web_only_with_updates(
     tool_name: str,
     tool_input: Dict[str, Any],
-    # ctx: ToolPermissionContext,
 ):
     if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
         updates = [
@@ -115,7 +113,7 @@ def health_check():
     return {"ok": True}
 
 @app.post("/query")
-async def query_agent(body: QueryBody):
+async def query_agent(body: QueryBody, request: Request):
     """Run a single agent query and stream back messages as strings.
 
     Args:
@@ -132,6 +130,11 @@ async def query_agent(body: QueryBody):
           -d '{"question":"What is the capital of Canada?"}'
         ```
     """
+    if ENFORCE_CONNECT_TOKEN:
+        # Modal injects this header when a valid connect token is presented
+        if not request.headers.get("X-Verified-User-Data"):
+            raise HTTPException(status_code=401, detail="Missing or invalid connect token")
+
     result: Dict[str, Any] = {"ok": True, "messages": []}
     async with ClaudeSDKClient(options=_options()) as client:
         await client.query(body.question)
