@@ -37,6 +37,8 @@ import json
 import httpx
 import socket
 import anyio
+import logging
+from modal import exception as modal_exc
 
 app = modal.App("test-sandbox")
 
@@ -196,8 +198,14 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             "tags": {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
             "status": "running",
         }
-    except Exception as e:
-        pass
+    except modal_exc.Error as e:
+        logging.getLogger(__name__).warning(
+            "Failed to persist session metadata to Modal Dict: %s", e
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Unexpected error persisting session metadata"
+        )
 
     return SANDBOX, SERVICE_URL
 
@@ -399,8 +407,17 @@ def terminate_service_sandbox() -> dict:
         sb.terminate()
         SANDBOX = None  # Clear global so a new one will be created on next request
         return {"ok": True, "message": "Sandbox terminated, writes flushed to volume"}
-    except Exception as e: #TODO: Better error handling
-        return {"ok": False, "error": str(e)}
+    except modal_exc.NotFoundError as e:
+        return {"ok": False, "error": "Sandbox not found", "detail": str(e), "type": "NotFoundError"}
+    except modal_exc.SandboxTerminatedError:
+        return {"ok": False, "error": "Sandbox already terminated", "type": "SandboxTerminatedError"}
+    except modal_exc.TimeoutError as e:
+        return {"ok": False, "error": "Sandbox termination timed out", "type": e.__class__.__name__}
+    except modal_exc.Error as e:
+        return {"ok": False, "error": str(e), "type": e.__class__.__name__}
+    except Exception:
+        logging.getLogger(__name__).exception("Unexpected error terminating sandbox")
+        return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 
 # Snapshot function to capture filesystem diffs and store snapshot metadata
@@ -411,8 +428,14 @@ def snapshot_service() -> dict:
     info = {"image_id": img.object_id, "ts": int(time.time()), "base": SANDBOX_NAME}
     try:
         SESSIONS[f"{SANDBOX_NAME}-snapshot"] = info
-    except Exception: #TODO: Better error handling
-        pass
+    except modal_exc.Error as e:
+        logging.getLogger(__name__).warning(
+            "Failed to persist snapshot metadata to Modal Dict: %s", e
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Unexpected error persisting snapshot metadata"
+        )
     return info
 
 # For 'modal run' command
