@@ -160,7 +160,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         name=SANDBOX_NAME,
         # tags={"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
         encrypted_ports=[SERVICE_PORT],
-        volumes={"/workspace": svc_vol},
+        volumes={"/data": svc_vol},
         timeout=60 * 60 * 12, # 12 hours
         idle_timeout=60 * 10, # 10 minutes idle shutdown
         cpu=1.0,              # vCPU
@@ -254,7 +254,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
         name=SANDBOX_NAME,
         # tags={"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
         encrypted_ports=[SERVICE_PORT],
-        volumes={"/workspace": svc_vol},
+        volumes={"/data": svc_vol},
         timeout=60 * 60 * 12,
         idle_timeout=60 * 10,
         cpu=1.0,
@@ -299,6 +299,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
 @app.function(
     image=agent_sdk_env.image,
     secrets=agent_sdk_env.secrets,
+    volumes={"/data": modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)},
 )
 # You can also turn one into an HTTP endpoint if needed
 # Requires FastAPI to be installed in the sandbox image
@@ -321,6 +322,7 @@ def run_agent_remote(question: str =  DEFAULT_QUESTION) -> None:
     image=agent_sdk_env.image,
     secrets=agent_sdk_env.secrets,
     timeout=300,
+    volumes={"/data": modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)},
     # schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
 )
 @modal.fastapi_endpoint(method="POST")
@@ -356,8 +358,8 @@ async def test_endpoint(request: Request) -> Response:
     # Optional: per-request connect token (verified in sandbox service)
     headers = {}
     if ENFORCE_CONNECT_TOKEN:
-        token = sb.create_connect_token(user_metadata={"ip": request.client.host or "unknown"})
-        headers = {"Authorization": f"Bearer {token}"}
+        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+        headers = {"Authorization": f"Bearer {creds.token}"}
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
@@ -377,6 +379,29 @@ async def test_endpoint(request: Request) -> Response:
             media_type="application/json",
             status_code=502,
         )            
+
+@app.function(
+    image=agent_sdk_env.image,
+    secrets=agent_sdk_env.secrets,
+)
+def terminate_service_sandbox() -> dict:
+    """Terminate the background sandbox to flush writes to the volume.
+    
+    Sandbox writes are only synced to the volume when the sandbox terminates.
+    Call this function after the agent has created files to ensure they are persisted.
+    
+    Returns:
+        Dict with termination status
+    """
+    global SANDBOX
+    try:
+        sb, _ = get_or_start_background_sandbox()
+        sb.terminate()
+        SANDBOX = None  # Clear global so a new one will be created on next request
+        return {"ok": True, "message": "Sandbox terminated, writes flushed to volume"}
+    except Exception as e: #TODO: Better error handling
+        return {"ok": False, "error": str(e)}
+
 
 # Snapshot function to capture filesystem diffs and store snapshot metadata
 @app.function(image=agent_sdk_env.image, secrets=agent_sdk_env.secrets, timeout=300)

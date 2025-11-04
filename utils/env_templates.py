@@ -42,8 +42,9 @@ def _base_anthropic_sdk_image() -> modal.Image:
             "apt-get install -y nodejs",
             "npm install -g @anthropic-ai/claude-code", # Needed for Agent SDK
         )
+        .env({"AGENT_FS_ROOT": "/data"}) # image-level default write root for agent file system
         .workdir("/root/app") # Declare the working directory for the sandbox.
-        .add_local_dir(".", remote_path="/root/app")
+        .add_local_dir(".", remote_path="/root/app")      
     )
 
 
