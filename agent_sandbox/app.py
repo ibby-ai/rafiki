@@ -31,7 +31,7 @@ from agent_sandbox.schemas import QueryBody
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-import urllib.request
+import urllib.request, urllib.error
 import time
 import json
 import httpx
