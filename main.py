@@ -3,8 +3,7 @@ Entry-point and Modal function definitions for running the agent in a sandboxed
 environment and exposing lightweight HTTP endpoints.
 
 Quickstart (CLI):
-- run local_entrypoint: `modal run main.py`
-- run sandbox_controller: `modal run main.py::sandbox_controller --question "..."`
+- run local_entrypoint: `modal run main.py` (runs the agent once in a short-lived Modal function)
 - run run_agent_remote: `modal run main.py::run_agent_remote --question "..."`
 - keep dev deployment running: `modal serve main.py`
 - deploy to production: `modal deploy main.py`
@@ -38,6 +37,8 @@ import httpx
 import socket
 import anyio
 import logging
+from utils.schemas import QueryBody
+from starlette.responses import StreamingResponse
 from modal import exception as modal_exc
 
 app = modal.App("test-sandbox")
@@ -52,8 +53,84 @@ web_app.add_middleware(
     allow_headers=["*"],
 )
 
-
 agent_sdk_env = get_env_template("base-anthropic-sdk")
+
+@app.function(image=agent_sdk_env.image, secrets=agent_sdk_env.secrets)
+@modal.asgi_app()
+def http_app():
+    return web_app
+
+@web_app.get("/health")
+async def health():
+    return {"ok": True}
+
+@web_app.post("/query")
+async def query_proxy(request: Request, body: QueryBody):
+    # Use async getter to avoid blocking event loop
+    sb, url = await get_or_start_background_sandbox_aio()
+
+    # Optional: per-request connect token (verified in sandbox service)
+    headers = {}
+    if ENFORCE_CONNECT_TOKEN:
+        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+        r = await client.post(
+            f"{url.rstrip('/')}/query", 
+            json=body.model_dump(), 
+            headers=headers,
+            timeout=httpx.Timeout(120.0, connect=30.0)
+        )
+        r.raise_for_status()
+        return r.json()
+
+@web_app.post("/query_stream")
+async def query_stream(request: Request, body: QueryBody):
+    sb, url = await get_or_start_background_sandbox_aio()
+    
+    headers = {}
+    if ENFORCE_CONNECT_TOKEN:
+        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
+    async def sse_proxy():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST", 
+                f"{url.rstrip('/')}/query_stream", 
+                json=body.model_dump(), 
+                headers=headers
+            ) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+    return StreamingResponse(
+        sse_proxy(), 
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"}
+    )
+
+# Add endpoints to fetch last N logs and current tunnel URL, plus a lightweight ping proxy
+@web_app.get("/service_info")
+async def service_info():
+    sb, url = await get_or_start_background_sandbox_aio()
+    return {
+        "url": url,
+        "sandbox_id": sb.object_id
+    }
+
+
+@app.function(image=agent_sdk_env.image, secrets=agent_sdk_env.secrets)
+async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
+    sb, _ = await get_or_start_background_sandbox_aio()
+    from collections import deque
+    buf = deque(maxlen=n)
+    async with anyio.move_on_after(timeout):
+        async for msg in sb.stdout.aio():
+            for line in str(msg).splitlines():
+                buf.append(line)
+    return list(buf)
 
 # Persistent registry for sandbox metadata (survives sandbox restarts)
 SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
@@ -84,14 +161,30 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
     """
     check_url = f"{url.rstrip('/')}{path}"
     start = time.time()
+    delay = 0.5
     while time.time() - start < timeout:
         try:
             with urllib.request.urlopen(check_url, timeout=1) as resp:
                 if resp.status == 200:
                     return
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
-            time.sleep(1)
+            time.sleep(delay)
+            delay = min(delay * 1.5, 3.0)
     raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
+
+
+# A cron cleanup that reaps stale records in SESSIONS and restarts a dead sandbox
+@app.function(image=agent_sdk_env.image, secrets=agent_sdk_env.secrets, schedule=modal.Cron("*/2 * * * *"))
+def cleanup_sessions():
+    try:
+        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        _ = sb.tunnels()  # Will raise if gone
+        SESSIONS[SANDBOX_NAME] = {**SESSIONS.get(SANDBOX_NAME, {}), "status": "running"}
+    except modal_exc.NotFoundError:
+        SESSIONS[SANDBOX_NAME] = {"status": "missing"}
+    except Exception:
+        logging.getLogger(__name__).exception("Unexpected error cleaning up sessions")
+
 
 def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
     """Return a running background sandbox and its encrypted service URL.
@@ -326,67 +419,67 @@ def run_agent_remote(question: str =  DEFAULT_QUESTION) -> None:
     anyio.run(run_agent, question)
 
 
-@app.function(
-    image=agent_sdk_env.image,
-    secrets=agent_sdk_env.secrets,
-    timeout=300,
-    volumes={"/data": modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)},
-    # schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
-)
-@modal.fastapi_endpoint(method="POST")
-async def test_endpoint(request: Request) -> Response:
-    """HTTP endpoint that proxies a query to the background sandbox service.
+# @app.function(
+#     image=agent_sdk_env.image,
+#     secrets=agent_sdk_env.secrets,
+#     timeout=300,
+#     volumes={"/data": modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)},
+#     # schedule=modal.Cron("*/10 * * * *"), # Run every 10 minutes
+# )
+# @modal.fastapi_endpoint(method="POST")
+# async def test_endpoint(request: Request) -> Response:
+#     """HTTP endpoint that proxies a query to the background sandbox service.
 
-    The background service is a FastAPI app defined in `runner_service.py` and
-    hosted inside a long-lived `modal.Sandbox`. We resolve or start that
-    sandbox, then POST the incoming JSON body to `/query` and stream back the
-    result.
+#     The background service is a FastAPI app defined in `runner_service.py` and
+#     hosted inside a long-lived `modal.Sandbox`. We resolve or start that
+#     sandbox, then POST the incoming JSON body to `/query` and stream back the
+#     result.
 
-    Returns:
-        A JSON `Response` with either the agent result or an error status.
+#     Returns:
+#         A JSON `Response` with either the agent result or an error status.
 
-    CURL example (dev deployment):
+#     CURL example (dev deployment):
 
-        ```bash
-        curl -X POST 'https://<org>--test-sandbox-test-endpoint-dev.modal.run' \
-          -H 'Content-Type: application/json' \
-          -d '"What is the capital of Canada?"'
-        ```
+#         ```bash
+#         curl -X POST 'https://<org>--test-sandbox-test-endpoint-dev.modal.run' \
+#           -H 'Content-Type: application/json' \
+#           -d '"What is the capital of Canada?"'
+#         ```
 
-    Notes:
-        - The request body for this endpoint should be a JSON string (not an
-          object). The function wraps it as `{ "question": <string> }` for the
-          internal service at `/query`.
-        - Before invoking the curl example, start the dev server with
-          `modal serve main.py` (or deploy with `modal deploy main.py`).
-    """
-    question = await request.json()
-    # sb, url = get_or_start_background_sandbox()
-    sb, url = await get_or_start_background_sandbox_aio()
-    # Optional: per-request connect token (verified in sandbox service)
-    headers = {}
-    if ENFORCE_CONNECT_TOKEN:
-        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
-        headers = {"Authorization": f"Bearer {creds.token}"}
+#     Notes:
+#         - The request body for this endpoint should be a JSON string (not an
+#           object). The function wraps it as `{ "question": <string> }` for the
+#           internal service at `/query`.
+#         - Before invoking the curl example, start the dev server with
+#           `modal serve main.py` (or deploy with `modal deploy main.py`).
+#     """
+#     question = await request.json()
+#     # sb, url = get_or_start_background_sandbox()
+#     sb, url = await get_or_start_background_sandbox_aio()
+#     # Optional: per-request connect token (verified in sandbox service)
+#     headers = {}
+#     if ENFORCE_CONNECT_TOKEN:
+#         creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+#         headers = {"Authorization": f"Bearer {creds.token}"}
 
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
-            r = await client.post(f"{url.rstrip('/')}/query", json={"question": question}, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-        return Response(content=json.dumps(data), media_type="application/json", status_code=200)
-    except httpx.TimeoutException:
-        return Response(
-            content=json.dumps({"error": "Upstream timed out contacting the sandbox service"}),
-            media_type="application/json",
-            status_code=504,
-        )
-    except httpx.HTTPError as e:
-        return Response(
-            content=json.dumps({"error": f"Upstream HTTP error: {str(e)}"}),
-            media_type="application/json",
-            status_code=502,
-        )            
+#     try:
+#         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+#             r = await client.post(f"{url.rstrip('/')}/query", json={"question": question}, headers=headers)
+#             r.raise_for_status()
+#             data = r.json()
+#         return Response(content=json.dumps(data), media_type="application/json", status_code=200)
+#     except httpx.TimeoutException:
+#         return Response(
+#             content=json.dumps({"error": "Upstream timed out contacting the sandbox service"}),
+#             media_type="application/json",
+#             status_code=504,
+#         )
+#     except httpx.HTTPError as e:
+#         return Response(
+#             content=json.dumps({"error": f"Upstream HTTP error: {str(e)}"}),
+#             media_type="application/json",
+#             status_code=502,
+#         )            
 
 @app.function(
     image=agent_sdk_env.image,

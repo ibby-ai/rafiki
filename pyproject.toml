@@ -1,11 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agent-sandbox-starter"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "claude-agent-sdk>=0.1.4",
     "fastapi>=0.119.1",
     "llm-auto-context",
     "modal>=1.2.1",
 ]
+
+[tool.setuptools]
+packages = ["utils"]

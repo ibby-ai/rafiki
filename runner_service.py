@@ -19,7 +19,7 @@ Important:
   `modal deploy main.py`.
 """
 from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
+from utils.schemas import QueryBody
 from claude_agent_sdk import (
     ClaudeSDKClient, 
     ClaudeAgentOptions,
@@ -28,21 +28,14 @@ from claude_agent_sdk import (
     PermissionUpdate,
     ToolPermissionContext,
 )
+from starlette.responses import StreamingResponse # Import through FastAPI?
 from claude_agent_sdk.types import PermissionRuleValue
 from typing import Any, Dict
 from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
-from utils.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from utils.prompts import SYSTEM_PROMPT
 
 app = FastAPI()
 ENFORCE_CONNECT_TOKEN = False
-
-class QueryBody(BaseModel):
-    question: str = DEFAULT_QUESTION
-    """Request payload for `/query`.
-
-    Attributes:
-        question: Natural-language prompt to send to the agent.
-    """
 
 async def allow_web_only(
     tool_name: str,
@@ -142,3 +135,22 @@ async def query_agent(body: QueryBody, request: Request):
             result["messages"].append(str(msg))
     return result
 
+# runner_service.py additions/edits
+
+
+@app.post("/query_stream")
+async def query_agent_stream(body: QueryBody, request: Request):
+    if ENFORCE_CONNECT_TOKEN:
+        if not request.headers.get("X-Verified-User-Data"):
+            raise HTTPException(status_code=401, detail="Missing or invalid connect token")
+
+    async def sse():
+        async with ClaudeSDKClient(options=_options()) as client:
+            await client.query(body.question)
+            async for msg in client.receive_response():
+                # Emit each message chunk as an SSE event
+                yield f"data: {str(msg)}\n\n"
+        # Signal completion (optional)
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(sse(), media_type="text/event-stream")
