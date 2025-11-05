@@ -1,25 +1,26 @@
 """
 FastAPI microservice that runs inside a long-lived Modal Sandbox.
 
-This service exposes two endpoints:
+This service exposes endpoints:
 - `GET /health_check` used by the controller to know when the service is ready.
-- `POST /query` which streams a response from the Claude Agent SDK.
+- `POST /query` which returns a response from the Claude Agent SDK.
+- `POST /query_stream` which streams a response from the Claude Agent SDK.
 
-This file is started inside the sandbox via `uvicorn runner_service:app` (see
-`main.get_or_start_background_sandbox`). The sandbox is created with an
-encrypted port (8001), and `main.test_endpoint` proxies to `/query` at that
-URL.
+This file is started inside the sandbox via `uvicorn agent_sandbox.controllers.controller:app`
+(see `agent_sandbox.app.get_or_start_background_sandbox`). The sandbox is created with an
+encrypted port (8001), and `agent_sandbox.app.http_app` proxies to these endpoints.
 
 See Modal docs for details about `modal.Sandbox`, encrypted ports, and tunnel
 discovery.
 
 Important:
-- To reach this service from outside (via `main.test_endpoint`), make sure the
-  app is running with `modal serve main.py` (dev) or has been deployed with
-  `modal deploy main.py`.
+- To reach this service from outside (via `agent_sandbox.app.http_app`), make sure the
+  app is running with `modal serve -m agent_sandbox.app` (dev) or has been deployed with
+  `modal deploy -m agent_sandbox.deploy`.
 """
+
 from fastapi import FastAPI, Request, HTTPException
-from utils.schemas import QueryBody
+from agent_sandbox.schemas import QueryBody
 from claude_agent_sdk import (
     ClaudeSDKClient, 
     ClaudeAgentOptions,
@@ -28,30 +29,50 @@ from claude_agent_sdk import (
     PermissionUpdate,
     ToolPermissionContext,
 )
-from starlette.responses import StreamingResponse # Import through FastAPI?
+from starlette.responses import StreamingResponse
 from claude_agent_sdk.types import PermissionRuleValue
 from typing import Any, Dict
-from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
-from utils.prompts import SYSTEM_PROMPT
+from agent_sandbox.tools import get_mcp_servers, get_allowed_tools
+from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 
 app = FastAPI()
 ENFORCE_CONNECT_TOKEN = False
+
 
 async def allow_web_only(
     tool_name: str,
     tool_input: Dict[str, Any],
     ctx: ToolPermissionContext,
 ):
+    """Permission handler that allows only web-related tools.
+    
+    Args:
+        tool_name: Name of the tool being requested.
+        tool_input: Input parameters for the tool.
+        ctx: Permission context.
+        
+    Returns:
+        PermissionResultAllow if tool is web-related, otherwise PermissionResultDeny.
+    """
     if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
         return PermissionResultAllow(updated_input=tool_input)
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 
-#  Not being used yet. Experimenting with different permission modes.
+# Not being used yet. Experimenting with different permission modes.
 async def allow_web_only_with_updates(
     tool_name: str,
     tool_input: Dict[str, Any],
 ):
+    """Permission handler with dynamic permission updates.
+    
+    Args:
+        tool_name: Name of the tool being requested.
+        tool_input: Input parameters for the tool.
+        
+    Returns:
+        PermissionResultAllow with permission updates if web-related, otherwise PermissionResultDeny.
+    """
     if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
         updates = [
             PermissionUpdate(
@@ -70,7 +91,7 @@ async def allow_web_only_with_updates(
         )
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
-# Use the custom tools with Claude
+
 def _options() -> ClaudeAgentOptions:
     """Build default `ClaudeAgentOptions` used by this service.
 
@@ -80,8 +101,8 @@ def _options() -> ClaudeAgentOptions:
     """
     return ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers=MCP_SERVERS,
-        allowed_tools=ALLOWED_TOOLS,
+        mcp_servers=get_mcp_servers(),
+        allowed_tools=get_allowed_tools(),
         # Running in a sandbox, so we can bypass permissions
         # Making the agent truly autonomous
         #permission_mode="bypassPermissions" # Not allowed when have root access
@@ -104,6 +125,7 @@ def health_check():
         ```
     """
     return {"ok": True}
+
 
 @app.post("/query")
 async def query_agent(body: QueryBody, request: Request):
@@ -135,11 +157,18 @@ async def query_agent(body: QueryBody, request: Request):
             result["messages"].append(str(msg))
     return result
 
-# runner_service.py additions/edits
-
 
 @app.post("/query_stream")
 async def query_agent_stream(body: QueryBody, request: Request):
+    """Stream agent responses as Server-Sent Events (SSE).
+
+    Args:
+        body: `QueryBody` containing the question to ask the agent.
+        request: FastAPI request object.
+
+    Returns:
+        StreamingResponse with text/event-stream content type.
+    """
     if ENFORCE_CONNECT_TOKEN:
         if not request.headers.get("X-Verified-User-Data"):
             raise HTTPException(status_code=401, detail="Missing or invalid connect token")
@@ -154,3 +183,4 @@ async def query_agent_stream(body: QueryBody, request: Request):
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
+

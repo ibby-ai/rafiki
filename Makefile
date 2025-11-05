@@ -1,18 +1,26 @@
 # Makefile helpers for serving the Modal app and testing with curl.
-
+#
 # Usage:
 #   Terminal 1: make serve
 #   Terminal 2 (question input): make curl Q='What is 2+2?'
-
-# Set this once to your dev endpoint URL (from `modal serve main.py`).
+#
+# Set this once to your dev endpoint URL (from `modal serve -m agent_sandbox.app`).
 # Example: https://your-org--test-sandbox-http-app-dev.modal.run
 DEV_URL ?= https://saidiibrahim--test-sandbox-http-app-dev.modal.run
 
-.PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs
+.PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs run deploy lint typecheck test format
 
 serve:
 	@echo "Serving Modal app..."; \
-	modal serve main.py
+	modal serve -m agent_sandbox.app
+
+run:
+	@echo "Running agent locally..."; \
+	modal run -m agent_sandbox.app
+
+deploy:
+	@echo "Deploying to production..."; \
+	modal deploy -m agent_sandbox.deploy
 
 dev-url:
 	@echo $(DEV_URL)
@@ -38,13 +46,30 @@ info:
 	curl -sS '$(DEV_URL)/service_info'
 
 terminate:
-	modal run main.py::terminate_service_sandbox
+	modal run -m agent_sandbox.app::terminate_service_sandbox
 
 snapshot:
-	modal run main.py::snapshot_service
+	modal run -m agent_sandbox.app::snapshot_service
 
 tail-logs:
-	modal run main.py::tail_logs
+	modal run -m agent_sandbox.app::tail_logs
+
+# Development and testing
+lint:
+	@echo "Running linter..."; \
+	ruff check agent_sandbox/ tests/
+
+typecheck:
+	@echo "Running type checker..."; \
+	mypy agent_sandbox/ tests/
+
+test:
+	@echo "Running tests..."; \
+	pytest tests/ -v
+
+format:
+	@echo "Formatting code..."; \
+	ruff format agent_sandbox/ tests/
 
 # Back-compat aliases
 ask: curl

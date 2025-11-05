@@ -13,20 +13,57 @@ A starter template for running a Claude agent in a persistent Modal Sandbox with
 - **Modal CLI**: `pip install modal` and `modal setup`
 - **Anthropic API key**: store in a Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
 
+## Project Structure
+
+```
+agent_sandbox/
+
+├── __init__.py              # Package initialization & module registration
+├── app.py                   # Main Modal app definition
+├── deploy.py                # Deployment composition
+│
+├── config/                  # Configuration management
+│   └── settings.py         # Pydantic Settings for env vars & Modal secrets
+│
+├── agents/                  # Agent execution logic
+│   └── loop.py             # Single-shot agent interaction runner
+│
+├── controllers/            # FastAPI service for background sandbox
+│   └── controller.py       # HTTP endpoints (/query, /query_stream, /health_check)
+│
+├── prompts/                # Prompt definitions
+│   └── prompts.py          # SYSTEM_PROMPT and DEFAULT_QUESTION
+│
+├── schemas/                 # Pydantic models
+│   ├── base.py             # Base schema with validation config
+│   └── sandbox.py          # QueryBody and sandbox-specific schemas
+│
+├── sandbox/                 # Sandbox utilities
+│   └── helpers.py          # Volume operations (get_session_volume, upload_paths_to_volume)
+│
+├── services/                # Cross-cutting services
+│   └── logging.py          # Logging configuration utilities
+│
+└── tools/                   # MCP tool system
+    ├── registry.py          # ToolRegistry class & MCP server management
+    ├── calculate_tool.py    # Example tool implementation
+    └── __init__.py          # Exports get_mcp_servers, get_allowed_tools
+```
+
 ## Quickstart
 
 ### Development Mode
 
-- **Run locally (spawns a short-lived Sandbox and executes `runner.py`)**
+- **Run locally (spawns a short-lived Sandbox and executes agent loop)**
 
 ```bash
-modal run main.py
+modal run -m agent_sandbox.app
 ```
 
 - **Run the agent as a remote function (one-off execution)**
 
 ```bash
-modal run main.py::run_agent_remote --question "Explain REST vs gRPC"
+modal run -m agent_sandbox.app::run_agent_remote --question "Explain REST vs gRPC"
 ```
 
 ### Production Mode (Persistent Service)
@@ -34,7 +71,7 @@ modal run main.py::run_agent_remote --question "Explain REST vs gRPC"
 - **Start dev server with hot-reload (recommended for development)**
 
 ```bash
-modal serve main.py
+modal serve -m agent_sandbox.app
 ```
 
 Or use the Makefile:
@@ -46,15 +83,15 @@ make serve
 Once the server is running, you'll get a dev endpoint URL like:
 
 ```text
-https://<org>--test-sandbox-test-endpoint-dev.modal.run
+https://<org>--test-sandbox-http-app-dev.modal.run
 ```
 
 - **Test the HTTP endpoint with curl**
 
 ```bash
-curl -X POST 'https://<org>--test-sandbox-test-endpoint-dev.modal.run' \
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
-  -d '"What is the capital of Canada?"'
+  -d '{"question":"What is the capital of Canada?"}'
 ```
 
 Or use the Makefile (set `DEV_URL` in Makefile first):
@@ -66,7 +103,7 @@ make curl Q="What is the capital of Canada?"
 - **Deploy to production**
 
 ```bash
-modal deploy main.py
+modal deploy -m agent_sandbox.deploy
 ```
 
 ### Service Management
@@ -74,32 +111,32 @@ modal deploy main.py
 - **Terminate the background sandbox** (flushes writes to persistent volume)
 
 ```bash
-modal run main.py::terminate_service_sandbox
+modal run -m agent_sandbox.app::terminate_service_sandbox
 ```
 
 - **Create a filesystem snapshot** (captures current state)
 
 ```bash
-modal run main.py::snapshot_service
+modal run -m agent_sandbox.app::snapshot_service
 ```
 
 ## Architecture
 
 This project uses a **persistent sandbox service pattern**:
 
-1. **Background Service**: A long-lived `modal.Sandbox` runs a FastAPI microservice (`runner_service.py`) that handles agent queries
-2. **HTTP Endpoint**: `test_endpoint` in `main.py` proxies requests to the background service
+1. **Background Service**: A long-lived `modal.Sandbox` runs a FastAPI microservice (`agent_sandbox.controllers.controller`) that handles agent queries
+2. **HTTP Endpoint**: `http_app` in `agent_sandbox.app` proxies requests to the background service
 3. **Volume Persistence**: Files written to `/data` are persisted across sandbox restarts
 4. **Low Latency**: The background service avoids cold-start delays while keeping the HTTP endpoint responsive
 
-### Key Files
+### Key Modules
 
-- `main.py`: Defines the Modal `App`, persistent sandbox management, and HTTP endpoints
-- `runner_service.py`: FastAPI microservice running inside the sandbox with `/health_check` and `/query` endpoints
-- `runner.py`: Standalone agent runner (used by `run_agent_remote` for one-off executions)
-- `utils/env_templates.py`: Builds the Modal image, sets workdir, and attaches required secrets
-- `utils/tools.py`: MCP tool servers and allowed tools list (WebSearch, WebFetch, Read, Write). Obtained from [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python)
-- `utils/prompts.py`: System prompt and default question
+- `agent_sandbox/app.py`: Defines the Modal `App`, persistent sandbox management, and HTTP endpoints
+- `agent_sandbox/controllers/controller.py`: FastAPI microservice running inside the sandbox with `/health_check`, `/query`, and `/query_stream` endpoints
+- `agent_sandbox/agents/loop.py`: Standalone agent runner (used by `run_agent_remote` for one-off executions)
+- `agent_sandbox/config/settings.py`: Pydantic Settings for configuration and Modal secrets management
+- `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations (WebSearch, WebFetch, Read, Write). Obtained from [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python)
+- `agent_sandbox/prompts/prompts.py`: System prompt and default question
 
 ### Persistent Storage
 
@@ -138,11 +175,11 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
 
 ### Customization
 
-- **Change the system prompt**: edit `utils/prompts.py`
-- **Add or modify tools**: edit `utils/tools.py` (update tool list and allowed tools as needed)
-- **Adjust runtime image/secrets**: edit `utils/env_templates.py`
-- **Modify service behavior**: edit `runner_service.py`
-- **Change sandbox settings**: edit constants in `main.py` (timeouts, memory, CPU, etc.)
+- **Change the system prompt**: edit `agent_sandbox/prompts/prompts.py`
+- **Add or modify tools**: edit `agent_sandbox/tools/` (add new tool files and register in `registry.py`)
+- **Adjust runtime configuration**: edit `agent_sandbox/config/settings.py` for settings, or `agent_sandbox/app.py` for image configuration
+- **Modify service behavior**: edit `agent_sandbox/controllers/controller.py`
+- **Change sandbox settings**: edit `agent_sandbox/config/settings.py` (timeouts, memory, CPU, etc.)
 
 ## Troubleshooting
 
@@ -155,7 +192,7 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
   ```
 
 - **Volume persistence**: Remember to write files to `/data`, not `/tmp` or other ephemeral locations
-- **Sandbox timeout**: The background service has a 12-hour timeout and 10-minute idle timeout (configurable in `main.py`)
+- **Sandbox timeout**: The background service has a 12-hour timeout and 10-minute idle timeout (configurable in `agent_sandbox/config/settings.py`)
 - **Service URL discovery**: The endpoint waits up to 30 seconds for the encrypted tunnel URL to be available
 
 ## Additional Resources

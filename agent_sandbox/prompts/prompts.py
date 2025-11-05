@@ -13,3 +13,4 @@ SYSTEM_PROMPT = (
 )
 
 DEFAULT_QUESTION = "What is the capital of France?"
+
