@@ -1,34 +1,80 @@
 # Makefile helpers for serving the Modal app and testing with curl.
-
+#
 # Usage:
 #   Terminal 1: make serve
-#   Terminal 2 (question input): make curl "What is 2+2?"
+#   Terminal 2 (question input): make curl Q='What is 2+2?'
+#
+# Set this once to your dev endpoint URL (from `modal serve -m agent_sandbox.app`).
+# Example: https://your-org--test-sandbox-http-app-dev.modal.run
+DEV_URL ?= https://saidiibrahim--test-sandbox-http-app-dev.modal.run
 
-# Set this once to your dev endpoint URL (from `modal serve main.py`).
-# Example: https://your-org--test-sandbox-test-endpoint-dev.modal.run
-DEV_URL ?= https://saidiibrahim--test-sandbox-test-endpoint-dev.modal.run
-
-.PHONY: serve dev-url curl curl-q ask
+.PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs run deploy lint typecheck test format
 
 serve:
 	@echo "Serving Modal app..."; \
-	modal serve main.py
+	modal serve -m agent_sandbox.app
+
+run:
+	@echo "Running agent locally..."; \
+	modal run -m agent_sandbox.app
+
+deploy:
+	@echo "Deploying to production..."; \
+	modal deploy -m agent_sandbox.deploy
 
 dev-url:
 	@echo $(DEV_URL)
 
+# Ask a question (POST /query with JSON object)
 curl:
-	@test -n "$(Q)" || { echo "Missing Q. Usage: make curl Q='Your question'" ; exit 1; } ; \
-	curl -X POST '$(DEV_URL)' \
+	@test -n "$(Q)" || { echo "Missing Q. Usage: make curl Q='Your question'"; exit 1; } ; \
+	curl -X POST '$(DEV_URL)/query' \
 	  -H 'Content-Type: application/json' \
-	  -d '"$(Q)"'
+	  -d '{"question":"$(Q)"}'
+
+# Stream a response (POST /query_stream)
+stream:
+	@test -n "$(Q)" || { echo "Missing Q. Usage: make stream Q='Your question'"; exit 1; } ; \
+	curl -N -X POST '$(DEV_URL)/query_stream' \
+	  -H 'Content-Type: application/json' \
+	  -d '{"question":"$(Q)"}'
+
+health:
+	curl -sS '$(DEV_URL)/health'
+
+info:
+	curl -sS '$(DEV_URL)/service_info'
+
+terminate:
+	modal run -m agent_sandbox.app::terminate_service_sandbox
+
+snapshot:
+	modal run -m agent_sandbox.app::snapshot_service
+
+tail-logs:
+	modal run -m agent_sandbox.app::tail_logs
+
+# Development and testing
+lint:
+	@echo "Running linter..."; \
+	ruff check agent_sandbox/ tests/
+
+typecheck:
+	@echo "Running type checker..."; \
+	mypy agent_sandbox/ tests/
+
+test:
+	@echo "Running tests..."; \
+	pytest tests/ -v
+
+format:
+	@echo "Formatting code..."; \
+	ruff format agent_sandbox/ tests/
 
 # Back-compat aliases
 ask: curl
 curl-q: curl
 
-# Prevent Make from trying to execute the question as a target
+# Prevent Make from trying to execute stray words as targets
 %:
 	@:
-
-

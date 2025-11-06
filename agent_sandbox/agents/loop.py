@@ -2,9 +2,8 @@
 Utilities to run a single-shot agent interaction (no web server).
 
 This module is invoked in two ways:
-- From a Modal sandbox via `sb.exec("python", "runner.py", ...)` (see
-  `main.sandbox_controller` and `main.main`).
-- Directly as a script (`python runner.py --question ...`) for local testing.
+- From a Modal sandbox via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
+- Directly as a script (`python -m agent_sandbox.agents.loop --question ...`) for local testing.
 
 It constructs `ClaudeAgentOptions` using our local MCP tool server(s) and
 system prompt, then issues a query and prints streamed responses.
@@ -13,12 +12,11 @@ system prompt, then issues a query and prints streamed responses.
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 import anyio
 from typing import Any, Dict, List
-from utils.prompts import SYSTEM_PROMPT
-from utils.tools import MCP_SERVERS, ALLOWED_TOOLS
-from utils.prompts import DEFAULT_QUESTION
+from agent_sandbox.prompts.prompts import SYSTEM_PROMPT, DEFAULT_QUESTION
+from agent_sandbox.tools import get_mcp_servers, get_allowed_tools
 import argparse
 
-# Use the custom tools with Claude
+
 def build_agent_options(
     mcp_servers: Dict[str, Any],
     allowed_tools: List[str],
@@ -35,17 +33,17 @@ def build_agent_options(
     Returns:
         A configured `ClaudeAgentOptions`.
 
-    See also: Modal docs for sandbox execution and file mounting; tools are
-    defined in `utils/tools.py` and the environment is configured in
-    `utils/env_templates.py`.
+    See also:
+        Modal docs for sandbox execution and file mounting; tools are
+        defined in `agent_sandbox.tools` and the environment is configured in
+        `agent_sandbox.config.settings`.
     """
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-)
+    )
 
-options = build_agent_options(MCP_SERVERS, ALLOWED_TOOLS, SYSTEM_PROMPT)
 
 async def run_agent(question: str = DEFAULT_QUESTION):
     """Execute a single agent query and print the streamed response.
@@ -53,6 +51,12 @@ async def run_agent(question: str = DEFAULT_QUESTION):
     Args:
         question: Natural-language input to pass to the agent.
     """
+    options = build_agent_options(
+        get_mcp_servers(), 
+        get_allowed_tools(), 
+        SYSTEM_PROMPT
+    )
+    
     async with ClaudeSDKClient(options=options) as client:
         await client.query(question)
 
@@ -60,8 +64,10 @@ async def run_agent(question: str = DEFAULT_QUESTION):
         async for msg in client.receive_response():
             print(msg)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--question", type=str, default=DEFAULT_QUESTION)
     args = parser.parse_args()
     anyio.run(run_agent, args.question)
+

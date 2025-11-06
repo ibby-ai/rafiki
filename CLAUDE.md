@@ -26,31 +26,33 @@ Before working with this codebase:
 ### Development & Testing
 
 ```bash
-# Run agent locally (spawns sandbox and executes runner.py)
-modal run main.py
-
-# Ask custom question via sandbox controller
-modal run main.py::sandbox_controller --question "Your question here"
+# Run agent locally (spawns sandbox and executes agent loop)
+modal run -m agent_sandbox.app
 
 # Run agent as remote function
-modal run main.py::run_agent_remote --question "Your question here"
+modal run -m agent_sandbox.app::run_agent_remote --question "Your question here"
 
 # Start dev server with hot reload (enables HTTP endpoints)
-modal serve main.py
+modal serve -m agent_sandbox.app
 
 # Deploy to production
-modal deploy main.py
+modal deploy -m agent_sandbox.deploy
 ```
 
 ### Testing HTTP Endpoints
 
-When `modal serve main.py` or `modal deploy main.py` is running:
+When `modal serve -m agent_sandbox.app` or `modal deploy -m agent_sandbox.deploy` is running:
 
 ```bash
-# Test the main endpoint (note: body is a JSON string, not object)
-curl -X POST 'https://<org>--test-sandbox-test-endpoint-dev.modal.run' \
+# Test the query endpoint
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
-  -d '"What is the capital of Canada?"'
+  -d '{"question":"What is the capital of Canada?"}'
+
+# Test streaming endpoint
+curl -N -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query_stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What is the capital of Canada?"}'
 ```
 
 ## Architecture
@@ -59,68 +61,74 @@ curl -X POST 'https://<org>--test-sandbox-test-endpoint-dev.modal.run' \
 
 The codebase demonstrates two distinct patterns for running agents:
 
-**1. Short-lived Sandbox Pattern** (`sandbox_controller`, `main`)
+**1. Short-lived Sandbox Pattern** (`main` entrypoint)
 
 - Creates ephemeral sandbox
-- Executes `runner.py` as a subprocess
+- Executes `agent_sandbox.agents.loop` as a module
 - Captures stdout/stderr
 - Terminates sandbox after completion
 - Use for: batch jobs, scheduled tasks, one-off queries
 
-**2. Long-lived Background Service Pattern** (`test_endpoint` + `runner_service.py`)
+**2. Long-lived Background Service Pattern** (`http_app` + `agent_sandbox.controllers.controller`)
 
 - Maintains persistent sandbox running FastAPI service via uvicorn
 - Service runs on encrypted port 8001 with tunnel URL
 - HTTP endpoint proxies requests to service
-- Sandbox persists for 6 hours (timeout) or 10 minutes idle
+- Sandbox persists for 12 hours (timeout) or 10 minutes idle
 - Use for: low-latency serving, repeated queries, production APIs
 
 ### Key Components
 
-**`main.py`** - Modal app definition and entry points
+**`agent_sandbox/app.py`** - Modal app definition and entry points
 
 - Defines `modal.App("test-sandbox")`
 - `get_or_start_background_sandbox()`: Manages persistent sandbox lifecycle with health checks
-- `test_endpoint`: HTTP endpoint that proxies to background service (main.py:185)
-- `run_agent_remote`: Short-lived function for single queries (main.py:164)
-- `sandbox_controller`: Scheduled job pattern (cron-based) (main.py:247)
-- `main`: Local CLI entry point for `modal run` (main.py:279)
+- `http_app`: ASGI app exposing HTTP endpoints that proxy to background service
+- `run_agent_remote`: Short-lived function for single queries
+- `main`: Local CLI entry point for `modal run`
 
-**`runner.py`** - CLI-based agent execution
+**`agent_sandbox/agents/loop.py`** - CLI-based agent execution
 
 - Builds `ClaudeAgentOptions` from MCP servers and prompts
 - `run_agent()`: Single query execution with streaming output
-- Used by short-lived sandboxes via `sb.exec("python", "runner.py", ...)`
+- Used by short-lived sandboxes via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
 
-**`runner_service.py`** - FastAPI microservice for background sandbox
+**`agent_sandbox/controllers/controller.py`** - FastAPI microservice for background sandbox
 
-- `GET /health_check`: Liveness probe used by controller (runner_service.py:59)
-- `POST /query`: Agent query endpoint that streams responses (runner_service.py:74)
-- Runs via `uvicorn runner_service:app --host 0.0.0.0 --port 8001`
-- Uses `permission_mode="bypassPermissions"` for autonomous operation (runner_service.py:55)
+- `GET /health_check`: Liveness probe used by controller
+- `POST /query`: Agent query endpoint that returns responses
+- `POST /query_stream`: Agent query endpoint that streams responses as SSE
+- Runs via `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
+- Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
 
-**`utils/env_templates.py`** - Modal environment configuration
+**`agent_sandbox/config/settings.py`** - Configuration management
 
-- `AgentEnvTemplate`: Bundles Modal Image, workdir, and secrets
+- `Settings`: Pydantic Settings class for environment variables and configuration
+- `get_modal_secrets()`: Returns Modal Secret objects
+- Centralized configuration for sandbox settings, timeouts, resources, etc.
+
+**`agent_sandbox/app.py`** - Image building
+
 - `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-code
 - Working directory: `/root/app`
-- All environment templates centralized in `ENV_TEMPLATES` registry
+- Copies local project and installs dependencies
 
-**`utils/tools.py`** - MCP tool definitions
+**`agent_sandbox/tools/`** - MCP tool system
 
-- Custom tools: `calculate`, `translate`, `search_web` (stubs for extension)
-- Tools bundled in MCP server named "utilities"
+- `registry.py`: `ToolRegistry` class managing MCP servers and allowed tools
+- `calculate_tool.py`: Example tool implementation
+- Individual tools live in separate files for better organization
 - Tool naming: `mcp__<server>__<tool>` (e.g., `mcp__utilities__calculate`)
-- `ALLOWED_TOOLS`: Whitelist controlling agent tool access
+- `get_mcp_servers()` and `get_allowed_tools()`: Convenience functions for accessing registry
 
-**`utils/prompts.py`** - Agent prompts
+**`agent_sandbox/prompts/prompts.py`** - Agent prompts
 
 - `SYSTEM_PROMPT`: Configures agent behavior and tone
 - `DEFAULT_QUESTION`: Fallback query when none provided
 
 ### Background Sandbox Lifecycle
 
-The persistent sandbox pattern in `get_or_start_background_sandbox()` (main.py:81):
+The persistent sandbox pattern in `get_or_start_background_sandbox()` (agent_sandbox/app.py):
 
 1. Checks for existing sandbox in global `SANDBOX` and `SERVICE_URL` variables
 2. Creates sandbox with `modal.Sandbox.create()` running uvicorn command
@@ -132,8 +140,8 @@ The sandbox persists across multiple requests within the same Modal worker, avoi
 
 ### Permission Modes
 
-- `runner.py`: Uses default permission mode (requires user approval for tools)
-- `runner_service.py`: Uses `permission_mode="bypassPermissions"` for fully autonomous operation (runner_service.py:55)
+- `agent_sandbox/agents/loop.py`: Uses default permission mode (requires user approval for tools)
+- `agent_sandbox/controllers/controller.py`: Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
 
 When adding new endpoints or execution patterns, choose permission mode based on trust level and use case.
 
@@ -141,64 +149,79 @@ When adding new endpoints or execution patterns, choose permission mode based on
 
 ### Adding New Tools
 
-Edit `utils/tools.py`:
+1. Create a new file in `agent_sandbox/tools/` (e.g., `my_tool.py`):
 
 ```python
-@tool("your_tool_name", "Description", {"param": type})
-async def your_tool(args: dict[str, Any]) -> dict[str, Any]:
+from claude_agent_sdk import tool
+from typing import Any
+
+@tool("my_tool_name", "Description", {"param": str})
+async def my_tool(args: dict[str, Any]) -> dict[str, Any]:
     # Implementation
     return {"content": [{"type": "text", "text": "result"}]}
+```
 
-# Add to server
+2. Register in `agent_sandbox/tools/registry.py`:
+
+```python
+from agent_sandbox.tools.my_tool import my_tool
+
+# In ToolRegistry._initialize_defaults():
 multi_tool_server = create_sdk_mcp_server(
     name="utilities",
     version="1.0.0",
-    tools=[calculate, translate, search_web, your_tool]
+    tools=[calculate, my_tool]  # Add your tool
 )
 
-# Add to allowed list
-ALLOWED_TOOLS = [
-    "mcp__utilities__your_tool_name",
-    # ... existing tools
-]
+# Add to allowed tools if needed
+self._allowed_tools.append("mcp__utilities__my_tool_name")
 ```
 
 ### Modifying Agent Behavior
 
-Edit `utils/prompts.py` to change `SYSTEM_PROMPT`.
+Edit `agent_sandbox/prompts/prompts.py` to change `SYSTEM_PROMPT`.
 
-### Adjusting Runtime Environment
+### Adjusting Runtime Configuration
 
-Edit `utils/env_templates.py`:
+Edit `agent_sandbox/config/settings.py`:
 
-- Add pip packages to `.pip_install()`
-- Add apt packages to `.apt_install()`
-- Add new secrets to `secrets` list
-- Create new environment templates in `ENV_TEMPLATES` registry
+- Modify `Settings` class attributes for configuration values
+- Update `get_modal_secrets()` to add new secrets
+
+Edit `agent_sandbox/app.py`:
+
+- Modify `_base_anthropic_sdk_image()` to add pip packages (`.pip_install()`)
+- Add apt packages (`.apt_install()`)
+- Adjust image build steps
 
 ### Adding HTTP Endpoints
 
-Add new functions to `main.py`:
+Add new endpoints to `agent_sandbox/app.py`:
 
 ```python
-@app.function(
-    image=agent_sdk_env.image,
-    secrets=agent_sdk_env.secrets,
-)
-@modal.fastapi_endpoint(method="POST")
-async def your_endpoint(request: Request) -> Response:
+@web_app.post("/your_endpoint")
+async def your_endpoint(request: Request, body: QueryBody):
+    # Implementation
+    pass
+```
+
+Or add to the background service in `agent_sandbox/controllers/controller.py`:
+
+```python
+@app.post("/your_endpoint")
+async def your_endpoint(body: QueryBody, request: Request):
     # Implementation
     pass
 ```
 
 ## Important Notes
 
-- **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (utils/tools.py:28)
-- **Sandbox Timeouts**: Background sandbox runs for max 6 hours or 10 minutes idle (main.py:134-135)
-- **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (utils/tools.py:63)
-- **Request Format**: `test_endpoint` expects JSON string body, not object (main.py:211)
-- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-code` npm package (utils/env_templates.py:43)
-- **Python Version**: Image uses Python 3.11 (utils/env_templates.py:38)
+- **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (agent_sandbox/tools/calculate_tool.py)
+- **Sandbox Timeouts**: Background sandbox runs for max 12 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
+- **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (agent_sandbox/tools/registry.py)
+- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-code` npm package (agent_sandbox/app.py)
+- **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
+- **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
 
 ## ExecPlans
 
