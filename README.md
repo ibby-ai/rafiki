@@ -1,6 +1,6 @@
 # Agent Sandbox Starter (Modal + Claude Agent SDK)
 
-![Python](https://img.shields.io/badge/python-3.13+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Modal](https://img.shields.io/badge/Modal-1.2.1+-8B5CF6.svg)
 ![Claude Agent SDK](https://img.shields.io/badge/Claude%20Agent%20SDK-0.1.4+-FF6B35.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
@@ -194,6 +194,17 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
 - **Volume persistence**: Remember to write files to `/data`, not `/tmp` or other ephemeral locations
 - **Sandbox timeout**: The background service has a 12-hour timeout and 10-minute idle timeout (configurable in `agent_sandbox/config/settings.py`)
 - **Service URL discovery**: The endpoint waits up to 30 seconds for the encrypted tunnel URL to be available
+
+## Documentation
+
+Comprehensive documentation is available in the [`docs/`](./docs/) directory:
+
+- **[Architecture Overview](./docs/architecture.md)** - System architecture, component responsibilities, and request flow
+- **[Controllers: Background Service](./docs/controllers.md)** - Deep dive into the controller service that runs the agent
+- **[Modal Ingress](./docs/modal-ingress.md)** - How Modal handles HTTP ingress and routes requests
+- **[API Usage Guide](./docs/api-usage.md)** - Complete guide for end users: endpoints, examples, authentication, error handling
+- **[Configuration Guide](./docs/configuration.md)** - Configuration options and environment setup
+- **[Documentation Index](./docs/README.md)** - Complete documentation index
 
 ## Additional Resources
 
