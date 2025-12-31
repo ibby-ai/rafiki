@@ -33,7 +33,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 import urllib.request, urllib.error
 import time
-import json
 import httpx
 import socket
 import anyio

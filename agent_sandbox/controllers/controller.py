@@ -22,15 +22,13 @@ Important:
 from fastapi import FastAPI, Request, HTTPException
 from agent_sandbox.schemas import QueryBody
 from claude_agent_sdk import (
-    ClaudeSDKClient, 
+    ClaudeSDKClient,
     ClaudeAgentOptions,
     PermissionResultAllow,
     PermissionResultDeny,
-    PermissionUpdate,
     ToolPermissionContext,
 )
 from starlette.responses import StreamingResponse
-from claude_agent_sdk.types import PermissionRuleValue
 from typing import Any, Dict
 from agent_sandbox.tools import get_mcp_servers, get_allowed_tools
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
@@ -56,39 +54,6 @@ async def allow_web_only(
     """
     if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
         return PermissionResultAllow(updated_input=tool_input)
-    return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
-
-
-# Not being used yet. Experimenting with different permission modes.
-async def allow_web_only_with_updates(
-    tool_name: str,
-    tool_input: Dict[str, Any],
-):
-    """Permission handler with dynamic permission updates.
-    
-    Args:
-        tool_name: Name of the tool being requested.
-        tool_input: Input parameters for the tool.
-        
-    Returns:
-        PermissionResultAllow with permission updates if web-related, otherwise PermissionResultDeny.
-    """
-    if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
-        updates = [
-            PermissionUpdate(
-                type="addRules",
-                rules=[
-                    PermissionRuleValue(tool_name="WebSearch(*)"),
-                    PermissionRuleValue(tool_name="WebFetch(*)"),
-                ],
-                behavior="allow",
-                destination="session",
-            )
-        ]
-        return PermissionResultAllow(
-            updated_input=tool_input,
-            updated_permissions=updates,
-        )
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 

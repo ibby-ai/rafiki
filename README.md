@@ -65,12 +65,6 @@ agent_sandbox/
 │   ├── base.py             # Base schema with validation config
 │   └── sandbox.py          # QueryBody and sandbox-specific schemas
 │
-├── sandbox/                 # Sandbox utilities
-│   └── helpers.py          # Volume operations (get_session_volume, upload_paths_to_volume)
-│
-├── services/                # Cross-cutting services
-│   └── logging.py          # Logging configuration utilities
-│
 └── tools/                   # MCP tool system
     ├── registry.py          # ToolRegistry class & MCP server management
     ├── calculate_tool.py    # Example tool implementation
