@@ -6,7 +6,34 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
+![Agent Sandbox Starter](docs/images/readme-image.png)
+
 A starter template for running a Claude agent in a persistent Modal Sandbox with FastAPI service endpoints and volume persistence.
+
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Project Structure](#project-structure)
+- [Quickstart](#quickstart)
+  - [Development Mode](#development-mode)
+  - [Production Mode (Persistent Service)](#production-mode-persistent-service)
+  - [Service Management](#service-management)
+- [Execution Patterns](#execution-patterns)
+  - [Pattern 1: Short-Lived Sandbox](#pattern-1-short-lived-sandbox)
+  - [Pattern 2: Long-Lived Service](#pattern-2-long-lived-service)
+  - [Which Should I Use?](#which-should-i-use)
+- [Modal Concepts for New Users](#modal-concepts-for-new-users)
+- [Architecture](#architecture)
+  - [Understanding the Diagram](#understanding-the-diagram)
+  - [How It Works](#how-it-works)
+  - [Key Modules](#key-modules)
+  - [Persistent Storage](#persistent-storage)
+- [Configuration](#configuration)
+  - [Makefile](#makefile)
+  - [Customization](#customization)
+- [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [Additional Resources](#additional-resources)
 
 ## Requirements
 
