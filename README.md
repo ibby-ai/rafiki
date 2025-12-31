@@ -145,8 +145,11 @@ modal run -m agent_sandbox.app
 - CI/CD pipelines
 - Batch processing jobs
 - Scheduled tasks (cron jobs)
+- Background agents (queue-based, fire-and-forget tasks)
 
-**Trade-off:** Cold-start delay (~5-15 seconds) on each execution.
+**Trade-offs:**
+- Cold-start delay (~5-15 seconds) on each execution
+- Tasks can still run for hours; "short-lived" refers to the sandbox lifecycle pattern, not task duration
 
 ### Pattern 2: Long-Lived Service
 
@@ -182,6 +185,7 @@ modal deploy -m agent_sandbox.deploy
 | Need persistent file storage | Pattern 2 (volume access) |
 | Cost-sensitive, low traffic | Pattern 1 (pay per use) |
 | High traffic, latency-sensitive | Pattern 2 (warm sandbox) |
+| Background agents (queue-based) | Pattern 1 (isolated per task) |
 
 ## Modal Concepts for New Users
 
@@ -318,7 +322,7 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
   ```
 
 - **Volume persistence**: Remember to write files to `/data`, not `/tmp` or other ephemeral locations
-- **Sandbox timeout**: The background service has a 12-hour timeout and 10-minute idle timeout (configurable in `agent_sandbox/config/settings.py`)
+- **Sandbox timeout**: The background service is configured with a 12-hour max lifetime and 10-minute idle timeout (Modal's default is 5 minutes, max 24 hours; adjust in `agent_sandbox/config/settings.py`)
 - **Service URL discovery**: The endpoint waits up to 30 seconds for the encrypted tunnel URL to be available
 
 ## Documentation

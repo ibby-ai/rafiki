@@ -105,6 +105,8 @@ All configuration options are defined in `agent_sandbox/config/settings.py`. Her
 | `sandbox_idle_timeout` | 10 minutes | How long sandbox stays alive with no requests | Shorter = saves cost; longer = faster response |
 | `service_timeout` | 60 seconds | Health check and internal request timeout | Increase if agent responses are slow |
 
+> **Note**: These are project-configured defaults. Modal's actual default sandbox timeout is 5 minutes (max 24 hours). This project uses longer timeouts to support persistent service patterns.
+
 **Understanding timeouts**:
 
 ```

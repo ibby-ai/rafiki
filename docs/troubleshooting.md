@@ -16,8 +16,11 @@ modal secret list
 # 3. Test a simple run
 modal run -m agent_sandbox.app
 
-# 4. Check service health (if running)
+# 4. Check gateway health (if running)
 curl "${DEV_URL}/health"
+
+# 5. Check background sandbox health (full service check)
+curl "${DEV_URL}/health_check"
 ```
 
 ---
@@ -172,7 +175,8 @@ sandbox_memory: int = 4096  # Increase from 2048
 2. **Use a health check ping** to keep the sandbox warm:
    ```bash
    # Run every 5 minutes via cron or external service
-   curl "${DEV_URL}/health"
+   # Use /health_check (not /health) to ensure the sandbox stays active
+   curl "${DEV_URL}/health_check"
    ```
 
 3. **Accept cold starts** if traffic is sporadic (saves costs)
