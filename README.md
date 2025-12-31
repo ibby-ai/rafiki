@@ -124,6 +124,40 @@ modal run -m agent_sandbox.app::snapshot_service
 
 This project uses a **persistent sandbox service pattern**:
 
+```
+                                 ┌─────────────────────────────────────┐
+                                 │           Modal Cloud               │
+   ┌──────────────┐              │  ┌───────────────────────────────┐  │
+   │              │   HTTP POST  │  │  http_app (FastAPI Gateway)   │  │
+   │    Client    │─────────────────▶  /query, /query_stream        │  │
+   │              │              │  └───────────────┬───────────────┘  │
+   └──────────────┘              │                  │                  │
+                                 │                  │ proxy            │  Forwards requests to sandbox;
+                                 │                  ▼                  │  decouples HTTP from agent runtime
+                                 │  ┌───────────────────────────────┐  │
+                                 │  │   Long-lived Modal Sandbox    │  │
+                                 │  │  ┌─────────────────────────┐  │  │
+                                 │  │  │ FastAPI Controller      │  │  │  Microservice managing agent
+                                 │  │  │ (uvicorn :8001)         │  │  │  sessions, permissions & SSE
+                                 │  │  └───────────┬─────────────┘  │  │
+                                 │  │              │                │  │
+                                 │  │              ▼                │  │
+                                 │  │  ┌─────────────────────────┐  │  │
+                                 │  │  │   Claude Agent SDK      │  │  │
+                                 │  │  │   ┌─────┐ ┌─────────┐   │  │  │
+                                 │  │  │   │ MCP │ │ Tools   │   │  │  │
+                                 │  │  │   └─────┘ └─────────┘   │  │  │
+                                 │  │  └─────────────────────────┘  │  │
+                                 │  │              │                │  │
+                                 │  │              ▼                │  │
+                                 │  │      ┌──────────────┐         │  │  Modal Volume: persistent
+                                 │  │      │  /data vol   │         │  │  storage that survives
+                                 │  │      │  (persist)   │         │  │  sandbox restarts
+                                 │  │      └──────────────┘         │  │
+                                 │  └───────────────────────────────┘  │
+                                 └─────────────────────────────────────┘
+```
+
 1. **Background Service**: A long-lived `modal.Sandbox` runs a FastAPI microservice (`agent_sandbox.controllers.controller`) that handles agent queries
 2. **HTTP Endpoint**: `http_app` in `agent_sandbox.app` proxies requests to the background service
 3. **Volume Persistence**: Files written to `/data` are persisted across sandbox restarts
