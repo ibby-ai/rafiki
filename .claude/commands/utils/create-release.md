@@ -9,7 +9,7 @@ description: Create a new git tag and draft GitHub release
 - Existing releases: !`gh release list --limit 5`
 - Current branch: !`git branch --show-current`
 - Current HEAD: !`git log --oneline -1`
-- Commits since last tag: !`git log $(git describe --tags --abbrev=0)..HEAD --oneline`
+- Commits since last tag: (determine by running `git log <latest-tag>..HEAD --oneline` using the latest tag from above)
 
 ## Your task
 
