@@ -109,7 +109,7 @@ The codebase demonstrates two distinct patterns for running agents:
 
 **`agent_sandbox/app.py`** - Image building
 
-- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-code
+- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
 - Working directory: `/root/app`
 - Copies local project and installs dependencies
 
@@ -219,10 +219,6 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (agent_sandbox/tools/calculate_tool.py)
 - **Sandbox Timeouts**: Background sandbox runs for max 12 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
 - **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (agent_sandbox/tools/registry.py)
-- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-code` npm package (agent_sandbox/app.py)
+- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/app.py)
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
-
-## ExecPlans
-
-When writing complex features or refactoring, you should create an ExecPlan as described in the .agent/plans/PLANS.md file. This plan should be stored in the `.agent/plans/{feature_name}/` directory and it should be accompanied by a task list in the `.agent/tasks/{feature_name}/` directory. Place any temporary research, clones, etc., in the .gitignored subdirectory of the .agent/ directory.
