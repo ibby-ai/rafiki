@@ -30,6 +30,8 @@ class ToolRegistry:
             "Write",
             "WebSearch(*)",
             "WebFetch(*)",
+            # Custom MCP tools
+            "mcp__utilities__calculate",
         ]
     
     def register_server(self, name: str, server: Any):
