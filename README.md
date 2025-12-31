@@ -120,6 +120,84 @@ modal run -m agent_sandbox.app::terminate_service_sandbox
 modal run -m agent_sandbox.app::snapshot_service
 ```
 
+## Execution Patterns
+
+This starter supports **two patterns** for running the agent. Choose based on your use case:
+
+### Pattern 1: Short-Lived Sandbox
+
+```bash
+# One-off execution
+modal run -m agent_sandbox.app::run_agent_remote --question "Your question"
+
+# Or run the default question
+modal run -m agent_sandbox.app
+```
+
+**How it works:**
+1. Creates a new sandbox
+2. Runs the agent
+3. Returns the response
+4. Terminates the sandbox
+
+**Best for:**
+- Quick testing during development
+- CI/CD pipelines
+- Batch processing jobs
+- Scheduled tasks (cron jobs)
+
+**Trade-off:** Cold-start delay (~5-15 seconds) on each execution.
+
+### Pattern 2: Long-Lived Service
+
+```bash
+# Development (with hot-reload)
+modal serve -m agent_sandbox.app
+
+# Production
+modal deploy -m agent_sandbox.deploy
+```
+
+**How it works:**
+1. Creates a persistent sandbox running a FastAPI service
+2. Sandbox stays warm between requests
+3. HTTP gateway proxies requests to the sandbox
+4. Sandbox terminates after idle timeout (default: 10 minutes)
+
+**Best for:**
+- Production APIs requiring low latency
+- Interactive applications
+- High-frequency queries
+- Stateful operations using `/data` volume
+
+**Trade-off:** Costs continue while sandbox is idle; more complex architecture.
+
+### Which Should I Use?
+
+| Scenario | Recommended Pattern |
+|----------|---------------------|
+| Just exploring / learning | Pattern 1 (simplest) |
+| Building a production API | Pattern 2 (low latency) |
+| Running in CI/CD | Pattern 1 (clean isolation) |
+| Need persistent file storage | Pattern 2 (volume access) |
+| Cost-sensitive, low traffic | Pattern 1 (pay per use) |
+| High traffic, latency-sensitive | Pattern 2 (warm sandbox) |
+
+## Modal Concepts for New Users
+
+If you're new to Modal, here's what you need to know before diving into the architecture:
+
+| Term | What It Means |
+|------|---------------|
+| **Modal App** | A collection of serverless functions that run in Modal's cloud infrastructure |
+| **Sandbox** | An isolated container environment where your code runs safely with its own filesystem |
+| **Volume** | Persistent storage that survives container restarts (like a cloud disk mounted at `/data`) |
+| **Encrypted Port/Tunnel** | A secure internal connection between Modal components; used for service-to-service communication |
+| **`@modal.asgi_app()`** | A decorator that turns a Python web app (like FastAPI) into a public HTTPS endpoint |
+| **Cold Start** | The delay when a new container spins up; this project uses a long-lived sandbox to avoid it |
+
+For more details, see [Modal's Getting Started Guide](https://modal.com/docs/guide).
+
 ## Architecture
 
 This project uses a **persistent sandbox service pattern**:
@@ -157,6 +235,20 @@ This project uses a **persistent sandbox service pattern**:
                                  │  └───────────────────────────────┘  │
                                  └─────────────────────────────────────┘
 ```
+
+### Understanding the Diagram
+
+| Component | Purpose | Why It Exists |
+|-----------|---------|---------------|
+| **Modal Cloud** | Fully managed infrastructure | You don't deploy or manage servers; Modal handles scaling, networking, and SSL |
+| **http_app (FastAPI Gateway)** | Lightweight HTTP entry point | Scales to zero when idle; handles routing without running the full agent |
+| **Proxy connection** | Internal forwarding | Decouples the public API from the agent runtime; enables independent scaling |
+| **Long-lived Modal Sandbox** | Persistent agent environment | Stays warm for hours; eliminates cold-start delays on each request |
+| **FastAPI Controller** | Agent orchestration service | Manages Claude SDK client, tool permissions, and streaming responses |
+| **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
+| **/data vol (persist)** | Durable file storage | Files written here survive sandbox restarts; critical for stateful operations |
+
+### How It Works
 
 1. **Background Service**: A long-lived `modal.Sandbox` runs a FastAPI microservice (`agent_sandbox.controllers.controller`) that handles agent queries
 2. **HTTP Endpoint**: `http_app` in `agent_sandbox.app` proxies requests to the background service
@@ -238,6 +330,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 - **[Modal Ingress](./docs/modal-ingress.md)** - How Modal handles HTTP ingress and routes requests
 - **[API Usage Guide](./docs/api-usage.md)** - Complete guide for end users: endpoints, examples, authentication, error handling
 - **[Configuration Guide](./docs/configuration.md)** - Configuration options and environment setup
+- **[Troubleshooting Guide](./docs/troubleshooting.md)** - Common issues and solutions
 - **[Documentation Index](./docs/README.md)** - Complete documentation index
 
 ## Additional Resources

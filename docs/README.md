@@ -2,6 +2,70 @@
 
 This directory contains comprehensive documentation for the agent sandbox application.
 
+## First-Time Setup (15 minutes)
+
+**New to this project?** Follow these steps to get up and running:
+
+### Step 1: Prerequisites (5 min)
+
+```bash
+# Install Modal CLI
+pip install modal
+
+# Configure Modal (creates account if needed)
+modal setup
+
+# Create the required API secret
+modal secret create anthropic-secret ANTHROPIC_API_KEY=your-key-here
+```
+
+### Step 2: Verify It Works (5 min)
+
+```bash
+# Run the agent locally (short-lived sandbox)
+modal run -m agent_sandbox.app
+```
+
+You should see the agent respond in your terminal. If you get errors, check:
+- Is your Anthropic API key valid?
+- Did `modal setup` complete successfully?
+
+### Step 3: Understand the Architecture (5 min)
+
+Read these sections from [Architecture Overview](./architecture.md):
+- **High-Level Architecture** - The diagram and component overview
+- **Why This Architecture?** - Understanding the trade-offs
+
+**Key takeaway**: There are TWO services:
+1. `http_app` - Lightweight HTTP gateway (public-facing)
+2. Background Sandbox - Where the agent actually runs (long-lived)
+
+### Step 4: Start Developing
+
+```bash
+# Start dev server with hot-reload
+modal serve -m agent_sandbox.app
+```
+
+You'll get a URL like `https://<org>--test-sandbox-http-app-dev.modal.run`. Test it:
+
+```bash
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Hello, what can you do?"}'
+```
+
+### What to Read Next
+
+| Your Goal | Start Here |
+|-----------|------------|
+| Customize the agent's behavior | [Controllers](./controllers.md) |
+| Add new tools | [Main README](../README.md#customization) |
+| Deploy to production | [Architecture Overview](./architecture.md#deployment) |
+| Integrate with your app | [API Usage Guide](./api-usage.md) |
+
+---
+
 ## Core Documentation
 
 ### [Architecture Overview](./architecture.md)
@@ -45,6 +109,15 @@ Complete guide for end users interacting with deployed endpoints:
 - Authentication options
 - Error handling and retry logic
 - Production considerations
+
+### [Troubleshooting Guide](./troubleshooting.md)
+Solutions for common issues:
+- Startup and configuration problems
+- Sandbox issues (memory, timeouts, cold starts)
+- File persistence problems
+- Tool execution errors
+- HTTP endpoint issues
+- Streaming problems
 
 ## Quick Reference
 
