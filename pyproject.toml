@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Modal-based agent sandbox with HTTP endpoints and tool integrations"
 requires-python = ">=3.11"
 dependencies = [
-    "claude-agent-sdk>=0.1.4",
+    "claude-agent-sdk>=0.1.18",
     "fastapi>=0.119.1",
     "llm-auto-context",
     "modal>=1.2.1",
