@@ -197,9 +197,22 @@ SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
 
-# Global handles to a background sandbox and its encrypted tunnel URL. We keep
-# these in module scope so repeated calls within the same worker reuse the
-# long-lived process.
+# =============================================================================
+# GLOBAL STATE MANAGEMENT
+# =============================================================================
+# These module-level globals store handles to the background sandbox and its URL.
+#
+# WHY THIS WORKS IN MODAL:
+# - Each Modal worker process has its own isolated Python interpreter
+# - Within a single worker, multiple requests share the same module state
+# - This means subsequent requests in the same worker reuse the existing sandbox
+#   connection instead of creating a new one (avoiding cold-start latency)
+#
+# IMPORTANT CAVEATS:
+# - Different Modal workers will each have their own SANDBOX/SERVICE_URL
+# - That's OK because they all discover the SAME sandbox via `from_name()`
+# - If the sandbox dies, the next request will detect this and create a new one
+# =============================================================================
 SANDBOX: Optional[modal.Sandbox] = None
 SERVICE_URL: Optional[str] = None
 
@@ -258,10 +271,18 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         A pair of `(sandbox, service_url)`.
     """
     global SANDBOX, SERVICE_URL
+
+    # STEP 1: Check if we already have a connection in this worker's memory
     if SANDBOX is not None and SERVICE_URL:
         return SANDBOX, SERVICE_URL
-    
-    # Attempt global reuse by name across workers/processes
+
+    # -------------------------------------------------------------------------
+    # STEP 2: Try to find an EXISTING sandbox by name
+    # -------------------------------------------------------------------------
+    # Modal sandboxes can be given names. This allows multiple workers (or even
+    # separate Modal function invocations) to discover and reuse the same
+    # long-running sandbox. This is key to the "persistent service" pattern.
+    # -------------------------------------------------------------------------
     try:
         sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
         tunnels = sb.tunnels()
@@ -271,36 +292,63 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             _wait_for_service(SERVICE_URL)
             return SANDBOX, SERVICE_URL
     except Exception as e:
-        pass
+        pass  # Sandbox doesn't exist or isn't accessible; we'll create a new one
 
+    # -------------------------------------------------------------------------
+    # STEP 3: Create a NEW sandbox
+    # -------------------------------------------------------------------------
+    # If no existing sandbox was found, create one. This runs uvicorn inside
+    # an isolated container with its own filesystem, network, and resources.
+    # -------------------------------------------------------------------------
     svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
     SANDBOX = modal.Sandbox.create(
-        "uvicorn", 
-        "agent_sandbox.controllers.controller:app", 
-        "--host", 
-        "0.0.0.0", 
+        # Command to run inside the sandbox (uvicorn starts our FastAPI app)
+        "uvicorn",
+        "agent_sandbox.controllers.controller:app",
+        "--host",
+        "0.0.0.0",
         "--port",
         str(SERVICE_PORT),
-        app=app,
-        image=agent_sdk_image,
-        secrets=agent_sdk_secrets,
-        workdir="/root/app",
-        name=SANDBOX_NAME,
+
+        # MODAL-SPECIFIC PARAMETERS EXPLAINED:
+        app=app,                          # Associates sandbox with this Modal App
+        image=agent_sdk_image,            # Container image with all dependencies
+        secrets=agent_sdk_secrets,        # Inject secrets (API keys) into environment
+        workdir="/root/app",              # Working directory inside container
+        name=SANDBOX_NAME,                # Named sandbox enables discovery via from_name()
+
+        # encrypted_ports: Makes this port accessible via Modal's secure tunnel.
+        # Without this, the port would only be accessible inside the sandbox.
+        # Modal creates an HTTPS URL that tunnels traffic to this internal port.
         encrypted_ports=[SERVICE_PORT],
+
+        # volumes: Mount a Modal Volume at /data for persistent storage.
+        # Files written here survive sandbox restarts (but only after termination).
         volumes={"/data": svc_vol},
-        timeout=_settings.sandbox_timeout,
-        idle_timeout=_settings.sandbox_idle_timeout,
-        cpu=_settings.sandbox_cpu,
-        memory=_settings.sandbox_memory,
+
+        # Lifecycle settings:
+        timeout=_settings.sandbox_timeout,        # Max lifetime (default: 12 hours)
+        idle_timeout=_settings.sandbox_idle_timeout,  # Shutdown after idle (default: 10 min)
+        cpu=_settings.sandbox_cpu,                # CPU cores (default: 1.0)
+        memory=_settings.sandbox_memory,          # Memory in MB (default: 2048)
         verbose=True,
     )
 
-    # Optional: set tags after creation
+    # Optional: set tags after creation (useful for filtering in Modal dashboard)
     SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
 
+    # -------------------------------------------------------------------------
+    # STEP 4: Discover the tunnel URL (polling loop)
+    # -------------------------------------------------------------------------
+    # Modal's encrypted_ports feature creates a secure tunnel to the sandbox.
+    # However, the tunnel URL isn't immediately available - Modal needs a moment
+    # to provision it. We poll `sandbox.tunnels()` until the URL appears.
+    #
+    # The returned URL looks like: https://xxxx.modal.run
+    # This URL is publicly accessible and routes to port 8001 inside the sandbox.
+    # -------------------------------------------------------------------------
     SERVICE_URL = None
-    # Give the tunnel a moment to provision; then find the encrypted URL for 8001
-    deadline = time.time() + 30
+    deadline = time.time() + 30  # 30-second timeout for tunnel discovery
     while time.time() < deadline:
         tunnels = SANDBOX.tunnels()
         if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):

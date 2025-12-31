@@ -119,6 +119,14 @@ Solutions for common issues:
 - HTTP endpoint issues
 - Streaming problems
 
+### [Tool Development Guide](./tool-development.md)
+Learn how to create custom tools:
+- Quick start: creating your first tool
+- The @tool decorator and parameter types
+- Tool naming conventions
+- Registering tools with the MCP server
+- Best practices and testing
+
 ## Quick Reference
 
 ### Understanding the Architecture

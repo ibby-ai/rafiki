@@ -331,6 +331,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 - **[API Usage Guide](./docs/api-usage.md)** - Complete guide for end users: endpoints, examples, authentication, error handling
 - **[Configuration Guide](./docs/configuration.md)** - Configuration options and environment setup
 - **[Troubleshooting Guide](./docs/troubleshooting.md)** - Common issues and solutions
+- **[Tool Development Guide](./docs/tool-development.md)** - Creating custom MCP tools
 - **[Documentation Index](./docs/README.md)** - Complete documentation index
 
 ## Additional Resources
