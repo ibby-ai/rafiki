@@ -59,7 +59,7 @@ def _base_anthropic_sdk_image() -> modal.Image:
 
     - Uses Debian slim with Python 3.11
     - Installs `claude-agent-sdk` plus FastAPI/uvicorn/httpx
-    - Installs Node.js and `@anthropic-ai/claude-code` (Agent SDK dependency)
+    - Installs Node.js and `@anthropic-ai/claude-agent-sdk` (Agent SDK dependency)
     - Sets `/root/app` as the workdir and copies the local project into place
     """
     return (
@@ -70,7 +70,7 @@ def _base_anthropic_sdk_image() -> modal.Image:
         .run_commands(
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
-            "npm install -g @anthropic-ai/claude-code",  # Needed for Agent SDK
+            "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
         )
         .env({"AGENT_FS_ROOT": "/data"})
         .workdir("/root/app")
@@ -547,4 +547,3 @@ def main():
         print(line, end="")
 
     sb.terminate()
-

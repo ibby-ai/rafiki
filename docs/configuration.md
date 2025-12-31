@@ -39,7 +39,7 @@ The Modal image is built in `agent_sandbox.app._base_anthropic_sdk_image()` and 
 - Python 3.11 (Debian slim base)
 - Claude Agent SDK
 - FastAPI and uvicorn
-- Node.js and @anthropic-ai/claude-code
+- Node.js and @anthropic-ai/claude-agent-sdk
 - Project dependencies installed via `uv`
 
 ## Secrets
@@ -49,4 +49,3 @@ Modal secrets are managed via the `modal secret` CLI. The application expects:
 - `anthropic-secret` with key `ANTHROPIC_API_KEY`
 
 See [Modal Secrets documentation](https://modal.com/docs/guide/secrets) for more details.
-
