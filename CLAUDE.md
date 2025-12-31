@@ -12,14 +12,19 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 - Claude Agent SDK (`claude-agent-sdk`)
 - FastAPI (HTTP endpoints and internal service)
 - MCP (Model Context Protocol) for tool integration
+- uv (Python package manager)
 
 ## Prerequisites
 
 Before working with this codebase:
 
-1. Modal CLI must be installed: `pip install modal`
-2. Modal must be configured: `modal setup`
-3. Anthropic API key must be stored in Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
+1. uv must be installed: <https://docs.astral.sh/uv/getting-started/installation/>
+2. Activate the virtual environment: `source .venv/bin/activate`
+3. Sync dependencies: `uv sync`
+4. Modal must be configured: `modal setup`
+5. Anthropic API key must be stored in Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
+
+**Important:** Always activate the `.venv` before running commands. Use `uv run` to run Python commands (e.g., `uv run pytest`).
 
 ## Common Commands
 

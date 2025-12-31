@@ -17,11 +17,24 @@ Place new utilities or agents in appropriate subpackages and export them when ne
 
 ## Build, Test, and Development Commands
 
-- `uv pip install -r uv.lock` — sync local dependencies (`pip install -r uv.lock` if `uv` is unavailable).
+This is a **uv-based project**. Always activate the virtual environment before running commands.
+
+### Setup
+
+- `source .venv/bin/activate` — activate the virtual environment (required before other commands).
+- `uv sync` — sync dependencies from `pyproject.toml` and `uv.lock`.
+
+### Running
+
 - `modal run -m agent_sandbox.app` — build the sandbox image if needed and execute the agent end to end.
 - `modal run -m agent_sandbox.app::run_agent_remote --question "..."` — call the agent function for ad‑hoc questions.
 - `modal serve -m agent_sandbox.app` — run a hot-reloading dev loop against Modal.
 - `modal deploy -m agent_sandbox.deploy` — promote the current definition to production.
+
+### Testing
+
+- `uv run pytest` — run the test suite.
+- `uv run pytest tests/test_specific.py -v` — run specific tests with verbose output.
 
 ## Coding Style & Naming Conventions
 
