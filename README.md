@@ -1,5 +1,6 @@
 # Agent Sandbox Starter (Modal + Claude Agent SDK)
 
+![CI](https://github.com/Saidiibrahim/agent-sandbox-starter/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Modal](https://img.shields.io/badge/Modal-1.2.1+-8B5CF6.svg)
 ![Claude Agent SDK](https://img.shields.io/badge/Claude%20Agent%20SDK-0.1.4+-FF6B35.svg)
