@@ -219,3 +219,6 @@ __marimo__/
 .DS_Store
 code_snapshot.md
 .codesnapshot.json
+
+# Strategy documents (internal, not version tracked)
+AI-Engineering-Strategy.md
