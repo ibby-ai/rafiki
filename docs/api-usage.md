@@ -134,15 +134,33 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
 {
   "ok": true,
   "messages": [
-    "The capital of Canada is Ottawa.",
-    "Ottawa is located in the province of Ontario..."
-  ]
+    {
+      "type": "assistant",
+      "content": [
+        { "type": "text", "text": "The capital of Canada is Ottawa." }
+      ],
+      "model": "claude-..."
+    },
+    {
+      "type": "result",
+      "duration_ms": 1234,
+      "total_cost_usd": 0.0001,
+      "usage": { "input_tokens": 12, "output_tokens": 24 }
+    }
+  ],
+  "summary": {
+    "text": "The capital of Canada is Ottawa.",
+    "is_complete": true,
+    "duration_ms": 1234,
+    "total_cost_usd": 0.0001
+  }
 }
 ```
 
 **Response Fields:**
 - `ok` (boolean): Indicates success
-- `messages` (array of strings): Agent response messages
+- `messages` (array of objects): Structured agent messages (`assistant`, `result`, etc.)
+- `summary` (object): Convenience summary of the completed run
 
 **Status Codes:**
 - `200 OK`: Query executed successfully
@@ -194,20 +212,21 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query_stream \
 
 **Response:** Server-Sent Events (SSE) stream
 ```
-data: Quantum computing is a type of computation...
+event: assistant
+data: {"type":"assistant","content":[{"type":"text","text":"Quantum computing is..."}],"model":"claude-..."}
 
-data: that uses quantum mechanical phenomena...
-
-data: such as superposition and entanglement...
+event: result
+data: {"type":"result","duration_ms":1234,"total_cost_usd":0.0001}
 
 event: done
-data: {}
+data: {"text":"...","is_complete":true,"duration_ms":1234}
 ```
 
 **Response Format:**
-- Each message chunk is prefixed with `data: `
+- Each event includes `event:` and `data:` lines
+- `data:` payloads are JSON objects (not raw strings)
 - Empty line (`\n\n`) separates events
-- Final event: `event: done\ndata: {}\n\n`
+- Final event: `event: done` with a summary payload
 
 **Status Codes:**
 - `200 OK`: Stream started successfully
@@ -275,6 +294,15 @@ curl https://acme-corp--test-sandbox-http-app.modal.run/service_info
 ### JavaScript/Fetch (Non-Streaming)
 
 ```javascript
+function extractText(messages) {
+  return messages
+    .filter((message) => message.type === 'assistant')
+    .flatMap((message) => message.content || [])
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
+}
+
 async function askAgent(question, baseUrl) {
   try {
     const response = await fetch(`${baseUrl}/query`, {
@@ -290,7 +318,7 @@ async function askAgent(question, baseUrl) {
     }
     
     const data = await response.json();
-    return data.messages.join('\n');
+    return data.summary?.text ?? extractText(data.messages);
   } catch (error) {
     console.error('Error asking agent:', error);
     throw error;
@@ -323,6 +351,7 @@ async function streamAgentResponse(question, baseUrl, onChunk, onComplete, onErr
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let currentEvent = null;
     
     while (true) {
       const { done, value } = await reader.read();
@@ -333,14 +362,25 @@ async function streamAgentResponse(question, baseUrl, onChunk, onComplete, onErr
       buffer = lines.pop() || ''; // Keep incomplete line in buffer
       
       for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+          continue;
+        }
+
         if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data !== '{}') {
-            onChunk(data);
+          const raw = line.slice(6);
+          if (!raw) continue;
+
+          const payload = JSON.parse(raw);
+          if (currentEvent === 'assistant') {
+            const textBlocks = (payload.content || [])
+              .filter((block) => block.type === 'text')
+              .map((block) => block.text);
+            textBlocks.forEach((text) => onChunk(text));
+          } else if (currentEvent === 'done') {
+            onComplete(payload);
+            return;
           }
-        } else if (line.startsWith('event: done')) {
-          onComplete();
-          return;
         }
       }
     }
@@ -359,9 +399,9 @@ streamAgentResponse(
     // Called for each chunk
     process.stdout.write(chunk);
   },
-  () => {
+  (summary) => {
     // Called when complete
-    console.log('\n\nDone!');
+    console.log('\n\nDone!', summary);
   },
   (error) => {
     // Called on error
@@ -384,6 +424,15 @@ streamAgentResponse(
 import requests
 from typing import Dict, List
 
+def extract_text(messages: List[Dict]) -> str:
+    parts = []
+    for message in messages:
+        if message.get("type") == "assistant":
+            for block in message.get("content", []):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+    return "\n".join(parts)
+
 def ask_agent(question: str, base_url: str) -> Dict:
     """Send a question to the agent and get response.
     
@@ -392,7 +441,7 @@ def ask_agent(question: str, base_url: str) -> Dict:
         base_url: Base URL of the deployed service
         
     Returns:
-        Dictionary with 'ok' and 'messages' keys
+        Dictionary with 'ok', 'messages', and 'summary' keys
         
     Raises:
         requests.HTTPError: If the request fails
@@ -411,8 +460,9 @@ base_url = "https://acme-corp--test-sandbox-http-app.modal.run"
 result = ask_agent("What is the weather like?", base_url)
 
 if result["ok"]:
-    for message in result["messages"]:
-        print(message)
+    summary = result.get("summary", {})
+    text = summary.get("text") or extract_text(result.get("messages", []))
+    print(text)
 ```
 
 ### Python/Requests (Streaming)
@@ -439,15 +489,24 @@ def stream_agent_response(question: str, base_url: str):
         headers={"Content-Type": "application/json"}
     )
     response.raise_for_status()
-    
+
+    current_event = None
     for line in response.iter_lines():
-        if line:
-            line_str = line.decode('utf-8')
-            if line_str.startswith('data: '):
-                data = line_str[6:]
-                if data != '{}':
-                    yield data
-            elif line_str.startswith('event: done'):
+        if not line:
+            continue
+
+        line_str = line.decode('utf-8')
+        if line_str.startswith('event: '):
+            current_event = line_str[7:].strip()
+            continue
+
+        if line_str.startswith('data: '):
+            payload = json.loads(line_str[6:])
+            if current_event == "assistant":
+                for block in payload.get("content", []):
+                    if block.get("type") == "text":
+                        yield block.get("text", "")
+            elif current_event == "done":
                 break
 
 # Usage
@@ -462,6 +521,7 @@ print()  # Newline at end
 ```python
 import httpx
 import asyncio
+import json
 
 async def stream_agent_response_async(question: str, base_url: str):
     """Async version of streaming agent responses."""
@@ -473,13 +533,19 @@ async def stream_agent_response_async(question: str, base_url: str):
             headers={"Content-Type": "application/json"}
         ) as response:
             response.raise_for_status()
+            current_event = None
             async for line in response.aiter_lines():
+                if line.startswith('event: '):
+                    current_event = line[7:].strip()
+                    continue
                 if line.startswith('data: '):
-                    data = line[6:]
-                    if data != '{}':
-                        yield data
-                elif line.startswith('event: done'):
-                    break
+                    payload = json.loads(line[6:])
+                    if current_event == "assistant":
+                        for block in payload.get("content", []):
+                            if block.get("type") == "text":
+                                yield block.get("text", "")
+                    elif current_event == "done":
+                        break
 
 # Usage
 async def main():
@@ -554,8 +620,17 @@ function AgentQuery() {
   const [response, setResponse] = useState('');
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [summary, setSummary] = useState(null);
   
   const baseUrl = 'https://acme-corp--test-sandbox-http-app.modal.run';
+
+  const extractText = (messages) =>
+    messages
+      .filter((message) => message.type === 'assistant')
+      .flatMap((message) => message.content || [])
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
   
   const handleQuery = async () => {
     setLoading(true);
@@ -569,7 +644,8 @@ function AgentQuery() {
       });
       
       const data = await res.json();
-      setResponse(data.messages.join('\n'));
+      setSummary(data.summary || null);
+      setResponse(data.summary?.text ?? extractText(data.messages));
     } catch (error) {
       setResponse(`Error: ${error.message}`);
     } finally {
@@ -591,6 +667,7 @@ function AgentQuery() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let currentEvent = null;
       
       while (true) {
         const { done, value } = await reader.read();
@@ -601,10 +678,22 @@ function AgentQuery() {
         buffer = lines.pop() || '';
         
         for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
           if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data !== '{}') {
-              setResponse(prev => prev + data);
+            const payload = JSON.parse(line.slice(6));
+            if (currentEvent === 'assistant') {
+              const text = (payload.content || [])
+                .filter((block) => block.type === 'text')
+                .map((block) => block.text)
+                .join('');
+              if (text) {
+                setResponse((prev) => prev + text);
+              }
+            } else if (currentEvent === 'done') {
+              setSummary(payload);
             }
           }
         }
@@ -629,6 +718,7 @@ function AgentQuery() {
       <button onClick={handleStream} disabled={loading || streaming}>
         {streaming ? 'Streaming...' : 'Stream'}
       </button>
+      {summary ? <pre>{JSON.stringify(summary, null, 2)}</pre> : null}
       <pre>{response}</pre>
     </div>
   );
@@ -973,4 +1063,3 @@ Monitor these aspects:
 - [Controllers](./controllers.md) - How the background service works
 - [Modal Ingress](./modal-ingress.md) - How requests reach your application
 - [Configuration](./configuration.md) - Configuration options
-

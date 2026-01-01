@@ -4,6 +4,8 @@ Configuration and settings management using Pydantic Settings.
 This module handles environment variables, Modal secrets, and application settings.
 """
 
+from functools import lru_cache
+
 import modal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,3 +51,13 @@ def get_modal_secrets() -> list[modal.Secret]:
         List of Modal Secret objects.
     """
     return [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Get cached application settings.
+
+    Returns:
+        Cached Settings instance.
+    """
+    return Settings()

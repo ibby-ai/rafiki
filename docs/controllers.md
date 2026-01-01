@@ -135,10 +135,24 @@ def health_check():
 {
   "ok": true,
   "messages": [
-    "message 1",
-    "message 2",
-    ...
-  ]
+    {
+      "type": "assistant",
+      "content": [{ "type": "text", "text": "The capital of Canada is Ottawa." }],
+      "model": "claude-..."
+    },
+    {
+      "type": "result",
+      "duration_ms": 1234,
+      "total_cost_usd": 0.0001,
+      "usage": { "input_tokens": 12, "output_tokens": 24 }
+    }
+  ],
+  "summary": {
+    "text": "The capital of Canada is Ottawa.",
+    "is_complete": true,
+    "duration_ms": 1234,
+    "total_cost_usd": 0.0001
+  }
 }
 ```
 
@@ -149,19 +163,25 @@ def health_check():
 3. Creates `ClaudeSDKClient` with configured options
 4. Executes `client.query(body.question)`
 5. Collects all response messages
-6. Returns JSON with messages array
+6. Serializes SDK messages into structured JSON
+7. Returns JSON with `messages` plus a `summary` object
 
 **Implementation:**
 
 ```python
 @app.post("/query")
 async def query_agent(body: QueryBody, request: Request):
-    result: Dict[str, Any] = {"ok": True, "messages": []}
+    messages = []
     async with ClaudeSDKClient(options=_options()) as client:
         await client.query(body.question)
         async for msg in client.receive_response():
-            result["messages"].append(str(msg))
-    return result
+            messages.append(msg)
+
+    return {
+        "ok": True,
+        "messages": [serialize_message(message) for message in messages],
+        "summary": build_final_summary(...),
+    }
 ```
 
 ### POST /query_stream
@@ -179,12 +199,14 @@ async def query_agent(body: QueryBody, request: Request):
 **Response:** Server-Sent Events stream
 
 ```text
-data: message 1
+event: assistant
+data: {"type":"assistant","content":[{"type":"text","text":"..."}],"model":"claude-..."}
 
-data: message 2
+event: result
+data: {"type":"result","duration_ms":1234,"total_cost_usd":0.0001}
 
 event: done
-data: {}
+data: {"text":"...","is_complete":true,"duration_ms":1234}
 ```
 
 **Flow:**
@@ -192,8 +214,8 @@ data: {}
 1. Receives `QueryBody` with question
 2. Optionally validates Modal Connect token
 3. Creates `ClaudeSDKClient` with configured options
-4. Executes query and streams responses as SSE events
-5. Emits `event: done` when complete
+4. Executes query and streams structured SSE events
+5. Emits `event: done` with summary when complete
 
 **Implementation:**
 
@@ -204,8 +226,9 @@ async def query_agent_stream(body: QueryBody, request: Request):
         async with ClaudeSDKClient(options=_options()) as client:
             await client.query(body.question)
             async for msg in client.receive_response():
-                yield f"data: {str(msg)}\n\n"
-        yield "event: done\ndata: {}\n\n"
+                serialized = serialize_message(msg)
+                yield _format_sse(serialized["type"], serialized)
+        yield _format_sse("done", build_final_summary(...))
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 ```

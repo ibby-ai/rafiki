@@ -19,6 +19,7 @@ Important:
   `modal deploy -m agent_sandbox.deploy`.
 """
 
+import json
 from typing import Any
 
 from claude_agent_sdk import (
@@ -28,15 +29,26 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ToolPermissionContext,
 )
+from claude_agent_sdk.types import Message, ResultMessage
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
+from agent_sandbox.config.settings import get_settings
+from agent_sandbox.controllers.middleware import RequestIdMiddleware
+from agent_sandbox.controllers.serialization import (
+    build_final_summary,
+    iter_text_blocks,
+    serialize_message,
+)
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import QueryBody
+from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
 from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
 app = FastAPI()
-ENFORCE_CONNECT_TOKEN = False
+app.add_middleware(RequestIdMiddleware)
+_settings = get_settings()
 
 
 async def allow_web_only(
@@ -78,6 +90,29 @@ def _options() -> ClaudeAgentOptions:
     )
 
 
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Handle uncaught exceptions with structured JSON response.
+
+    Args:
+        request: The incoming request.
+        exc: The exception that was raised.
+
+    Returns:
+        JSONResponse with error details and request ID.
+    """
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "request_id": request_id,
+        },
+    )
+
+
 @app.get("/health_check")
 def health_check():
     """Liveness/readiness probe.
@@ -94,15 +129,19 @@ def health_check():
     return {"ok": True}
 
 
-@app.post("/query")
-async def query_agent(body: QueryBody, request: Request):
-    """Run a single agent query and stream back messages as strings.
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
+    """Run a single agent query and return structured messages.
 
     Args:
         body: `QueryBody` containing the question to ask the agent.
 
     Returns:
-        A JSON-serializable dict with `ok` and a list of response `messages`.
+        QueryResponse with `ok`, `messages` list, and `summary`.
 
     Curl example (using the discovered `${SERVICE_URL}` from the sandbox):
 
@@ -112,17 +151,32 @@ async def query_agent(body: QueryBody, request: Request):
           -d '{"question":"What is the capital of Canada?"}'
         ```
     """
-    if ENFORCE_CONNECT_TOKEN:
+    if _settings.enforce_connect_token:
         # Modal injects this header when a valid connect token is presented
         if not request.headers.get("X-Verified-User-Data"):
             raise HTTPException(status_code=401, detail="Missing or invalid connect token")
 
-    result: dict[str, Any] = {"ok": True, "messages": []}
+    messages: list[Message] = []
+    result_message: ResultMessage | None = None
     async with ClaudeSDKClient(options=_options()) as client:
         await client.query(body.question)
         async for msg in client.receive_response():
-            result["messages"].append(str(msg))
-    return result
+            messages.append(msg)
+            if isinstance(msg, ResultMessage):
+                result_message = msg
+
+    text_blocks = iter_text_blocks(messages)
+    final_text = None
+    if result_message and result_message.result:
+        final_text = result_message.result
+    elif text_blocks:
+        final_text = "\n".join(text_blocks)
+
+    return {
+        "ok": True,
+        "messages": [serialize_message(message) for message in messages],
+        "summary": build_final_summary(result_message, final_text),
+    }
 
 
 @app.post("/query_stream")
@@ -136,17 +190,33 @@ async def query_agent_stream(body: QueryBody, request: Request):
     Returns:
         StreamingResponse with text/event-stream content type.
     """
-    if ENFORCE_CONNECT_TOKEN:
+    if _settings.enforce_connect_token:
         if not request.headers.get("X-Verified-User-Data"):
             raise HTTPException(status_code=401, detail="Missing or invalid connect token")
 
+    def _format_sse(event: str, data: dict[str, Any]) -> str:
+        payload = json.dumps(data, ensure_ascii=True)
+        return f"event: {event}\ndata: {payload}\n\n"
+
     async def sse():
+        messages: list[Message] = []
+        result_message: ResultMessage | None = None
         async with ClaudeSDKClient(options=_options()) as client:
             await client.query(body.question)
             async for msg in client.receive_response():
-                # Emit each message chunk as an SSE event
-                yield f"data: {str(msg)}\n\n"
-        # Signal completion (optional)
-        yield "event: done\ndata: {}\n\n"
+                messages.append(msg)
+                if isinstance(msg, ResultMessage):
+                    result_message = msg
+                serialized = serialize_message(msg)
+                yield _format_sse(serialized["type"], serialized)
+
+        text_blocks = iter_text_blocks(messages)
+        final_text = None
+        if result_message and result_message.result:
+            final_text = result_message.result
+        elif text_blocks:
+            final_text = "\n".join(text_blocks)
+
+        yield _format_sse("done", build_final_summary(result_message, final_text))
 
     return StreamingResponse(sse(), media_type="text/event-stream")
