@@ -43,4 +43,3 @@ For now, we simply re-export the single app:
 from agent_sandbox.app import app
 
 __all__ = ["app"]
-

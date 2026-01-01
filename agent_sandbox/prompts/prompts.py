@@ -5,6 +5,7 @@ Adjust `SYSTEM_PROMPT` to steer the assistant's overall tone and tool usage
 preferences. `DEFAULT_QUESTION` is used as a fallback when no input is
 provided.
 """
+
 SYSTEM_PROMPT = (
     "You are a helpful coding agent. Prefer using available tools when beneficial."
     " When a query involves current events or the web, use the WebSearch and WebFetch tools to get the latest information."
@@ -13,4 +14,3 @@ SYSTEM_PROMPT = (
 )
 
 DEFAULT_QUESTION = "What is the capital of France?"
-

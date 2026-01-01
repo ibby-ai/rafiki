@@ -9,17 +9,19 @@ It constructs `ClaudeAgentOptions` using our local MCP tool server(s) and
 system prompt, then issues a query and prints streamed responses.
 """
 
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-import anyio
-from typing import Any, Dict, List
-from agent_sandbox.prompts.prompts import SYSTEM_PROMPT, DEFAULT_QUESTION
-from agent_sandbox.tools import get_mcp_servers, get_allowed_tools
 import argparse
+from typing import Any
+
+import anyio
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
 
 def build_agent_options(
-    mcp_servers: Dict[str, Any],
-    allowed_tools: List[str],
+    mcp_servers: dict[str, Any],
+    allowed_tools: list[str],
     system_prompt: str = SYSTEM_PROMPT,
 ) -> ClaudeAgentOptions:
     """Create `ClaudeAgentOptions` for a CLI or sandbox run.
@@ -51,12 +53,8 @@ async def run_agent(question: str = DEFAULT_QUESTION):
     Args:
         question: Natural-language input to pass to the agent.
     """
-    options = build_agent_options(
-        get_mcp_servers(), 
-        get_allowed_tools(), 
-        SYSTEM_PROMPT
-    )
-    
+    options = build_agent_options(get_mcp_servers(), get_allowed_tools(), SYSTEM_PROMPT)
+
     async with ClaudeSDKClient(options=options) as client:
         await client.query(question)
 
@@ -70,4 +68,3 @@ if __name__ == "__main__":
     parser.add_argument("--question", type=str, default=DEFAULT_QUESTION)
     args = parser.parse_args()
     anyio.run(run_agent, args.question)
-

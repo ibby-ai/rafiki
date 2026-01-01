@@ -24,21 +24,22 @@ Prerequisite for curl testing:
   `https://<org>--test-sandbox-http-app-dev.modal.run`.
 """
 
+import logging
+import time
+import urllib.error
+import urllib.request
+
+import anyio
+import httpx
 import modal
-from agent_sandbox.config.settings import get_modal_secrets, Settings
-from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
-from agent_sandbox.schemas import QueryBody
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import urllib.request, urllib.error
-import time
-import httpx
-import socket
-import anyio
-import logging
-from starlette.responses import StreamingResponse
 from modal import exception as modal_exc
+from starlette.responses import StreamingResponse
+
+from agent_sandbox.config.settings import Settings, get_modal_secrets
+from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
+from agent_sandbox.schemas import QueryBody
 
 app = modal.App("test-sandbox")
 
@@ -74,14 +75,12 @@ def _base_anthropic_sdk_image() -> modal.Image:
         .env({"AGENT_FS_ROOT": "/data"})
         .workdir("/root/app")
         .add_local_dir(
-            ".", 
-            remote_path="/root/app", 
+            ".",
+            remote_path="/root/app",
             copy=True,
             ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
         )
-        .run_commands(
-            "cd /root/app && uv pip install -e . --system --no-cache"
-        )
+        .run_commands("cd /root/app && uv pip install -e . --system --no-cache")
     )
 
 
@@ -113,15 +112,17 @@ async def query_proxy(request: Request, body: QueryBody):
     headers = {}
     settings = Settings()
     if settings.enforce_connect_token:
-        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+        creds = await sb.create_connect_token.aio(
+            user_metadata={"ip": request.client.host or "unknown"}
+        )
         headers = {"Authorization": f"Bearer {creds.token}"}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
         r = await client.post(
-            f"{url.rstrip('/')}/query", 
-            json=body.model_dump(), 
+            f"{url.rstrip('/')}/query",
+            json=body.model_dump(),
             headers=headers,
-            timeout=httpx.Timeout(120.0, connect=30.0)
+            timeout=httpx.Timeout(120.0, connect=30.0),
         )
         r.raise_for_status()
         return r.json()
@@ -131,28 +132,26 @@ async def query_proxy(request: Request, body: QueryBody):
 async def query_stream(request: Request, body: QueryBody):
     """Stream query responses from the background sandbox service."""
     sb, url = await get_or_start_background_sandbox_aio()
-    
+
     headers = {}
     settings = Settings()
     if settings.enforce_connect_token:
-        creds = await sb.create_connect_token.aio(user_metadata={"ip": request.client.host or "unknown"})
+        creds = await sb.create_connect_token.aio(
+            user_metadata={"ip": request.client.host or "unknown"}
+        )
         headers = {"Authorization": f"Bearer {creds.token}"}
 
     async def sse_proxy():
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
-                "POST", 
-                f"{url.rstrip('/')}/query_stream", 
-                json=body.model_dump(), 
-                headers=headers
+                "POST", f"{url.rstrip('/')}/query_stream", json=body.model_dump(), headers=headers
             ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes():
                     yield chunk
+
     return StreamingResponse(
-        sse_proxy(), 
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"}
+        sse_proxy(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
     )
 
 
@@ -160,25 +159,23 @@ async def query_stream(request: Request, body: QueryBody):
 async def service_info():
     """Get information about the background sandbox service."""
     sb, url = await get_or_start_background_sandbox_aio()
-    return {
-        "url": url,
-        "sandbox_id": sb.object_id
-    }
+    return {"url": url, "sandbox_id": sb.object_id}
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
-    
+
     Args:
         n: Maximum number of log lines to return.
         timeout: Timeout in seconds for log collection.
-        
+
     Returns:
         List of log lines.
     """
     sb, _ = await get_or_start_background_sandbox_aio()
     from collections import deque
+
     buf = deque(maxlen=n)
     async with anyio.move_on_after(timeout):
         async for msg in sb.stdout.aio():
@@ -212,18 +209,18 @@ PERSIST_VOL_NAME = _settings.persist_vol_name
 # - That's OK because they all discover the SAME sandbox via `from_name()`
 # - If the sandbox dies, the next request will detect this and create a new one
 # =============================================================================
-SANDBOX: Optional[modal.Sandbox] = None
-SERVICE_URL: Optional[str] = None
+SANDBOX: modal.Sandbox | None = None
+SERVICE_URL: str | None = None
 
 
 def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") -> None:
     """Block until an HTTP health check returns 200 OK.
-    
+
     Args:
         url: Base URL of the service (including scheme and host).
         timeout: Maximum time to wait in seconds.
         path: Health check path to append to URL.
-        
+
     Raises:
         TimeoutError: If the service does not become healthy in time.
     """
@@ -235,18 +232,14 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
             with urllib.request.urlopen(check_url, timeout=1) as resp:
                 if resp.status == 200:
                     return
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
             time.sleep(delay)
             delay = min(delay * 1.5, 3.0)
     raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
 
 
 # A cron cleanup that reaps stale records in SESSIONS and restarts a dead sandbox
-@app.function(
-    image=agent_sdk_image, 
-    secrets=agent_sdk_secrets, 
-    schedule=modal.Cron("*/2 * * * *")
-)
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, schedule=modal.Cron("*/2 * * * *"))
 def cleanup_sessions():
     """Periodic cleanup of sandbox session metadata."""
     try:
@@ -290,7 +283,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             SERVICE_URL = tunnels[SERVICE_PORT].url
             _wait_for_service(SERVICE_URL)
             return SANDBOX, SERVICE_URL
-    except Exception as e:
+    except Exception:
         pass  # Sandbox doesn't exist or isn't accessible; we'll create a new one
 
     # -------------------------------------------------------------------------
@@ -308,28 +301,24 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         "0.0.0.0",
         "--port",
         str(SERVICE_PORT),
-
         # MODAL-SPECIFIC PARAMETERS EXPLAINED:
-        app=app,                          # Associates sandbox with this Modal App
-        image=agent_sdk_image,            # Container image with all dependencies
-        secrets=agent_sdk_secrets,        # Inject secrets (API keys) into environment
-        workdir="/root/app",              # Working directory inside container
-        name=SANDBOX_NAME,                # Named sandbox enables discovery via from_name()
-
+        app=app,  # Associates sandbox with this Modal App
+        image=agent_sdk_image,  # Container image with all dependencies
+        secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
+        workdir="/root/app",  # Working directory inside container
+        name=SANDBOX_NAME,  # Named sandbox enables discovery via from_name()
         # encrypted_ports: Makes this port accessible via Modal's secure tunnel.
         # Without this, the port would only be accessible inside the sandbox.
         # Modal creates an HTTPS URL that tunnels traffic to this internal port.
         encrypted_ports=[SERVICE_PORT],
-
         # volumes: Mount a Modal Volume at /data for persistent storage.
         # Files written here survive sandbox restarts (but only after termination).
         volumes={"/data": svc_vol},
-
         # Lifecycle settings:
-        timeout=_settings.sandbox_timeout,        # Max lifetime (default: 12 hours)
+        timeout=_settings.sandbox_timeout,  # Max lifetime (default: 12 hours)
         idle_timeout=_settings.sandbox_idle_timeout,  # Shutdown after idle (default: 10 min)
-        cpu=_settings.sandbox_cpu,                # CPU cores (default: 1.0)
-        memory=_settings.sandbox_memory,          # Memory in MB (default: 2048)
+        cpu=_settings.sandbox_cpu,  # CPU cores (default: 1.0)
+        memory=_settings.sandbox_memory,  # Memory in MB (default: 2048)
         verbose=True,
     )
 
@@ -373,21 +362,19 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             "Failed to persist session metadata to Modal Dict: %s", e
         )
     except Exception:
-        logging.getLogger(__name__).exception(
-            "Unexpected error persisting session metadata"
-        )
+        logging.getLogger(__name__).exception("Unexpected error persisting session metadata")
 
     return SANDBOX, SERVICE_URL
 
 
 async def _wait_for_service_aio(url: str, timeout: int = 60, path: str = "/health_check") -> None:
     """Async version of _wait_for_service.
-    
+
     Args:
         url: Base URL of the service.
         timeout: Maximum time to wait in seconds.
         path: Health check path to append to URL.
-        
+
     Raises:
         TimeoutError: If the service does not become healthy in time.
     """
@@ -407,7 +394,7 @@ async def _wait_for_service_aio(url: str, timeout: int = 60, path: str = "/healt
 
 async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     """Async version of get_or_start_background_sandbox.
-    
+
     Returns:
         A pair of `(sandbox, service_url)`.
     """
@@ -438,11 +425,11 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     # Create with persistent volume
     svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
     SANDBOX = await modal.Sandbox.create.aio(
-        "uvicorn", 
-        "agent_sandbox.controllers.controller:app", 
-        "--host", 
-        "0.0.0.0", 
-        "--port", 
+        "uvicorn",
+        "agent_sandbox.controllers.controller:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
         str(SERVICE_PORT),
         app=app,
         image=agent_sdk_image,
@@ -459,7 +446,9 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     )
 
     # Optional: set tags after creation
-    await SANDBOX.set_tags.aio({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
+    await SANDBOX.set_tags.aio(
+        {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)}
+    )
 
     # Poll tunnels until URL appears
     deadline = anyio.current_time() + 30
@@ -507,7 +496,9 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
         question: Natural-language query to send to the agent.
     """
     import anyio
+
     from agent_sandbox.agents.loop import run_agent
+
     anyio.run(run_agent, question)
 
 
@@ -517,10 +508,10 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
 )
 def terminate_service_sandbox() -> dict:
     """Terminate the background sandbox to flush writes to the volume.
-    
+
     Sandbox writes are only synced to the volume when the sandbox terminates.
     Call this function after the agent has created files to ensure they are persisted.
-    
+
     Returns:
         Dict with termination status
     """
@@ -531,9 +522,18 @@ def terminate_service_sandbox() -> dict:
         SANDBOX = None  # Clear global so a new one will be created on next request
         return {"ok": True, "message": "Sandbox terminated, writes flushed to volume"}
     except modal_exc.NotFoundError as e:
-        return {"ok": False, "error": "Sandbox not found", "detail": str(e), "type": "NotFoundError"}
+        return {
+            "ok": False,
+            "error": "Sandbox not found",
+            "detail": str(e),
+            "type": "NotFoundError",
+        }
     except modal_exc.SandboxTerminatedError:
-        return {"ok": False, "error": "Sandbox already terminated", "type": "SandboxTerminatedError"}
+        return {
+            "ok": False,
+            "error": "Sandbox already terminated",
+            "type": "SandboxTerminatedError",
+        }
     except modal_exc.TimeoutError as e:
         return {"ok": False, "error": "Sandbox termination timed out", "type": e.__class__.__name__}
     except modal_exc.Error as e:
@@ -546,7 +546,7 @@ def terminate_service_sandbox() -> dict:
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300)
 def snapshot_service() -> dict:
     """Snapshot function to capture filesystem diffs and store snapshot metadata.
-    
+
     Returns:
         Dict with snapshot metadata including image_id and timestamp.
     """
@@ -560,9 +560,7 @@ def snapshot_service() -> dict:
             "Failed to persist snapshot metadata to Modal Dict: %s", e
         )
     except Exception:
-        logging.getLogger(__name__).exception(
-            "Unexpected error persisting snapshot metadata"
-        )
+        logging.getLogger(__name__).exception("Unexpected error persisting snapshot metadata")
     return info
 
 

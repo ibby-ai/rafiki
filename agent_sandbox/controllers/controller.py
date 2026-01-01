@@ -19,19 +19,21 @@ Important:
   `modal deploy -m agent_sandbox.deploy`.
 """
 
-from fastapi import FastAPI, Request, HTTPException
-from agent_sandbox.schemas import QueryBody
+from typing import Any
+
 from claude_agent_sdk import (
-    ClaudeSDKClient,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
 )
+from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import StreamingResponse
-from typing import Any, Dict
-from agent_sandbox.tools import get_mcp_servers, get_allowed_tools
+
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
+from agent_sandbox.schemas import QueryBody
+from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
 app = FastAPI()
 ENFORCE_CONNECT_TOKEN = False
@@ -39,16 +41,16 @@ ENFORCE_CONNECT_TOKEN = False
 
 async def allow_web_only(
     tool_name: str,
-    tool_input: Dict[str, Any],
+    tool_input: dict[str, Any],
     ctx: ToolPermissionContext,
 ):
     """Permission handler that allows only web-related tools.
-    
+
     Args:
         tool_name: Name of the tool being requested.
         tool_input: Input parameters for the tool.
         ctx: Permission context.
-        
+
     Returns:
         PermissionResultAllow if tool is web-related, otherwise PermissionResultDeny.
     """
@@ -70,9 +72,9 @@ def _options() -> ClaudeAgentOptions:
         allowed_tools=get_allowed_tools(),
         # Running in a sandbox, so we can bypass permissions
         # Making the agent truly autonomous
-        #permission_mode="bypassPermissions" # Not allowed when have root access
+        # permission_mode="bypassPermissions" # Not allowed when have root access
         can_use_tool=allow_web_only,
-        permission_mode="acceptEdits"
+        permission_mode="acceptEdits",
     )
 
 
@@ -115,7 +117,7 @@ async def query_agent(body: QueryBody, request: Request):
         if not request.headers.get("X-Verified-User-Data"):
             raise HTTPException(status_code=401, detail="Missing or invalid connect token")
 
-    result: Dict[str, Any] = {"ok": True, "messages": []}
+    result: dict[str, Any] = {"ok": True, "messages": []}
     async with ClaudeSDKClient(options=_options()) as client:
         await client.query(body.question)
         async for msg in client.receive_response():
@@ -148,4 +150,3 @@ async def query_agent_stream(body: QueryBody, request: Request):
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
-

@@ -1,11 +1,12 @@
 """Pytest configuration and shared fixtures."""
 
+from typing import Any
+
 import pytest
-from typing import Any, Dict
 
 
 @pytest.fixture
-def mock_settings() -> Dict[str, Any]:
+def mock_settings() -> dict[str, Any]:
     """Mock settings for testing."""
     return {
         "sandbox_name": "test-sandbox",
@@ -20,7 +21,6 @@ def mock_settings() -> Dict[str, Any]:
 
 
 @pytest.fixture
-def mock_query_body() -> Dict[str, Any]:
+def mock_query_body() -> dict[str, Any]:
     """Mock query body for testing."""
     return {"question": "What is the capital of France?"}
-

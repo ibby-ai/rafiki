@@ -4,7 +4,6 @@ Configuration and settings management using Pydantic Settings.
 This module handles environment variables, Modal secrets, and application settings.
 """
 
-
 import modal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,10 +48,4 @@ def get_modal_secrets() -> list[modal.Secret]:
     Returns:
         List of Modal Secret objects.
     """
-    return [
-        modal.Secret.from_name(
-            "anthropic-secret",
-            required_keys=["ANTHROPIC_API_KEY"]
-        )
-    ]
-
+    return [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]

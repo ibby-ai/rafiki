@@ -11,22 +11,16 @@ Main entry points:
 Usage:
     # Run locally
     modal run -m agent_sandbox.app
-    
+
     # Serve with hot reload
     modal serve -m agent_sandbox.app
-    
+
     # Deploy to production
     modal deploy -m agent_sandbox.deploy
 """
 
 # Import submodules to ensure all Modal functions are registered
-from agent_sandbox import app
-from agent_sandbox import agents
-from agent_sandbox import controllers
-from agent_sandbox import config
-from agent_sandbox import prompts
-from agent_sandbox import schemas
-from agent_sandbox import tools
+from agent_sandbox import agents, app, config, controllers, prompts, schemas, tools
 
 __all__ = [
     "app",
@@ -37,4 +31,3 @@ __all__ = [
     "schemas",
     "tools",
 ]
-

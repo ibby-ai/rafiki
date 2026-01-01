@@ -2,6 +2,7 @@
 
 import pytest
 from pydantic import ValidationError
+
 from agent_sandbox.schemas import QueryBody
 
 
@@ -37,4 +38,3 @@ def test_query_body_whitespace_stripping():
 
 if __name__ == "__main__":
     pytest.main([__file__])
-

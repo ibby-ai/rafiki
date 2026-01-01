@@ -1,6 +1,7 @@
 """Tests for calculate tool."""
 
 import pytest
+
 from agent_sandbox.tools.calculate_tool import calculate
 
 
@@ -31,4 +32,3 @@ async def test_calculate_division():
 
 if __name__ == "__main__":
     pytest.main([__file__])
-
