@@ -1,0 +1,72 @@
+# GitHub Labels Reference
+# This file is a reference for creating labels manually in GitHub UI.
+# GitHub does not support automatic label creation from files.
+#
+# To create these labels:
+# 1. Go to: https://github.com/Saidiibrahim/agent-sandbox-starter/labels
+# 2. Click "New label" for each entry below
+
+# Discovery Labels
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers"
+
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention is needed"
+
+# Priority Labels
+- name: "priority:high"
+  color: "d73a4a"
+  description: "High priority item"
+
+- name: "priority:medium"
+  color: "fbca04"
+  description: "Medium priority item"
+
+- name: "priority:low"
+  color: "0e8a16"
+  description: "Low priority item"
+
+# Area Labels
+- name: "area:tools"
+  color: "5319e7"
+  description: "MCP tools and tool registry"
+
+- name: "area:api"
+  color: "6f42c1"
+  description: "HTTP API and endpoints"
+
+- name: "area:docs"
+  color: "7c3aed"
+  description: "Documentation"
+
+- name: "area:infra"
+  color: "8b5cf6"
+  description: "Modal infrastructure and sandboxing"
+
+# Type Labels
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+
+- name: "enhancement"
+  color: "a2eeef"
+  description: "New feature or request"
+
+- name: "documentation"
+  color: "0075ca"
+  description: "Improvements or additions to documentation"
+
+# Roadmap Labels
+- name: "roadmap:phase-1"
+  color: "1d76db"
+  description: "Observability Foundation"
+
+- name: "roadmap:phase-2"
+  color: "1d76db"
+  description: "Evaluation Infrastructure"
+
+- name: "roadmap:phase-3"
+  color: "1d76db"
+  description: "Integration & Ecosystem"

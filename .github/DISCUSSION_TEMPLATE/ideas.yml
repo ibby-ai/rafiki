@@ -1,0 +1,43 @@
+title: "[Idea]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share your ideas for improving agent-sandbox-starter!
+        Ideas that gain traction may become feature requests.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your Idea
+      description: Describe your idea or suggestion.
+      placeholder: "What if we could..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why would this be useful? What's the motivation?
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - New Tool
+        - Agent Improvements
+        - API Enhancements
+        - Infrastructure
+        - Observability & Monitoring
+        - Developer Experience
+        - Documentation
+        - Other
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples or References
+      description: Any examples, links, or references that inspired this idea?
