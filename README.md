@@ -18,6 +18,7 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
 ## Table of Contents
 
 - [Requirements](#requirements)
+- [Setup](#setup)
 - [Project Structure](#project-structure)
 - [Quickstart](#quickstart)
   - [Development Mode](#development-mode)
@@ -44,6 +45,21 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
 
 - **Modal CLI**: `pip install modal` and `modal setup`
 - **Anthropic API key**: store in a Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
+
+## Setup
+
+```bash
+# Clone and enter the repository
+git clone <repo-url>
+cd agent-sandbox-starter
+
+# Activate virtual environment and sync dependencies
+source .venv/bin/activate
+uv sync
+
+# Install pre-commit hooks (enables automatic linting/formatting on commit)
+uv run pre-commit install
+```
 
 ## Project Structure
 

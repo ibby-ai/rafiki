@@ -40,6 +40,21 @@ This is a **uv-based project**. Always activate the virtual environment before r
 
 Target Python 3.11+ features only when they remain compatible with Modal runtime images. Follow PEP 8 defaults: 4-space indentation, snake_case for functions and variables, UpperCamelCase for classes. Keep module-level constants uppercase. Prefer type hints on new functions, and keep environment or tool names descriptive (`calculate_tool`, not `calc`). Strings that surface in prompts should live in `agent_sandbox/prompts/prompts.py`.
 
+## Pre-commit Hooks
+
+The repository uses pre-commit with ruff for automated linting and formatting. Hooks run automatically on `git commit`.
+
+- **ruff** — lints code and auto-fixes issues (import ordering, unused imports, style violations).
+- **ruff-format** — formats code consistently (like Black, but faster).
+
+### Manual Usage
+
+- `uv run pre-commit run --all-files` — run all hooks on the entire codebase.
+- `uv run ruff check --fix .` — run linter manually.
+- `uv run ruff format .` — run formatter manually.
+
+If a commit fails due to hook violations, the hooks will auto-fix what they can. Stage the fixes and commit again.
+
 ## Testing Guidelines
 
 The test suite uses `pytest` with filenames `test_*.py` mirroring the package layout. Before submitting changes, run `modal run -m agent_sandbox.app` and `modal run -m agent_sandbox.app::run_agent_remote --question "health check"` to confirm the agent boots, tools register, and streaming output works. Mark long-running Modal calls with `@pytest.mark.slow`. Capture regression coverage for new behaviors whenever practical.

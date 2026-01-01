@@ -26,6 +26,19 @@ Before working with this codebase:
 
 **Important:** Always activate the `.venv` before running commands. Use `uv run` to run Python commands (e.g., `uv run pytest`).
 
+## Code Quality
+
+The project uses pre-commit hooks with ruff for linting and formatting. Hooks run automatically on commit.
+
+```bash
+# Run hooks manually on all files
+uv run pre-commit run --all-files
+
+# Run linter/formatter directly
+uv run ruff check --fix .
+uv run ruff format .
+```
+
 ## Common Commands
 
 ### Development & Testing
