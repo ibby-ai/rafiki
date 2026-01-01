@@ -21,18 +21,22 @@ The project currently provides:
 The ability to trace and observe agent behavior is foundational for production use.
 
 ### Goals
-- [ ] Structured trace export from sandbox runs
-- [ ] `/traces` endpoint for historical run retrieval
-- [ ] Trace context propagation through agent loop
-- [ ] Tool call logging with timing and context
+- [ ] Claude Agent SDK [hook-based instrumentation](https://platform.claude.com/docs/en/agent-sdk/hooks) for trace collection
+- [ ] `PreToolUse` / `PostToolUse` hooks for tool call logging with timing
+- [ ] Trace context propagation using `session_id` and `tool_use_id` correlation
+- [ ] OpenTelemetry span creation from hook callbacks
+- [ ] Structured trace export via OTLP to observability backends
 
 ### Why This Matters
 > "Trace every interaction, every tool called, exact context" - without observability, you can't improve agents systematically.
 
+The Claude Agent SDK provides built-in hooks that capture tool names, inputs, outputs, and session context. By instrumenting these hooks with OpenTelemetry, traces flow directly to platforms like Braintrust without building custom storage or retrieval APIs.
+
 ### How to Contribute
-- Help design the trace data model
-- Implement trace middleware
-- Build trace storage and retrieval APIs
+- Implement hook callbacks for `PreToolUse`, `PostToolUse`, and `SubagentStop`
+- Create OpenTelemetry span wrappers for hook events
+- Design trace attribute schema following GenAI semantic conventions
+- Build integration tests for trace export pipelines
 
 ---
 
