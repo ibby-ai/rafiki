@@ -8,7 +8,12 @@
 
 ![Agent Sandbox Starter](docs/images/readme-image.png)
 
-A starter template for running a Claude agent in a persistent Modal Sandbox with FastAPI service endpoints and volume persistence.
+A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolated, secure sandboxed environments. Infrastructure for running autonomous AI agents with:
+
+- **Secure execution** via Modal sandboxes
+- **HTTP API endpoints** for querying agents
+- **MCP (Model Context Protocol)** tool integration
+- **Two execution patterns**: short-lived sandboxes (ephemeral, for batch jobs) and long-lived background services (persistent, for low-latency APIs)
 
 ## Table of Contents
 
@@ -224,6 +229,18 @@ If you're new to Modal, here's what you need to know before diving into the arch
 For more details, see [Modal's Getting Started Guide](https://modal.com/docs/guide).
 
 ## Architecture
+
+### Quick Overview
+
+```
+User Request → Modal HTTP Gateway → Background Sandbox (FastAPI on port 8001)
+                                          ↓
+                                   Claude Agent SDK
+                                          ↓
+                                    MCP Tools (e.g., calculate)
+```
+
+### Detailed Architecture
 
 This project uses a **persistent sandbox service pattern**:
 
