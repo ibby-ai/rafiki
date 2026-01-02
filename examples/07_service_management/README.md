@@ -26,7 +26,7 @@ Use when you need to:
 - Clean up resources
 
 ```bash
-modal run -m agent_sandbox.app::terminate_service_sandbox
+uv run modal run -m agent_sandbox.app::terminate_service_sandbox
 ```
 
 ### Snapshot Service
@@ -36,7 +36,7 @@ Use when you need to:
 - Create a checkpoint before changes
 
 ```bash
-modal run -m agent_sandbox.app::snapshot_service
+uv run modal run -m agent_sandbox.app::snapshot_service
 ```
 
 ## Sandbox Lifecycle

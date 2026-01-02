@@ -25,9 +25,11 @@ Before running these examples:
 ## Quick Start
 
 ```bash
-# Run the simplest example
-cd examples/01_basic_query
-./run.sh
+# Run the simplest example (from project root)
+./examples/01_basic_query/run.sh
+
+# Or using uv directly
+uv run modal run -m agent_sandbox.app::run_agent_remote --question "Hello"
 ```
 
 ## Examples Overview
@@ -47,7 +49,7 @@ cd examples/01_basic_query
 ### Short-lived Sandbox (Pattern 1)
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote --question "Your question"
+uv run modal run -m agent_sandbox.app::run_agent_remote --question "Your question"
 ```
 
 Best for: One-off queries, CI/CD, batch processing
@@ -56,7 +58,7 @@ Best for: One-off queries, CI/CD, batch processing
 
 ```bash
 # Start the service (in one terminal)
-modal serve -m agent_sandbox.app
+uv run modal serve -m agent_sandbox.app
 
 # Query via HTTP (in another terminal)
 curl -X POST 'https://<your-url>/query' \

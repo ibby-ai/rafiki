@@ -16,10 +16,10 @@ Or run individual commands:
 
 ```bash
 # Simple question
-modal run -m agent_sandbox.app::run_agent_remote --question "What is the capital of France?"
+uv run modal run -m agent_sandbox.app::run_agent_remote --question "What is the capital of France?"
 
 # Coding question
-modal run -m agent_sandbox.app::run_agent_remote --question "Write a Python function that calculates factorial"
+uv run modal run -m agent_sandbox.app::run_agent_remote --question "Write a Python function that calculates factorial"
 ```
 
 ## What You'll See

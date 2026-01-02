@@ -7,7 +7,7 @@ Comprehensive guide to all HTTP endpoints exposed by the agent service.
 Start the dev server:
 
 ```bash
-modal serve -m agent_sandbox.app
+uv run modal serve -m agent_sandbox.app
 ```
 
 Set the URL:
@@ -36,7 +36,7 @@ export DEV_URL="https://your-org--test-sandbox-http-app-dev.modal.run"
 ### Python Client
 
 ```bash
-python client.py $DEV_URL
+uv run python client.py $DEV_URL
 ```
 
 ## Request/Response Format

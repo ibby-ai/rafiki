@@ -26,7 +26,7 @@ QUESTIONS=(
 )
 
 for q in "${QUESTIONS[@]}"; do
-    modal run -m agent_sandbox.app::run_agent_remote --question "$q"
+    uv run modal run -m agent_sandbox.app::run_agent_remote --question "$q"
 done
 ```
 

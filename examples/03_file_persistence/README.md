@@ -29,13 +29,13 @@ Demonstrates how files written to `/data/` persist to Modal Volume across sandbo
 
 ```bash
 # List files in volume
-modal volume ls svc-runner-8001-vol
+uv run modal volume ls svc-runner-8001-vol
 
 # Download a file
-modal volume get svc-runner-8001-vol /hello.py ./hello.py
+uv run modal volume get svc-runner-8001-vol /hello.py ./hello.py
 
 # Remove a file
-modal volume rm svc-runner-8001-vol /hello.py
+uv run modal volume rm svc-runner-8001-vol /hello.py
 ```
 
 ## Important Notes
