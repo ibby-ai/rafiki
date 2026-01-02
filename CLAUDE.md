@@ -240,3 +240,7 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/app.py)
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
+
+## Browser Automation
+
+When the user asks to work with Chrome or perform browser automation tasks, use the `claude-in-chrome` MCP server.
