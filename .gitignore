@@ -222,3 +222,6 @@ code_snapshot.md
 
 # Strategy documents (internal, not version tracked)
 notes/
+
+# Agent working files
+.agent/
