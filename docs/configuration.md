@@ -97,6 +97,42 @@ All configuration options are defined in `agent_sandbox/config/settings.py`. Her
 - **1.0 CPU / 2048 MB**: Good default for most agent workloads
 - **2.0 CPU / 4096 MB**: Heavy computation, large file processing, or high concurrency
 
+### Resource Limits (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sandbox_cpu_limit` | `null` | Hard CPU limit when set (tuple with `sandbox_cpu`) |
+| `sandbox_memory_limit` | `null` | Hard memory limit in MB (tuple with `sandbox_memory`) |
+| `sandbox_ephemeral_disk` | `null` | Ephemeral disk in MB for function-based workloads |
+
+**Notes**:
+- CPU/memory limits apply to Modal functions and sandboxes where configured.
+- Ephemeral disk currently applies to Modal functions (not the long-lived sandbox).
+
+### Autoscaling & Concurrency (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `min_containers` | `null` | Minimum warm containers for Modal functions |
+| `max_containers` | `null` | Maximum containers for Modal functions |
+| `buffer_containers` | `null` | Extra warm containers to absorb bursts |
+| `scaledown_window` | `null` | Seconds to wait before scaling down |
+| `concurrent_max_inputs` | `null` | Hard cap on concurrent inputs per container |
+| `concurrent_target_inputs` | `null` | Target concurrency per container |
+
+**When to enable**: Use autoscaling for lower latency and smoother bursts. Enable concurrency for I/O-heavy endpoints.
+
+### Retry Policy (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `retry_max_attempts` | `null` | Max retries for transient failures |
+| `retry_initial_delay` | `null` | Initial backoff delay in seconds |
+| `retry_backoff_coefficient` | `null` | Exponential backoff factor |
+| `retry_max_delay` | `null` | Max delay between retries |
+
+**When to enable**: Production deployments where transient Modal/network errors cause flaky invocations.
+
 ### Timeouts
 
 | Setting | Default | Effect | Billing Impact |
@@ -132,8 +168,34 @@ Request arrives → Cold start again
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enforce_connect_token` | `false` | Require Modal Connect token for sandbox access |
+| `require_proxy_auth` | `false` | Require Modal Proxy Auth headers on public HTTP endpoints |
 
-**When to enable**: Production deployments where you want additional authentication between the HTTP gateway and the background sandbox.
+**When to enable**: Production deployments where you want additional authentication between the HTTP gateway and the background sandbox. Use `require_proxy_auth` to protect the public endpoint itself, and `enforce_connect_token` for per-request sandbox access.
+
+### Queue Processing
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `job_queue_name` | `"agent-job-queue"` | Modal Queue name for async jobs |
+| `job_results_dict` | `"agent-job-results"` | Modal Dict name for job results |
+| `job_queue_cron` | `null` | Optional cron schedule for `process_job_queue` |
+
+**When to enable**: Set `job_queue_cron` when you want the queue worker to run automatically on a schedule (for example, `*/1 * * * *` for every minute). Leave unset to run the worker manually.
+
+### Persistence (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `persist_vol_version` | `null` | Modal Volume version (set to 2 to opt into v2 volumes) |
+| `volume_commit_interval` | `null` | Seconds between `Volume.commit()` calls in the sandbox |
+
+**When to enable**: Use `volume_commit_interval` to persist `/data` without terminating the sandbox.
+
+### Snapshots (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enable_memory_snapshot` | `false` | Enable Modal memory snapshots for class-based runners |
 
 ### Agent Filesystem
 

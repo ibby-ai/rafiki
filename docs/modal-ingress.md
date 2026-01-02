@@ -22,7 +22,7 @@ Modal provides a **fully managed ingress layer** that:
 1. **Accepts HTTPS requests** on public URLs
 2. **Terminates TLS/SSL** (handles SSL certificates automatically)
 3. **Routes to your functions** based on the `@modal.asgi_app()` decorator
-4. **Handles authentication** (Modal Connect tokens, API keys)
+4. **Handles authentication** (Modal Connect tokens, Proxy Auth tokens, API keys)
 5. **Provides DDoS protection** and rate limiting
 6. **Manages load balancing** and auto-scaling
 
@@ -45,6 +45,10 @@ https://<org>--test-sandbox-http-app.modal.run
 - `test-sandbox`: Your Modal app name (from `modal.App("test-sandbox")`)
 - `http-app`: Function name (from `@modal.asgi_app()` decorator)
 - `-dev`: Suffix for development deployments (omitted in production)
+
+**Future (Custom Domains):** Modal supports custom domains for HTTP endpoints in Team/Enterprise plans.
+This project defers custom-domain configuration for now; see Task 08 in the ExecPlan for future
+implementation steps.
 
 ### How It Works
 
@@ -415,4 +419,3 @@ async def health():
 - [Architecture Overview](./architecture.md) - How ingress fits into overall architecture
 - [Controllers](./controllers.md) - How requests reach the background service
 - [Modal Documentation](https://modal.com/docs/guide/container-lifecycle) - Official Modal docs
-

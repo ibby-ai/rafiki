@@ -151,7 +151,7 @@ modal deploy -m agent_sandbox.deploy
 
 ### Service Management
 
-- **Terminate the background sandbox** (flushes writes to persistent volume)
+- **Terminate the background sandbox** (forces a final flush to persistent volume; optional if volume commits are enabled)
 
 ```bash
 modal run -m agent_sandbox.app::terminate_service_sandbox
@@ -162,6 +162,13 @@ modal run -m agent_sandbox.app::terminate_service_sandbox
 ```bash
 modal run -m agent_sandbox.app::snapshot_service
 ```
+
+### Authentication
+
+By default, the public HTTP endpoints are accessible without authentication. To enable Modal Proxy Auth, set
+`require_proxy_auth = True` in `agent_sandbox/config/settings.py` (or via `REQUIRE_PROXY_AUTH=true`). Clients must
+include Proxy Auth Token headers (`Modal-Key` and `Modal-Secret`) on each request. See `docs/api-usage.md` for end-user
+examples.
 
 ## Execution Patterns
 

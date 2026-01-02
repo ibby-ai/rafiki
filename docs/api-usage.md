@@ -252,7 +252,123 @@ curl -X POST https://your-url.modal.run/query_stream \
 
 ---
 
-### 4. GET /service_info - Service Information
+### 4. POST /submit - Enqueue Agent Job
+
+**Purpose:** Enqueue a background job for asynchronous processing
+
+**Endpoint:** `POST /submit`
+
+**Request Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "question": "Your question here"
+}
+```
+
+**Request Example:**
+```bash
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Summarize the latest earnings report"}'
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a"
+}
+```
+
+**Note:** Jobs are processed by the `process_job_queue` Modal function. In dev, run
+`modal run -m agent_sandbox.app::process_job_queue` to consume queued jobs, or set
+`job_queue_cron` to schedule automatic processing.
+
+**Status Codes:**
+- `200 OK`: Job enqueued
+- `400 Bad Request`: Invalid request body
+- `401 Unauthorized`: Missing or invalid authentication token
+- `500 Internal Server Error`: Failed to enqueue job
+
+---
+
+### 5. GET /jobs/{job_id} - Job Status
+
+**Purpose:** Check job status and retrieve results when complete
+
+**Endpoint:** `GET /jobs/{job_id}`
+
+**Request Example:**
+```bash
+curl https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+```
+
+**Response (Queued):**
+```json
+{
+  "ok": true,
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a",
+  "status": "queued",
+  "created_at": 1735840000,
+  "updated_at": 1735840000
+}
+```
+
+**Response (Complete):**
+```json
+{
+  "ok": true,
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a",
+  "status": "complete",
+  "result": {
+    "ok": true,
+    "messages": [...],
+    "summary": {...}
+  }
+}
+```
+
+**Status Codes:**
+- `200 OK`: Job status returned
+- `401 Unauthorized`: Missing or invalid authentication token
+- `404 Not Found`: Job does not exist
+
+---
+
+### 6. DELETE /jobs/{job_id} - Cancel Job
+
+**Purpose:** Cancel a queued job before it starts
+
+**Endpoint:** `DELETE /jobs/{job_id}`
+
+**Request Example:**
+```bash
+curl -X DELETE https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a",
+  "status": "canceled",
+  "canceled_at": 1735840100
+}
+```
+
+**Status Codes:**
+- `200 OK`: Job canceled
+- `401 Unauthorized`: Missing or invalid authentication token
+- `404 Not Found`: Job does not exist
+
+---
+
+### 7. GET /service_info - Service Information
 
 **Purpose:** Get information about the background sandbox service
 
@@ -771,18 +887,46 @@ const response = await fetch(`${baseUrl}/query`, {
 });
 ```
 
-### Option B: API Keys (via Modal Dashboard)
+### Option B: Modal Proxy Auth Tokens
 
-Configure API keys in the Modal dashboard, then users include:
+**How it works:**
+1. Enable proxy auth on the public HTTP endpoint
+2. Create a Proxy Auth Token in the Modal workspace
+3. Clients include the token ID/secret in `Modal-Key` and `Modal-Secret` headers
 
+**Enable in your code:**
+
+1. **Settings** (`agent_sandbox/config/settings.py` or environment variable):
+   ```python
+   require_proxy_auth = True
+   ```
+
+2. **App** (`agent_sandbox/app.py`):
+   ```python
+   @modal.asgi_app(requires_proxy_auth=True)
+   ```
+
+**User Request:**
 ```bash
 curl -X POST https://your-url.modal.run/query \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <api-key>" \
+  -H "Modal-Key: <token-id>" \
+  -H "Modal-Secret: <token-secret>" \
   -d '{"question": "..."}'
 ```
 
-**Note:** API key validation happens at the Modal infrastructure level, before requests reach your application.
+**JavaScript Example:**
+```javascript
+const response = await fetch(`${baseUrl}/query`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Modal-Key': proxyAuthTokenId,
+    'Modal-Secret': proxyAuthTokenSecret
+  },
+  body: JSON.stringify({ question })
+});
+```
 
 ### Option C: Custom Authentication Middleware
 

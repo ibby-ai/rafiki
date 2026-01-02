@@ -241,6 +241,16 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
 
+### Volume Persistence Behavior
+
+When `volume_commit_interval` is configured in settings:
+
+- The persistent volume is reloaded before each query to get the latest committed state
+- The volume is committed after each query (respecting the configured interval)
+- This ensures writes are persisted without requiring sandbox termination
+- Note: Commits occur after all requests (including read-only) when the interval is reached
+- Set `volume_commit_interval` to `None` (default) to disable automatic commits; writes persist only on sandbox termination
+
 ## Browser Automation
 
 When the user asks to work with Chrome or perform browser automation tasks, use the `claude-in-chrome` MCP server.
