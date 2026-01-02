@@ -20,8 +20,11 @@ Important:
 """
 
 import json
+import logging
+import time
 from typing import Any
 
+import modal
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -49,6 +52,52 @@ from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
 _settings = get_settings()
+_logger = logging.getLogger(__name__)
+
+_LAST_VOLUME_COMMIT_TS: float | None = None
+
+
+def _require_connect_token(request: Request) -> None:
+    if _settings.enforce_connect_token:
+        if not request.headers.get("X-Verified-User-Data"):
+            raise HTTPException(status_code=401, detail="Missing or invalid connect token")
+
+
+def _get_persist_volume() -> modal.Volume:
+    """Return the configured persistent volume handle."""
+    kwargs: dict[str, Any] = {"create_if_missing": True}
+    if _settings.persist_vol_version is not None:
+        kwargs["version"] = _settings.persist_vol_version
+    return modal.Volume.from_name(_settings.persist_vol_name, **kwargs)
+
+
+def _maybe_reload_volume() -> None:
+    """Reload the persistent volume if commit/reload is enabled."""
+    if _settings.volume_commit_interval is None:
+        return
+    try:
+        _get_persist_volume().reload()
+    except Exception:
+        _logger.warning("Failed to reload persistent volume", exc_info=True)
+
+
+def _maybe_commit_volume() -> None:
+    """Commit the persistent volume based on the configured interval."""
+    global _LAST_VOLUME_COMMIT_TS
+    interval = _settings.volume_commit_interval
+    if interval is None:
+        return
+    now = time.time()
+    if (
+        _LAST_VOLUME_COMMIT_TS is None
+        or interval <= 0
+        or (now - _LAST_VOLUME_COMMIT_TS) >= interval
+    ):
+        try:
+            _get_persist_volume().commit()
+            _LAST_VOLUME_COMMIT_TS = now
+        except Exception:
+            _logger.warning("Failed to commit persistent volume", exc_info=True)
 
 
 async def allow_web_only(
@@ -151,32 +200,33 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
           -d '{"question":"What is the capital of Canada?"}'
         ```
     """
-    if _settings.enforce_connect_token:
-        # Modal injects this header when a valid connect token is presented
-        if not request.headers.get("X-Verified-User-Data"):
-            raise HTTPException(status_code=401, detail="Missing or invalid connect token")
+    _require_connect_token(request)
 
-    messages: list[Message] = []
-    result_message: ResultMessage | None = None
-    async with ClaudeSDKClient(options=_options()) as client:
-        await client.query(body.question)
-        async for msg in client.receive_response():
-            messages.append(msg)
-            if isinstance(msg, ResultMessage):
-                result_message = msg
+    _maybe_reload_volume()
+    try:
+        messages: list[Message] = []
+        result_message: ResultMessage | None = None
+        async with ClaudeSDKClient(options=_options()) as client:
+            await client.query(body.question)
+            async for msg in client.receive_response():
+                messages.append(msg)
+                if isinstance(msg, ResultMessage):
+                    result_message = msg
 
-    text_blocks = iter_text_blocks(messages)
-    final_text = None
-    if result_message and result_message.result:
-        final_text = result_message.result
-    elif text_blocks:
-        final_text = "\n".join(text_blocks)
+        text_blocks = iter_text_blocks(messages)
+        final_text = None
+        if result_message and result_message.result:
+            final_text = result_message.result
+        elif text_blocks:
+            final_text = "\n".join(text_blocks)
 
-    return {
-        "ok": True,
-        "messages": [serialize_message(message) for message in messages],
-        "summary": build_final_summary(result_message, final_text),
-    }
+        return {
+            "ok": True,
+            "messages": [serialize_message(message) for message in messages],
+            "summary": build_final_summary(result_message, final_text),
+        }
+    finally:
+        _maybe_commit_volume()
 
 
 @app.post("/query_stream")
@@ -190,33 +240,35 @@ async def query_agent_stream(body: QueryBody, request: Request):
     Returns:
         StreamingResponse with text/event-stream content type.
     """
-    if _settings.enforce_connect_token:
-        if not request.headers.get("X-Verified-User-Data"):
-            raise HTTPException(status_code=401, detail="Missing or invalid connect token")
+    _require_connect_token(request)
 
     def _format_sse(event: str, data: dict[str, Any]) -> str:
         payload = json.dumps(data, ensure_ascii=True)
         return f"event: {event}\ndata: {payload}\n\n"
 
     async def sse():
+        _maybe_reload_volume()
         messages: list[Message] = []
         result_message: ResultMessage | None = None
-        async with ClaudeSDKClient(options=_options()) as client:
-            await client.query(body.question)
-            async for msg in client.receive_response():
-                messages.append(msg)
-                if isinstance(msg, ResultMessage):
-                    result_message = msg
-                serialized = serialize_message(msg)
-                yield _format_sse(serialized["type"], serialized)
+        try:
+            async with ClaudeSDKClient(options=_options()) as client:
+                await client.query(body.question)
+                async for msg in client.receive_response():
+                    messages.append(msg)
+                    if isinstance(msg, ResultMessage):
+                        result_message = msg
+                    serialized = serialize_message(msg)
+                    yield _format_sse(serialized["type"], serialized)
 
-        text_blocks = iter_text_blocks(messages)
-        final_text = None
-        if result_message and result_message.result:
-            final_text = result_message.result
-        elif text_blocks:
-            final_text = "\n".join(text_blocks)
+            text_blocks = iter_text_blocks(messages)
+            final_text = None
+            if result_message and result_message.result:
+                final_text = result_message.result
+            elif text_blocks:
+                final_text = "\n".join(text_blocks)
 
-        yield _format_sse("done", build_final_summary(result_message, final_text))
+            yield _format_sse("done", build_final_summary(result_message, final_text))
+        finally:
+            _maybe_commit_volume()
 
     return StreamingResponse(sse(), media_type="text/event-stream")

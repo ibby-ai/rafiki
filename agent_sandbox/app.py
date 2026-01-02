@@ -32,16 +32,26 @@ import urllib.request
 import anyio
 import httpx
 import modal
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import Settings, get_modal_secrets
-from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
-from agent_sandbox.schemas import QueryBody
+from agent_sandbox.jobs import (
+    JOB_QUEUE,
+    bump_attempts,
+    cancel_job,
+    enqueue_job,
+    get_job_status,
+    should_skip_job,
+    update_job,
+)
+from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from agent_sandbox.schemas import JobStatusResponse, JobSubmitRequest, JobSubmitResponse, QueryBody
 
 app = modal.App("test-sandbox")
+_settings = Settings()
 
 web_app = FastAPI()
 
@@ -84,13 +94,110 @@ def _base_anthropic_sdk_image() -> modal.Image:
     )
 
 
+def _autoscale_kwargs() -> dict[str, int]:
+    """Build autoscaling kwargs for Modal functions when configured."""
+    kwargs: dict[str, int] = {}
+    if _settings.min_containers is not None:
+        kwargs["min_containers"] = _settings.min_containers
+    if _settings.max_containers is not None:
+        kwargs["max_containers"] = _settings.max_containers
+    if _settings.buffer_containers is not None:
+        kwargs["buffer_containers"] = _settings.buffer_containers
+    if _settings.scaledown_window is not None:
+        kwargs["scaledown_window"] = _settings.scaledown_window
+    return kwargs
+
+
+def _function_resource_kwargs() -> dict[str, object]:
+    """Build resource kwargs for Modal functions."""
+    kwargs: dict[str, object] = {}
+    if _settings.sandbox_cpu_limit is not None:
+        kwargs["cpu"] = (_settings.sandbox_cpu, _settings.sandbox_cpu_limit)
+    else:
+        kwargs["cpu"] = _settings.sandbox_cpu
+
+    if _settings.sandbox_memory_limit is not None:
+        kwargs["memory"] = (_settings.sandbox_memory, _settings.sandbox_memory_limit)
+    else:
+        kwargs["memory"] = _settings.sandbox_memory
+
+    if _settings.sandbox_ephemeral_disk is not None:
+        kwargs["ephemeral_disk"] = _settings.sandbox_ephemeral_disk
+    return kwargs
+
+
+def _sandbox_resource_kwargs() -> dict[str, object]:
+    """Build resource kwargs for Modal sandboxes."""
+    kwargs: dict[str, object] = {}
+    if _settings.sandbox_cpu_limit is not None:
+        kwargs["cpu"] = (_settings.sandbox_cpu, _settings.sandbox_cpu_limit)
+    else:
+        kwargs["cpu"] = _settings.sandbox_cpu
+
+    if _settings.sandbox_memory_limit is not None:
+        kwargs["memory"] = (_settings.sandbox_memory, _settings.sandbox_memory_limit)
+    else:
+        kwargs["memory"] = _settings.sandbox_memory
+    return kwargs
+
+
+def _function_runtime_kwargs(*, include_retries: bool = True) -> dict[str, object]:
+    """Combine autoscaling and resource tuning for Modal functions."""
+    kwargs: dict[str, object] = {}
+    kwargs.update(_function_resource_kwargs())
+    kwargs.update(_autoscale_kwargs())
+    if include_retries:
+        kwargs.update(_retry_kwargs())
+    return kwargs
+
+
+def _maybe_concurrent():
+    """Return a concurrency decorator when configured, otherwise no-op."""
+    if _settings.concurrent_max_inputs is None and _settings.concurrent_target_inputs is None:
+        return lambda fn: fn
+    return modal.concurrent(
+        max_inputs=_settings.concurrent_max_inputs,
+        target_inputs=_settings.concurrent_target_inputs,
+    )
+
+
+def _retry_policy() -> modal.Retries | None:
+    if _settings.retry_max_attempts is None:
+        return None
+    return modal.Retries(
+        max_retries=_settings.retry_max_attempts,
+        backoff_coefficient=_settings.retry_backoff_coefficient or 2.0,
+        initial_delay=_settings.retry_initial_delay or 1.0,
+        max_delay=_settings.retry_max_delay or 60.0,
+    )
+
+
+def _retry_kwargs() -> dict[str, object]:
+    policy = _retry_policy()
+    if not policy:
+        return {}
+    return {"retries": policy}
+
+
+def _job_queue_schedule() -> modal.Cron | None:
+    cron = _settings.job_queue_cron
+    if not cron:
+        return None
+    return modal.Cron(cron)
+
+
 # Create image and secrets
 agent_sdk_image = _base_anthropic_sdk_image()
 agent_sdk_secrets = get_modal_secrets()
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
-@modal.asgi_app()
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    **_function_runtime_kwargs(include_retries=False),
+)
+@_maybe_concurrent()
+@modal.asgi_app(requires_proxy_auth=_settings.require_proxy_auth)
 def http_app():
     """ASGI app exposing HTTP endpoints for the agent service."""
     return web_app
@@ -155,6 +262,31 @@ async def query_stream(request: Request, body: QueryBody):
     )
 
 
+@web_app.post("/submit", response_model=JobSubmitResponse)
+async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
+    """Enqueue a background job and return its id."""
+    job_id = enqueue_job(body.question)
+    return JobSubmitResponse(job_id=job_id)
+
+
+@web_app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def job_status(job_id: str) -> JobStatusResponse:
+    """Fetch job status and result (if available)."""
+    status = get_job_status(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return status
+
+
+@web_app.delete("/jobs/{job_id}", response_model=JobStatusResponse)
+async def cancel_job_request(job_id: str) -> JobStatusResponse:
+    """Cancel a queued job."""
+    status = cancel_job(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return status
+
+
 @web_app.get("/service_info")
 async def service_info():
     """Get information about the background sandbox service."""
@@ -188,10 +320,18 @@ async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
 SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
 
 # Service sandbox identity and config (will be initialized from Settings)
-_settings = Settings()
 SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
+
+
+def _get_persist_volume() -> modal.Volume:
+    """Return the configured persistent volume handle."""
+    kwargs: dict[str, object] = {"create_if_missing": True}
+    if _settings.persist_vol_version is not None:
+        kwargs["version"] = _settings.persist_vol_version
+    return modal.Volume.from_name(PERSIST_VOL_NAME, **kwargs)
+
 
 # =============================================================================
 # GLOBAL STATE MANAGEMENT
@@ -239,7 +379,12 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
 
 
 # A cron cleanup that reaps stale records in SESSIONS and restarts a dead sandbox
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, schedule=modal.Cron("*/2 * * * *"))
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    schedule=modal.Cron("*/2 * * * *"),
+    **_retry_kwargs(),
+)
 def cleanup_sessions():
     """Periodic cleanup of sandbox session metadata."""
     try:
@@ -292,7 +437,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
     # If no existing sandbox was found, create one. This runs uvicorn inside
     # an isolated container with its own filesystem, network, and resources.
     # -------------------------------------------------------------------------
-    svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
+    svc_vol = _get_persist_volume()
     SANDBOX = modal.Sandbox.create(
         # Command to run inside the sandbox (uvicorn starts our FastAPI app)
         "uvicorn",
@@ -317,8 +462,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         # Lifecycle settings:
         timeout=_settings.sandbox_timeout,  # Max lifetime (default: 12 hours)
         idle_timeout=_settings.sandbox_idle_timeout,  # Shutdown after idle (default: 10 min)
-        cpu=_settings.sandbox_cpu,  # CPU cores (default: 1.0)
-        memory=_settings.sandbox_memory,  # Memory in MB (default: 2048)
+        **_sandbox_resource_kwargs(),
         verbose=True,
     )
 
@@ -423,7 +567,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
         pass
 
     # Create with persistent volume
-    svc_vol = modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)
+    svc_vol = _get_persist_volume()
     SANDBOX = await modal.Sandbox.create.aio(
         "uvicorn",
         "agent_sandbox.controllers.controller:app",
@@ -440,8 +584,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
         volumes={"/data": svc_vol},
         timeout=_settings.sandbox_timeout,
         idle_timeout=_settings.sandbox_idle_timeout,
-        cpu=_settings.sandbox_cpu,
-        memory=_settings.sandbox_memory,
+        **_sandbox_resource_kwargs(),
         verbose=True,
     )
 
@@ -481,10 +624,60 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     return SANDBOX, SERVICE_URL
 
 
+@app.cls(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    volumes={"/data": _get_persist_volume()},
+    enable_memory_snapshot=_settings.enable_memory_snapshot,
+    **_function_runtime_kwargs(),
+)
+class AgentRunner:
+    """Class-based agent runner with lifecycle hooks and optional snapshots."""
+
+    system_prompt: str = modal.parameter(default=SYSTEM_PROMPT)
+
+    @modal.enter(snap=True)
+    def _snapshot_setup(self) -> None:
+        from agent_sandbox.agents.loop import build_agent_options
+        from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+
+        self._options = build_agent_options(
+            get_mcp_servers(), get_allowed_tools(), self.system_prompt
+        )
+
+    @modal.enter(snap=False)
+    def _post_restore(self) -> None:
+        if getattr(self, "_options", None) is None:
+            from agent_sandbox.agents.loop import build_agent_options
+            from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+
+            self._options = build_agent_options(
+                get_mcp_servers(), get_allowed_tools(), self.system_prompt
+            )
+
+    @modal.exit()
+    def _cleanup(self) -> None:
+        self._options = None
+
+    @modal.method()
+    def run(self, question: str = DEFAULT_QUESTION) -> None:
+        import anyio
+        from claude_agent_sdk import ClaudeSDKClient
+
+        async def _run() -> None:
+            async with ClaudeSDKClient(options=self._options) as client:
+                await client.query(question)
+                async for msg in client.receive_response():
+                    print(msg)
+
+        anyio.run(_run)
+
+
 @app.function(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
-    volumes={"/data": modal.Volume.from_name(PERSIST_VOL_NAME, create_if_missing=True)},
+    volumes={"/data": _get_persist_volume()},
+    **_function_runtime_kwargs(),
 )
 def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     """Run the agent once in a short-lived Modal function.
@@ -495,21 +688,66 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     Args:
         question: Natural-language query to send to the agent.
     """
-    import anyio
-
-    from agent_sandbox.agents.loop import run_agent
-
-    anyio.run(run_agent, question)
+    AgentRunner().run.remote(question)
 
 
 @app.function(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
+    volumes={"/data": _get_persist_volume()},
+    schedule=_job_queue_schedule(),
+    **_function_runtime_kwargs(),
+)
+def process_job_queue() -> None:
+    """Process queued agent jobs and persist results."""
+    settings = Settings()
+    jobs_processed = 0
+    max_jobs = settings.max_jobs_per_run
+
+    while True:
+        if max_jobs is not None and jobs_processed >= max_jobs:
+            break
+        job = JOB_QUEUE.get(timeout=2)
+        if job is None:
+            break
+        job_id = job.get("job_id")
+        question = job.get("question")
+        if not job_id or not question:
+            continue
+        if should_skip_job(job_id):
+            update_job(job_id, {"status": "canceled"})
+            continue
+        bump_attempts(job_id)
+        update_job(job_id, {"status": "running"})
+        try:
+            sb, url = get_or_start_background_sandbox()
+            headers = {}
+            if settings.enforce_connect_token:
+                creds = sb.create_connect_token(user_metadata={"job_id": job_id})
+                headers = {"Authorization": f"Bearer {creds.token}"}
+            r = httpx.post(
+                f"{url.rstrip('/')}/query",
+                json={"question": question},
+                headers=headers,
+                timeout=httpx.Timeout(120.0, connect=30.0),
+            )
+            r.raise_for_status()
+            update_job(job_id, {"status": "complete", "result": r.json()})
+        except Exception as exc:
+            update_job(job_id, {"status": "failed", "error": str(exc)})
+        jobs_processed += 1
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    **_retry_kwargs(),
 )
 def terminate_service_sandbox() -> dict:
     """Terminate the background sandbox to flush writes to the volume.
 
-    Sandbox writes are only synced to the volume when the sandbox terminates.
+    Sandbox writes are synced when the sandbox terminates. If volume commits are enabled
+    (via `volume_commit_interval`), writes may already be persisted without termination.
     Call this function after the agent has created files to ensure they are persisted.
 
     Returns:
@@ -543,7 +781,7 @@ def terminate_service_sandbox() -> dict:
         return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300)
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
 def snapshot_service() -> dict:
     """Snapshot function to capture filesystem diffs and store snapshot metadata.
 
@@ -579,6 +817,7 @@ def main():
         secrets=agent_sdk_secrets,
         workdir="/root/app",
         timeout=60 * 10,  # 10 minutes
+        **_sandbox_resource_kwargs(),
         verbose=True,
     )
 
