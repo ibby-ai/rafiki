@@ -21,7 +21,7 @@ for i in "${!QUESTIONS[@]}"; do
     echo "Q: ${QUESTIONS[$i]}"
     echo ""
 
-    modal run -m agent_sandbox.app::run_agent_remote \
+    uv run modal run -m agent_sandbox.app::run_agent_remote \
         --question "${QUESTIONS[$i]}" 2>&1 | tail -5
 
     echo ""

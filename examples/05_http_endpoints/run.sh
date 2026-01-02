@@ -31,9 +31,28 @@ echo ""
 
 # Streaming (limited output)
 echo "4. Streaming Query (POST /query_stream) - first 5 seconds:"
-timeout 5 curl -N -X POST "${DEV_URL}/query_stream" \
-    -H 'Content-Type: application/json' \
-    -d '{"question":"Count from 1 to 3"}' || true
+# Use gtimeout (macOS coreutils) or timeout (Linux), with fallback
+TIMEOUT_CMD=""
+if command -v gtimeout &> /dev/null; then
+    TIMEOUT_CMD="gtimeout 5"
+elif command -v timeout &> /dev/null; then
+    TIMEOUT_CMD="timeout 5"
+fi
+
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD curl -N -X POST "${DEV_URL}/query_stream" \
+        -H 'Content-Type: application/json' \
+        -d '{"question":"Count from 1 to 3"}' || true
+else
+    echo "(timeout not available - streaming for ~3 seconds using background process)"
+    curl -N -X POST "${DEV_URL}/query_stream" \
+        -H 'Content-Type: application/json' \
+        -d '{"question":"Count from 1 to 3"}' &
+    CURL_PID=$!
+    sleep 3
+    kill $CURL_PID 2>/dev/null || true
+    wait $CURL_PID 2>/dev/null || true
+fi
 echo ""
 
 echo ""
