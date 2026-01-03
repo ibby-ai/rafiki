@@ -6,7 +6,7 @@ Demonstrates how files written to `/data/` persist to Modal Volume across sandbo
 
 1. Agent writes files to `/data/` inside the sandbox
 2. `/data/` is mounted to Modal Volume `svc-runner-8001-vol`
-3. When sandbox terminates, writes are flushed to the volume
+3. Writes are flushed on `volume_commit_interval` (default: 60s) or when the sandbox terminates
 4. Files survive across sandbox restarts
 
 ## Usage
@@ -40,6 +40,6 @@ uv run modal volume rm svc-runner-8001-vol /hello.py
 
 ## Important Notes
 
-- Files are only synced to volume when the sandbox terminates
-- Use `terminate_service_sandbox` to flush writes immediately
+- Files are synced on the commit interval (default: 60s) or when the sandbox terminates
+- Use `terminate_service_sandbox` to flush writes immediately if you need a hard sync
 - Volume name is configured in `agent_sandbox/config/settings.py`

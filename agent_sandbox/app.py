@@ -150,11 +150,14 @@ def _sandbox_resource_kwargs() -> dict[str, object]:
     return kwargs
 
 
-def _function_runtime_kwargs(*, include_retries: bool = True) -> dict[str, object]:
+def _function_runtime_kwargs(
+    *, include_retries: bool = True, include_autoscale: bool = True
+) -> dict[str, object]:
     """Combine autoscaling and resource tuning for Modal functions."""
     kwargs: dict[str, object] = {}
     kwargs.update(_function_resource_kwargs())
-    kwargs.update(_autoscale_kwargs())
+    if include_autoscale:
+        kwargs.update(_autoscale_kwargs())
     if include_retries:
         kwargs.update(_retry_kwargs())
     return kwargs
@@ -665,7 +668,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     secrets=agent_sdk_secrets,
     volumes={"/data": _get_persist_volume()},
     enable_memory_snapshot=_settings.enable_memory_snapshot,
-    **_function_runtime_kwargs(),
+    **_function_runtime_kwargs(include_autoscale=False),
 )
 class AgentRunner:
     """Class-based agent runner with lifecycle hooks and optional memory snapshots.
@@ -738,7 +741,7 @@ class AgentRunner:
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
     volumes={"/data": _get_persist_volume()},
-    **_function_runtime_kwargs(),
+    **_function_runtime_kwargs(include_autoscale=False),
 )
 def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     """Run the agent once in a short-lived Modal function.
@@ -757,7 +760,7 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     secrets=agent_sdk_secrets,
     volumes={"/data": _get_persist_volume()},
     schedule=_job_queue_schedule(),
-    **_function_runtime_kwargs(),
+    **_function_runtime_kwargs(include_autoscale=False),
 )
 def process_job_queue() -> None:
     """Process queued agent jobs from JOB_QUEUE and persist results.

@@ -5,6 +5,7 @@
 set -e
 
 VOLUME_NAME="svc-runner-8001-vol"
+COMMIT_WAIT_SECONDS="${COMMIT_WAIT_SECONDS:-65}"
 
 echo "=== File Persistence Example ==="
 echo ""
@@ -16,9 +17,14 @@ uv run modal run -m agent_sandbox.app::run_agent_remote \
 
 echo ""
 
-# Step 2: Terminate sandbox to flush writes
-echo "2. Terminating sandbox to flush writes to volume..."
-uv run modal run -m agent_sandbox.app::terminate_service_sandbox
+# Step 2: Flush writes via commit interval or termination
+if [ "${SKIP_TERMINATE}" = "true" ]; then
+    echo "2. Waiting ${COMMIT_WAIT_SECONDS}s for volume commit interval..."
+    sleep "${COMMIT_WAIT_SECONDS}"
+else
+    echo "2. Terminating sandbox to flush writes to volume..."
+    uv run modal run -m agent_sandbox.app::terminate_service_sandbox
+fi
 
 echo ""
 

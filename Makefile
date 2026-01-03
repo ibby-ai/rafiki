@@ -7,6 +7,9 @@
 # Set this once to your dev endpoint URL (from `modal serve -m agent_sandbox.app`).
 # Example: https://your-org--test-sandbox-http-app-dev.modal.run
 DEV_URL ?= https://saidiibrahim--test-sandbox-http-app-dev.modal.run
+MODAL_PROXY_KEY ?=
+MODAL_PROXY_SECRET ?=
+CURL_PROXY_HEADERS = $(if $(and $(MODAL_PROXY_KEY),$(MODAL_PROXY_SECRET)),-H Modal-Key:$(MODAL_PROXY_KEY) -H Modal-Secret:$(MODAL_PROXY_SECRET),)
 
 .PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs run deploy lint typecheck test format
 
@@ -29,21 +32,21 @@ dev-url:
 curl:
 	@test -n "$(Q)" || { echo "Missing Q. Usage: make curl Q='Your question'"; exit 1; } ; \
 	curl -X POST '$(DEV_URL)/query' \
-	  -H 'Content-Type: application/json' \
+	  -H 'Content-Type: application/json' $(CURL_PROXY_HEADERS) \
 	  -d '{"question":"$(Q)"}'
 
 # Stream a response (POST /query_stream)
 stream:
 	@test -n "$(Q)" || { echo "Missing Q. Usage: make stream Q='Your question'"; exit 1; } ; \
 	curl -N -X POST '$(DEV_URL)/query_stream' \
-	  -H 'Content-Type: application/json' \
+	  -H 'Content-Type: application/json' $(CURL_PROXY_HEADERS) \
 	  -d '{"question":"$(Q)"}'
 
 health:
-	curl -sS '$(DEV_URL)/health'
+	curl -sS $(CURL_PROXY_HEADERS) '$(DEV_URL)/health'
 
 info:
-	curl -sS '$(DEV_URL)/service_info'
+	curl -sS $(CURL_PROXY_HEADERS) '$(DEV_URL)/service_info'
 
 terminate:
 	modal run -m agent_sandbox.app::terminate_service_sandbox

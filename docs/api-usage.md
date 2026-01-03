@@ -891,7 +891,7 @@ const response = await fetch(`${baseUrl}/query`, {
 
 **How it works:**
 1. Enable proxy auth on the public HTTP endpoint
-2. Create a Proxy Auth Token in the Modal workspace
+2. Create a Proxy Auth Token in the Modal workspace (Dashboard > Workspace > Proxy Auth Tokens)
 3. Clients include the token ID/secret in `Modal-Key` and `Modal-Secret` headers
 
 **Enable in your code:**
@@ -914,6 +914,12 @@ curl -X POST https://your-url.modal.run/query \
   -H "Modal-Secret: <token-secret>" \
   -d '{"question": "..."}'
 ```
+
+For the bundled HTTP examples, set `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` so the scripts include these headers
+automatically.
+
+**Rotate tokens**: Create a new Proxy Auth token, update `MODAL_PROXY_KEY`/`MODAL_PROXY_SECRET` in your environment or
+CI secrets, redeploy/restart the app, then revoke the old token in the Modal dashboard.
 
 **JavaScript Example:**
 ```javascript

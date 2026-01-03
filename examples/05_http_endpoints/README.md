@@ -16,6 +16,19 @@ Set the URL:
 export DEV_URL="https://your-org--test-sandbox-http-app-dev.modal.run"
 ```
 
+If Proxy Auth is enabled, export the token credentials so the examples include the headers:
+
+```bash
+export MODAL_PROXY_KEY="your-token-id"
+export MODAL_PROXY_SECRET="your-token-secret"
+```
+
+If you keep these in `.env`, load them into your shell before running the examples:
+
+```bash
+set -a; source .env; set +a
+```
+
 ## Endpoints
 
 | Endpoint | Method | Description |

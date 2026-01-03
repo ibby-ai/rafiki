@@ -157,6 +157,9 @@ modal deploy -m agent_sandbox.deploy
 modal run -m agent_sandbox.app::terminate_service_sandbox
 ```
 
+By default, the controller commits `/data` every 60 seconds (`volume_commit_interval=60`). Unset
+`VOLUME_COMMIT_INTERVAL` (or remove it from `.env`) to revert to commit-on-termination only.
+
 - **Create a filesystem snapshot** (captures current state)
 
 ```bash
@@ -167,8 +170,17 @@ modal run -m agent_sandbox.app::snapshot_service
 
 By default, the public HTTP endpoints are accessible without authentication. To enable Modal Proxy Auth, set
 `require_proxy_auth = True` in `agent_sandbox/config/settings.py` (or via `REQUIRE_PROXY_AUTH=true`). Clients must
-include Proxy Auth Token headers (`Modal-Key` and `Modal-Secret`) on each request. See `docs/api-usage.md` for end-user
-examples.
+include Proxy Auth Token headers (`Modal-Key` and `Modal-Secret`) on each request. The HTTP examples accept
+`MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` environment variables to send these headers. See `docs/api-usage.md` for
+end-user examples.
+
+If you store Proxy Auth credentials in `.env`, run:
+
+```bash
+set -a; source .env; set +a
+```
+
+before running the HTTP examples or Makefile curl commands so the headers are picked up.
 
 ## Execution Patterns
 

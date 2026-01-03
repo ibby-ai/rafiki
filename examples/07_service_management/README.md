@@ -6,7 +6,7 @@ Demonstrates sandbox lifecycle management operations.
 
 | Function | Description |
 |----------|-------------|
-| `terminate_service_sandbox` | Stop sandbox, flush writes to volume |
+| `terminate_service_sandbox` | Stop sandbox, force final flush to volume |
 | `snapshot_service` | Capture filesystem state |
 | `tail_logs` | View recent sandbox logs |
 
@@ -21,7 +21,7 @@ Demonstrates sandbox lifecycle management operations.
 ### Terminate Sandbox
 
 Use when you need to:
-- Ensure files are persisted to volume
+- Force a final sync (even if commit interval is enabled)
 - Force a fresh sandbox on next request
 - Clean up resources
 
@@ -56,6 +56,8 @@ Sandbox exists? ─── No ──→ Create new sandbox
                     Sandbox terminates
                                ↓
                     Writes flushed to volume
+
+Note: With `volume_commit_interval` enabled (default: 60s), writes are also synced periodically without termination.
 ```
 
 ## Configuration

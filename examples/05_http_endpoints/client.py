@@ -5,32 +5,51 @@ Usage:
 """
 
 import json
+import os
 import sys
 
 import httpx
 
 
+def _build_headers() -> dict:
+    headers: dict[str, str] = {}
+    proxy_key = os.getenv("MODAL_PROXY_KEY")
+    proxy_secret = os.getenv("MODAL_PROXY_SECRET")
+    if proxy_key and proxy_secret:
+        headers["Modal-Key"] = proxy_key
+        headers["Modal-Secret"] = proxy_secret
+    elif proxy_key or proxy_secret:
+        print("Warning: set both MODAL_PROXY_KEY and MODAL_PROXY_SECRET to use Proxy Auth.")
+    return headers
+
+
 def health_check(base_url: str) -> dict:
     """Check if the service is healthy."""
+    headers = _build_headers()
     with httpx.Client(timeout=10.0) as client:
-        response = client.get(f"{base_url}/health")
+        response = client.get(f"{base_url}/health", headers=headers)
         response.raise_for_status()
         return response.json()
 
 
 def query_agent(base_url: str, question: str) -> dict:
     """Send a query to the agent and return the response."""
+    headers = _build_headers()
     with httpx.Client(timeout=120.0) as client:
-        response = client.post(f"{base_url}/query", json={"question": question})
+        response = client.post(f"{base_url}/query", json={"question": question}, headers=headers)
         response.raise_for_status()
         return response.json()
 
 
 def stream_query(base_url: str, question: str):
     """Stream a query response using SSE."""
+    headers = _build_headers()
     with httpx.Client(timeout=None) as client:
         with client.stream(
-            "POST", f"{base_url}/query_stream", json={"question": question}
+            "POST",
+            f"{base_url}/query_stream",
+            json={"question": question},
+            headers=headers,
         ) as response:
             response.raise_for_status()
             for line in response.iter_lines():
@@ -49,8 +68,9 @@ def stream_query(base_url: str, question: str):
 
 def get_service_info(base_url: str) -> dict:
     """Get information about the background sandbox service."""
+    headers = _build_headers()
     with httpx.Client(timeout=30.0) as client:
-        response = client.get(f"{base_url}/service_info")
+        response = client.get(f"{base_url}/service_info", headers=headers)
         response.raise_for_status()
         return response.json()
 

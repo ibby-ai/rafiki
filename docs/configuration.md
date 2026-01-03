@@ -73,7 +73,9 @@ modal secret list
 
 ## Configuration Options Reference
 
-All configuration options are defined in `agent_sandbox/config/settings.py`. Here's the complete reference:
+All configuration options are defined in `agent_sandbox/config/settings.py`. This repo ships a `.env` with
+recommended defaults for autoscaling, concurrency, and volume commits; the defaults below reflect that file.
+Override or remove `.env` values to return to Modal defaults.
 
 ### Sandbox Identity
 
@@ -113,14 +115,16 @@ All configuration options are defined in `agent_sandbox/config/settings.py`. Her
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_containers` | `null` | Minimum warm containers for Modal functions |
-| `max_containers` | `null` | Maximum containers for Modal functions |
-| `buffer_containers` | `null` | Extra warm containers to absorb bursts |
+| `min_containers` | `1` | Minimum warm containers for Modal functions |
+| `max_containers` | `4` | Maximum containers for Modal functions |
+| `buffer_containers` | `1` | Extra warm containers to absorb bursts |
 | `scaledown_window` | `null` | Seconds to wait before scaling down |
-| `concurrent_max_inputs` | `null` | Hard cap on concurrent inputs per container |
-| `concurrent_target_inputs` | `null` | Target concurrency per container |
+| `concurrent_max_inputs` | `10` | Hard cap on concurrent inputs per container |
+| `concurrent_target_inputs` | `5` | Target concurrency per container |
 
-**When to enable**: Use autoscaling for lower latency and smoother bursts. Enable concurrency for I/O-heavy endpoints.
+**When to enable**: Defaults keep a single warm container with a small buffer and modest concurrency on the public
+`http_app` endpoint. Set any value to `null` to disable that control and rely on Modal defaults. Tune higher for
+bursty traffic or lower to reduce cost.
 
 ### Retry Policy (Optional)
 
@@ -187,9 +191,14 @@ Request arrives → Cold start again
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `persist_vol_version` | `null` | Modal Volume version (set to 2 to opt into v2 volumes) |
-| `volume_commit_interval` | `null` | Seconds between `Volume.commit()` calls in the sandbox |
+| `volume_commit_interval` | `60` | Seconds between `Volume.commit()` calls in the sandbox |
 
-**When to enable**: Use `volume_commit_interval` to persist `/data` without terminating the sandbox.
+**When to enable**: Use `volume_commit_interval` to persist `/data` without terminating the sandbox. Remove
+`VOLUME_COMMIT_INTERVAL` to commit only on sandbox termination.
+
+**Verify commits**: Run `examples/03_file_persistence/run.sh` with `SKIP_TERMINATE=true` and wait for the
+commit interval (defaults to 60s). Then `modal volume ls svc-runner-8001-vol` should show the new file without
+terminating the sandbox.
 
 ### Snapshots (Optional)
 

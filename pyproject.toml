@@ -59,3 +59,8 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.10",
+]
