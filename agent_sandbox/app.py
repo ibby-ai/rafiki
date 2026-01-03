@@ -95,7 +95,16 @@ def _base_anthropic_sdk_image() -> modal.Image:
 
 
 def _autoscale_kwargs() -> dict[str, int]:
-    """Build autoscaling kwargs for Modal functions when configured."""
+    """Build autoscaling kwargs for Modal functions when configured.
+
+    Modal autoscaling parameters:
+        - min_containers: Minimum always-warm containers (reduces cold starts)
+        - max_containers: Maximum concurrent containers (cost/capacity limit)
+        - buffer_containers: Extra warm containers beyond current demand
+        - scaledown_window: Seconds to wait before scaling down idle containers
+
+    See: https://modal.com/docs/guide/cold-start#scaling-settings
+    """
     kwargs: dict[str, int] = {}
     if _settings.min_containers is not None:
         kwargs["min_containers"] = _settings.min_containers
@@ -162,13 +171,24 @@ def _maybe_concurrent():
 
 
 def _retry_policy() -> modal.Retries | None:
+    """Build a Modal retry policy for transient failure recovery.
+
+    Uses exponential backoff: delay = initial_delay * (backoff_coefficient ^ attempt)
+    Delays are capped at max_delay to prevent unbounded waits.
+
+    Defaults (when settings provided): 2x backoff, 1s initial, 60s max.
+    Returns None if retry_max_attempts is not configured.
+
+    See: https://modal.com/docs/guide/retries
+    """
     if _settings.retry_max_attempts is None:
         return None
     return modal.Retries(
         max_retries=_settings.retry_max_attempts,
+        # Exponential backoff: delay doubles each retry (2.0 coefficient)
         backoff_coefficient=_settings.retry_backoff_coefficient or 2.0,
-        initial_delay=_settings.retry_initial_delay or 1.0,
-        max_delay=_settings.retry_max_delay or 60.0,
+        initial_delay=_settings.retry_initial_delay or 1.0,  # First retry after 1s
+        max_delay=_settings.retry_max_delay or 60.0,  # Cap at 60s between retries
     )
 
 
@@ -197,6 +217,9 @@ agent_sdk_secrets = get_modal_secrets()
     **_function_runtime_kwargs(include_retries=False),
 )
 @_maybe_concurrent()
+# requires_proxy_auth: When True, requests must include Modal workspace auth token.
+# Protects public endpoints from unauthorized access. Set via require_proxy_auth setting.
+# See: https://modal.com/docs/guide/webhooks#proxy-authentication
 @modal.asgi_app(requires_proxy_auth=_settings.require_proxy_auth)
 def http_app():
     """ASGI app exposing HTTP endpoints for the agent service."""
@@ -316,7 +339,14 @@ async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     return list(buf)
 
 
-# Persistent registry for sandbox metadata (survives sandbox restarts)
+# Persistent registry for sandbox metadata (survives sandbox restarts).
+# Keys are sandbox names (e.g., SANDBOX_NAME), values are dicts with:
+#   - id: Sandbox object_id
+#   - url: Service tunnel URL
+#   - volume: Name of attached persistent volume
+#   - created_at: Unix timestamp of creation
+#   - tags: Dict of sandbox tags (role, app, port)
+#   - status: Current status ("running", "missing")
 SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
 
 # Service sandbox identity and config (will be initialized from Settings)
@@ -378,7 +408,9 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
     raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
 
 
-# A cron cleanup that reaps stale records in SESSIONS and restarts a dead sandbox
+# Cron job that runs every 2 minutes to verify sandbox health and update SESSIONS metadata.
+# If the sandbox has died, marks it as "missing" so get_or_start_background_sandbox()
+# will create a new one on the next request.
 @app.function(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
@@ -386,10 +418,14 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
     **_retry_kwargs(),
 )
 def cleanup_sessions():
-    """Periodic cleanup of sandbox session metadata."""
+    """Verify sandbox health and update SESSIONS registry.
+
+    Runs every 2 minutes via cron. Checks if the named sandbox is still alive
+    by attempting to fetch its tunnel URLs. Updates SESSIONS status accordingly.
+    """
     try:
         sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
-        _ = sb.tunnels()  # Will raise if gone
+        _ = sb.tunnels()  # Will raise NotFoundError if sandbox is gone
         SESSIONS[SANDBOX_NAME] = {**SESSIONS.get(SANDBOX_NAME, {}), "status": "running"}
     except modal_exc.NotFoundError:
         SESSIONS[SANDBOX_NAME] = {"status": "missing"}
@@ -632,12 +668,29 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     **_function_runtime_kwargs(),
 )
 class AgentRunner:
-    """Class-based agent runner with lifecycle hooks and optional snapshots."""
+    """Class-based agent runner with lifecycle hooks and optional memory snapshots.
+
+    Memory Snapshot Lifecycle (when enable_memory_snapshot=True):
+        1. First cold start: _snapshot_setup() runs and Modal captures memory state
+        2. Subsequent starts: Container restores from snapshot, _post_restore() runs
+        3. On termination: _cleanup() releases resources
+
+    This pattern moves heavy initialization (MCP servers, tool registry) into the
+    snapshot, dramatically reducing cold start latency for subsequent invocations.
+
+    See: https://modal.com/docs/guide/memory-snapshot
+    """
 
     system_prompt: str = modal.parameter(default=SYSTEM_PROMPT)
 
     @modal.enter(snap=True)
     def _snapshot_setup(self) -> None:
+        """Initialize agent options and capture in memory snapshot.
+
+        snap=True means this runs BEFORE the snapshot is taken. The initialized
+        _options object will be serialized into the snapshot and restored on
+        subsequent container starts, avoiding re-initialization overhead.
+        """
         from agent_sandbox.agents.loop import build_agent_options
         from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
@@ -647,6 +700,12 @@ class AgentRunner:
 
     @modal.enter(snap=False)
     def _post_restore(self) -> None:
+        """Post-restore initialization after snapshot restore.
+
+        snap=False means this runs AFTER restoring from snapshot. Used to
+        reinitialize any state that can't be serialized (e.g., network connections).
+        Also serves as fallback if snapshot wasn't taken or is corrupted.
+        """
         if getattr(self, "_options", None) is None:
             from agent_sandbox.agents.loop import build_agent_options
             from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
@@ -657,10 +716,12 @@ class AgentRunner:
 
     @modal.exit()
     def _cleanup(self) -> None:
+        """Release resources when container shuts down."""
         self._options = None
 
     @modal.method()
     def run(self, question: str = DEFAULT_QUESTION) -> None:
+        """Execute an agent query and stream responses to stdout."""
         import anyio
         from claude_agent_sdk import ClaudeSDKClient
 
@@ -699,14 +760,28 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     **_function_runtime_kwargs(),
 )
 def process_job_queue() -> None:
-    """Process queued agent jobs and persist results."""
+    """Process queued agent jobs from JOB_QUEUE and persist results.
+
+    Runs on a cron schedule (job_queue_cron setting) or can be invoked directly.
+    Processes up to max_jobs_per_run jobs per invocation to bound runtime.
+
+    Job Processing Flow:
+        1. Pull job from JOB_QUEUE (2s timeout per poll)
+        2. Check if job was canceled (skip if so)
+        3. Increment attempt counter
+        4. Set status to "running"
+        5. Forward query to background sandbox service
+        6. Update status to "complete" or "failed" with result/error
+    """
     settings = Settings()
     jobs_processed = 0
     max_jobs = settings.max_jobs_per_run
 
     while True:
+        # Respect per-run job limit to bound execution time
         if max_jobs is not None and jobs_processed >= max_jobs:
             break
+        # Non-blocking poll with 2s timeout - exit loop if queue empty
         job = JOB_QUEUE.get(timeout=2)
         if job is None:
             break
@@ -714,6 +789,7 @@ def process_job_queue() -> None:
         question = job.get("question")
         if not job_id or not question:
             continue
+        # Respect cancellation before processing
         if should_skip_job(job_id):
             update_job(job_id, {"status": "canceled"})
             continue
@@ -783,10 +859,19 @@ def terminate_service_sandbox() -> dict:
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
 def snapshot_service() -> dict:
-    """Snapshot function to capture filesystem diffs and store snapshot metadata.
+    """Capture the sandbox filesystem as a reusable Modal Image.
+
+    Creates a snapshot of the current sandbox filesystem state, which can be
+    used to create new sandboxes with the same files/configuration. Useful for
+    capturing agent-installed tools or downloaded artifacts.
+
+    The snapshot metadata is persisted to SESSIONS for later retrieval.
 
     Returns:
-        Dict with snapshot metadata including image_id and timestamp.
+        Dict with snapshot info: image_id (Modal Image ID), ts (timestamp),
+        and base (sandbox name the snapshot was taken from).
+
+    See: https://modal.com/docs/guide/sandbox#filesystem-snapshots
     """
     sb, _ = get_or_start_background_sandbox()
     img = sb.snapshot_filesystem()

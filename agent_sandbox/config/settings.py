@@ -2,13 +2,16 @@
 Configuration and settings management using Pydantic Settings.
 
 This module handles environment variables, Modal secrets, and application settings.
+All settings can be configured via environment variables (case-insensitive).
+
+See CLAUDE.md and docs/configuration.md for usage guidance.
 """
 
 from functools import lru_cache
 from typing import Self
 
 import modal
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,48 +34,89 @@ class Settings(BaseSettings):
     persist_vol_name: str = "svc-runner-8001-vol"
 
     # Security settings
+    # enforce_connect_token: Require Modal connect token in X-Verified-User-Data header
     enforce_connect_token: bool = False
+    # require_proxy_auth: Require Modal workspace auth for public HTTP endpoints
     require_proxy_auth: bool = False
 
-    # Timeouts (in seconds)
-    service_timeout: int = 60
-    sandbox_timeout: int = 60 * 60 * 12  # 12 hours
-    sandbox_idle_timeout: int = 60 * 10  # 10 minutes
+    # Timeouts
+    service_timeout: int = Field(default=60, description="Health check timeout (seconds)")
+    sandbox_timeout: int = Field(
+        default=60 * 60 * 12, description="Max sandbox lifetime (seconds, default 12h)"
+    )
+    sandbox_idle_timeout: int = Field(
+        default=60 * 10, description="Shutdown after idle (seconds, default 10min)"
+    )
 
-    # Resource limits (requests)
-    sandbox_cpu: float = 1.0
-    sandbox_memory: int = 2048  # MB
-    # Resource limits (hard limits; optional)
-    sandbox_cpu_limit: float | None = None
-    sandbox_memory_limit: int | None = None  # MB
-    sandbox_ephemeral_disk: int | None = None  # MB
+    # Resource requests (guaranteed minimums)
+    sandbox_cpu: float = Field(default=1.0, description="CPU cores requested")
+    sandbox_memory: int = Field(default=2048, description="Memory requested (MB)")
+    # Resource limits (hard caps, optional)
+    sandbox_cpu_limit: float | None = Field(
+        default=None, description="Max CPU cores (None = no limit)"
+    )
+    sandbox_memory_limit: int | None = Field(
+        default=None, description="Max memory (MB, None = no limit)"
+    )
+    sandbox_ephemeral_disk: int | None = Field(default=None, description="Ephemeral disk size (MB)")
 
     # Autoscaling controls (optional)
-    min_containers: int | None = None
-    max_containers: int | None = None
-    buffer_containers: int | None = None
-    scaledown_window: int | None = None  # seconds
+    # See: https://modal.com/docs/guide/cold-start#scaling-settings
+    min_containers: int | None = Field(
+        default=None, description="Minimum warm containers (reduces cold starts)"
+    )
+    max_containers: int | None = Field(default=None, description="Maximum concurrent containers")
+    buffer_containers: int | None = Field(
+        default=None, description="Extra warm containers beyond demand"
+    )
+    scaledown_window: int | None = Field(
+        default=None, description="Seconds before scaling down idle containers"
+    )
 
-    # Input concurrency (optional)
-    concurrent_max_inputs: int | None = None
-    concurrent_target_inputs: int | None = None
+    # Input concurrency - multiple requests per container
+    # See: https://modal.com/docs/guide/concurrent-inputs
+    concurrent_max_inputs: int | None = Field(
+        default=None, description="Max concurrent requests per container"
+    )
+    concurrent_target_inputs: int | None = Field(
+        default=None, description="Target concurrent requests (for load balancing)"
+    )
 
-    # Retry policy (optional)
-    retry_max_attempts: int | None = None
-    retry_initial_delay: float | None = None
-    retry_backoff_coefficient: float | None = None
-    retry_max_delay: float | None = None
+    # Retry policy (optional) - exponential backoff for transient failures
+    # See: https://modal.com/docs/guide/retries
+    retry_max_attempts: int | None = Field(default=None, description="Max retry attempts")
+    retry_initial_delay: float | None = Field(
+        default=None, description="First retry delay (seconds)"
+    )
+    retry_backoff_coefficient: float | None = Field(
+        default=None, description="Delay multiplier per retry (e.g., 2.0)"
+    )
+    retry_max_delay: float | None = Field(
+        default=None, description="Max delay between retries (seconds)"
+    )
 
-    # Persistence and queue settings (optional)
-    persist_vol_version: int | None = None
-    volume_commit_interval: int | None = None  # seconds
+    # Persistence and queue settings
+    persist_vol_version: int | None = Field(
+        default=None, description="Volume version (None=default, 2=v2 volumes)"
+    )
+    volume_commit_interval: int | None = Field(
+        default=None,
+        description="Seconds between volume commits (None=commit on termination only)",
+    )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
-    job_queue_cron: str | None = None
-    max_jobs_per_run: int | None = None  # Max jobs to process per scheduled run
+    job_queue_cron: str | None = Field(
+        default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
+    )
+    max_jobs_per_run: int | None = Field(
+        default=None, description="Max jobs per scheduled queue processing run"
+    )
 
-    # Snapshot and lifecycle settings (optional)
-    enable_memory_snapshot: bool = False
+    # Snapshot and lifecycle
+    enable_memory_snapshot: bool = Field(
+        default=False,
+        description="Enable Modal memory snapshots for faster cold starts",
+    )
 
     # Agent filesystem root
     agent_fs_root: str = "/data"

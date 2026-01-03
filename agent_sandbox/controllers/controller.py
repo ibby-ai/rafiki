@@ -54,17 +54,41 @@ app.add_middleware(RequestIdMiddleware)
 _settings = get_settings()
 _logger = logging.getLogger(__name__)
 
+# Tracks the last time we committed the persistent volume. Used to enforce
+# minimum intervals between commits to avoid excessive I/O overhead.
+# See: https://modal.com/docs/guide/volumes
 _LAST_VOLUME_COMMIT_TS: float | None = None
 
 
 def _require_connect_token(request: Request) -> None:
+    """Validate that the request includes a Modal connect token.
+
+    When enforce_connect_token is enabled in settings, this ensures requests
+    come through Modal's authenticated proxy rather than directly to the
+    sandbox tunnel URL.
+
+    Args:
+        request: The incoming FastAPI request.
+
+    Raises:
+        HTTPException: 401 if token is missing and enforcement is enabled.
+    """
     if _settings.enforce_connect_token:
         if not request.headers.get("X-Verified-User-Data"):
             raise HTTPException(status_code=401, detail="Missing or invalid connect token")
 
 
 def _get_persist_volume() -> modal.Volume:
-    """Return the configured persistent volume handle."""
+    """Get a handle to the persistent Modal Volume.
+
+    Creates the volume if it doesn't exist. Optionally pins to a specific
+    volume version if configured (v2 volumes support better concurrency).
+
+    Returns:
+        A modal.Volume handle for the configured persist_vol_name.
+
+    See: https://modal.com/docs/guide/volumes
+    """
     kwargs: dict[str, Any] = {"create_if_missing": True}
     if _settings.persist_vol_version is not None:
         kwargs["version"] = _settings.persist_vol_version
@@ -72,7 +96,14 @@ def _get_persist_volume() -> modal.Volume:
 
 
 def _maybe_reload_volume() -> None:
-    """Reload the persistent volume if commit/reload is enabled."""
+    """Reload the persistent volume to see latest committed writes.
+
+    Called before each query to ensure we have fresh data from other workers
+    or previous requests. Only active when volume_commit_interval is configured.
+
+    This is important because Modal Volumes are eventually consistent - without
+    reload, we might read stale data cached from container startup.
+    """
     if _settings.volume_commit_interval is None:
         return
     try:
@@ -82,12 +113,23 @@ def _maybe_reload_volume() -> None:
 
 
 def _maybe_commit_volume() -> None:
-    """Commit the persistent volume based on the configured interval."""
+    """Commit pending volume writes if enough time has passed.
+
+    Called after each query to persist any files written during execution.
+    Uses _LAST_VOLUME_COMMIT_TS to enforce minimum intervals between commits,
+    reducing I/O overhead for high-frequency requests.
+
+    Commit behavior:
+    - interval is None: No commits (writes persist on sandbox termination)
+    - interval <= 0: Commit after every request
+    - interval > 0: Commit only if that many seconds have passed
+    """
     global _LAST_VOLUME_COMMIT_TS
     interval = _settings.volume_commit_interval
     if interval is None:
         return
     now = time.time()
+    # Commit if: first commit, interval=0 (always), or enough time elapsed
     if (
         _LAST_VOLUME_COMMIT_TS is None
         or interval <= 0
@@ -123,6 +165,10 @@ async def allow_web_only(
 def _options() -> ClaudeAgentOptions:
     """Build default `ClaudeAgentOptions` used by this service.
 
+    Uses "acceptEdits" permission mode which auto-approves file edits but still
+    requires tool permission checks via can_use_tool. This is safer than
+    "bypassPermissions" while still enabling autonomous operation in the sandbox.
+
     Returns:
         A configured `ClaudeAgentOptions` instance using our local MCP servers,
         allowed tools, and `SYSTEM_PROMPT`.
@@ -131,10 +177,9 @@ def _options() -> ClaudeAgentOptions:
         system_prompt=SYSTEM_PROMPT,
         mcp_servers=get_mcp_servers(),
         allowed_tools=get_allowed_tools(),
-        # Running in a sandbox, so we can bypass permissions
-        # Making the agent truly autonomous
-        # permission_mode="bypassPermissions" # Not allowed when have root access
         can_use_tool=allow_web_only,
+        # acceptEdits: Auto-approve file operations, but still check tools via can_use_tool.
+        # bypassPermissions would skip all checks but isn't allowed with root access.
         permission_mode="acceptEdits",
     )
 
@@ -243,6 +288,11 @@ async def query_agent_stream(body: QueryBody, request: Request):
     _require_connect_token(request)
 
     def _format_sse(event: str, data: dict[str, Any]) -> str:
+        """Format a Server-Sent Event message.
+
+        SSE format: "event: <type>\\ndata: <json>\\n\\n"
+        Client receives events via EventSource API or curl with -N flag.
+        """
         payload = json.dumps(data, ensure_ascii=True)
         return f"event: {event}\ndata: {payload}\n\n"
 
