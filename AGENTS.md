@@ -47,11 +47,20 @@ The repository uses pre-commit with ruff for automated linting and formatting. H
 - **ruff** — lints code and auto-fixes issues (import ordering, unused imports, style violations).
 - **ruff-format** — formats code consistently (like Black, but faster).
 
-### Manual Usage
+### Required: Run After Making Changes
+
+**Always run the ruff linter and formatter after making any code changes:**
+
+```bash
+uv run ruff check --fix .
+uv run ruff format .
+```
+
+This ensures code quality and prevents commit failures from hook violations.
+
+### Other Commands
 
 - `uv run pre-commit run --all-files` — run all hooks on the entire codebase.
-- `uv run ruff check --fix .` — run linter manually.
-- `uv run ruff format .` — run formatter manually.
 
 If a commit fails due to hook violations, the hooks will auto-fix what they can. Stage the fixes and commit again.
 

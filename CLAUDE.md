@@ -30,13 +30,18 @@ Before working with this codebase:
 
 The project uses pre-commit hooks with ruff for linting and formatting. Hooks run automatically on commit.
 
-```bash
-# Run hooks manually on all files
-uv run pre-commit run --all-files
+**Important:** Always run the ruff linter and formatter after making code changes:
 
-# Run linter/formatter directly
+```bash
 uv run ruff check --fix .
 uv run ruff format .
+```
+
+Other useful commands:
+
+```bash
+# Run all pre-commit hooks on all files
+uv run pre-commit run --all-files
 ```
 
 ## Common Commands
