@@ -31,7 +31,23 @@ class Settings(BaseSettings):
     # Sandbox configuration
     sandbox_name: str = "svc-runner-8001"
     service_port: int = 8001
+    service_ports: list[int] = Field(
+        default=[8001],
+        description="List of encrypted ports to expose via tunnels",
+    )
     persist_vol_name: str = "svc-runner-8001-vol"
+
+    # Custom domains for production deployments
+    custom_domains: list[str] | None = Field(
+        default=None,
+        description="Custom domain names for production (e.g., ['api.example.com'])",
+    )
+
+    # Admin secret for privileged operations
+    admin_secret_name: str = Field(
+        default="admin-secret",
+        description="Modal secret name for admin operations (terminate, snapshot)",
+    )
 
     # Security settings
     # enforce_connect_token: Require Modal connect token in X-Verified-User-Data header
@@ -42,7 +58,7 @@ class Settings(BaseSettings):
     # Timeouts
     service_timeout: int = Field(default=60, description="Health check timeout (seconds)")
     sandbox_timeout: int = Field(
-        default=60 * 60 * 12, description="Max sandbox lifetime (seconds, default 12h)"
+        default=60 * 60 * 24, description="Max sandbox lifetime (seconds, default 24h)"
     )
     sandbox_idle_timeout: int = Field(
         default=60 * 10, description="Shutdown after idle (seconds, default 10min)"
@@ -58,12 +74,15 @@ class Settings(BaseSettings):
     sandbox_memory_limit: int | None = Field(
         default=None, description="Max memory (MB, None = no limit)"
     )
-    sandbox_ephemeral_disk: int | None = Field(default=None, description="Ephemeral disk size (MB)")
+    sandbox_ephemeral_disk: int | None = Field(
+        default=None,
+        description="Ephemeral disk size (MiB). Modal maximum is 3.0 TiB.",
+    )
 
     # Autoscaling controls (optional)
     # See: https://modal.com/docs/guide/cold-start#scaling-settings
     min_containers: int | None = Field(
-        default=None, description="Minimum warm containers (reduces cold starts)"
+        default=1, description="Minimum warm containers (reduces cold starts)"
     )
     max_containers: int | None = Field(default=None, description="Maximum concurrent containers")
     buffer_containers: int | None = Field(
@@ -105,6 +124,7 @@ class Settings(BaseSettings):
     )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
+    session_store_name: str = "agent-session-store"
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
@@ -116,6 +136,11 @@ class Settings(BaseSettings):
     enable_memory_snapshot: bool = Field(
         default=False,
         description="Enable Modal memory snapshots for faster cold starts",
+    )
+
+    # Agent execution limits
+    agent_max_turns: int | None = Field(
+        default=50, description="Maximum conversation turns (None = unlimited)"
     )
 
     # Agent filesystem root
@@ -136,13 +161,24 @@ class Settings(BaseSettings):
         return self
 
 
-def get_modal_secrets() -> list[modal.Secret]:
+def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
     """Get Modal secrets required for the application.
+
+    Args:
+        include_admin: If True, include the admin secret for privileged operations.
+            The admin secret is optional and won't fail if not configured.
 
     Returns:
         List of Modal Secret objects.
     """
-    return [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
+    secrets = [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
+
+    if include_admin:
+        settings = get_settings()
+        # Admin secret is optional - use required_keys=[] to avoid failure if not set
+        secrets.append(modal.Secret.from_name(settings.admin_secret_name))
+
+    return secrets
 
 
 @lru_cache

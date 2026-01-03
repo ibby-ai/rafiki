@@ -24,6 +24,7 @@ Prerequisite for curl testing:
   `https://<org>--test-sandbox-http-app-dev.modal.run`.
 """
 
+import inspect
 import logging
 import time
 import urllib.error
@@ -130,8 +131,9 @@ def _function_resource_kwargs() -> dict[str, object]:
     else:
         kwargs["memory"] = _settings.sandbox_memory
 
-    if _settings.sandbox_ephemeral_disk is not None:
-        kwargs["ephemeral_disk"] = _settings.sandbox_ephemeral_disk
+    ephemeral_disk = _validated_ephemeral_disk()
+    if ephemeral_disk is not None:
+        kwargs["ephemeral_disk"] = ephemeral_disk
     return kwargs
 
 
@@ -147,7 +149,39 @@ def _sandbox_resource_kwargs() -> dict[str, object]:
         kwargs["memory"] = (_settings.sandbox_memory, _settings.sandbox_memory_limit)
     else:
         kwargs["memory"] = _settings.sandbox_memory
+    ephemeral_disk = _validated_ephemeral_disk()
+    if ephemeral_disk is not None and _sandbox_supports_ephemeral_disk():
+        kwargs["ephemeral_disk"] = ephemeral_disk
     return kwargs
+
+
+def _sandbox_supports_ephemeral_disk() -> bool:
+    """Return True if modal.Sandbox.create accepts ephemeral_disk."""
+    try:
+        return "ephemeral_disk" in inspect.signature(modal.Sandbox.create).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _validated_ephemeral_disk() -> int | None:
+    """Validate ephemeral disk size against Modal limits."""
+    if _settings.sandbox_ephemeral_disk is None:
+        return None
+    max_mib = 3145728
+    if _settings.sandbox_ephemeral_disk <= 0:
+        logging.getLogger(__name__).warning(
+            "sandbox_ephemeral_disk=%s MiB must be positive; skipping",
+            _settings.sandbox_ephemeral_disk,
+        )
+        return None
+    if _settings.sandbox_ephemeral_disk > max_mib:
+        logging.getLogger(__name__).warning(
+            "sandbox_ephemeral_disk=%s MiB exceeds Modal maximum %s; skipping",
+            _settings.sandbox_ephemeral_disk,
+            max_mib,
+        )
+        return None
+    return _settings.sandbox_ephemeral_disk
 
 
 def _function_runtime_kwargs(
@@ -223,7 +257,12 @@ agent_sdk_secrets = get_modal_secrets()
 # requires_proxy_auth: When True, requests must include Modal workspace auth token.
 # Protects public endpoints from unauthorized access. Set via require_proxy_auth setting.
 # See: https://modal.com/docs/guide/webhooks#proxy-authentication
-@modal.asgi_app(requires_proxy_auth=_settings.require_proxy_auth)
+# custom_domains: Production-ready branding with custom domain names.
+# See: https://modal.com/docs/guide/webhooks#custom-domains
+@modal.asgi_app(
+    requires_proxy_auth=_settings.require_proxy_auth,
+    custom_domains=_settings.custom_domains or [],
+)
 def http_app():
     """ASGI app exposing HTTP endpoints for the agent service."""
     return web_app
@@ -477,33 +516,37 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
     # an isolated container with its own filesystem, network, and resources.
     # -------------------------------------------------------------------------
     svc_vol = _get_persist_volume()
-    SANDBOX = modal.Sandbox.create(
-        # Command to run inside the sandbox (uvicorn starts our FastAPI app)
-        "uvicorn",
-        "agent_sandbox.controllers.controller:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(SERVICE_PORT),
-        # MODAL-SPECIFIC PARAMETERS EXPLAINED:
-        app=app,  # Associates sandbox with this Modal App
-        image=agent_sdk_image,  # Container image with all dependencies
-        secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
-        workdir="/root/app",  # Working directory inside container
-        name=SANDBOX_NAME,  # Named sandbox enables discovery via from_name()
-        # encrypted_ports: Makes this port accessible via Modal's secure tunnel.
-        # Without this, the port would only be accessible inside the sandbox.
-        # Modal creates an HTTPS URL that tunnels traffic to this internal port.
-        encrypted_ports=[SERVICE_PORT],
-        # volumes: Mount a Modal Volume at /data for persistent storage.
-        # Files written here survive sandbox restarts (but only after termination).
-        volumes={"/data": svc_vol},
-        # Lifecycle settings:
-        timeout=_settings.sandbox_timeout,  # Max lifetime (default: 12 hours)
-        idle_timeout=_settings.sandbox_idle_timeout,  # Shutdown after idle (default: 10 min)
-        **_sandbox_resource_kwargs(),
-        verbose=True,
-    )
+    try:
+        SANDBOX = modal.Sandbox.create(
+            # Command to run inside the sandbox (uvicorn starts our FastAPI app)
+            "uvicorn",
+            "agent_sandbox.controllers.controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(SERVICE_PORT),
+            # MODAL-SPECIFIC PARAMETERS EXPLAINED:
+            app=app,  # Associates sandbox with this Modal App
+            image=agent_sdk_image,  # Container image with all dependencies
+            secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
+            workdir="/root/app",  # Working directory inside container
+            name=SANDBOX_NAME,  # Named sandbox enables discovery via from_name()
+            # encrypted_ports: Makes these ports accessible via Modal's secure tunnels.
+            # Without this, the ports would only be accessible inside the sandbox.
+            # Modal creates HTTPS URLs that tunnel traffic to these internal ports.
+            # Supports multiple ports for multi-service architectures (API + frontend).
+            encrypted_ports=_settings.service_ports,
+            # volumes: Mount a Modal Volume at /data for persistent storage.
+            # Files written here survive sandbox restarts (but only after termination).
+            volumes={"/data": svc_vol},
+            # Lifecycle settings:
+            timeout=_settings.sandbox_timeout,  # Max lifetime (default: 12 hours)
+            idle_timeout=_settings.sandbox_idle_timeout,  # Shutdown after idle (default: 10 min)
+            **_sandbox_resource_kwargs(),
+            verbose=True,
+        )
+    except modal_exc.AlreadyExistsError:
+        SANDBOX = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
 
     # Optional: set tags after creation (useful for filtering in Modal dashboard)
     SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
@@ -607,25 +650,28 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
 
     # Create with persistent volume
     svc_vol = _get_persist_volume()
-    SANDBOX = await modal.Sandbox.create.aio(
-        "uvicorn",
-        "agent_sandbox.controllers.controller:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(SERVICE_PORT),
-        app=app,
-        image=agent_sdk_image,
-        secrets=agent_sdk_secrets,
-        workdir="/root/app",
-        name=SANDBOX_NAME,
-        encrypted_ports=[SERVICE_PORT],
-        volumes={"/data": svc_vol},
-        timeout=_settings.sandbox_timeout,
-        idle_timeout=_settings.sandbox_idle_timeout,
-        **_sandbox_resource_kwargs(),
-        verbose=True,
-    )
+    try:
+        SANDBOX = await modal.Sandbox.create.aio(
+            "uvicorn",
+            "agent_sandbox.controllers.controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(SERVICE_PORT),
+            app=app,
+            image=agent_sdk_image,
+            secrets=agent_sdk_secrets,
+            workdir="/root/app",
+            name=SANDBOX_NAME,
+            encrypted_ports=_settings.service_ports,
+            volumes={"/data": svc_vol},
+            timeout=_settings.sandbox_timeout,
+            idle_timeout=_settings.sandbox_idle_timeout,
+            **_sandbox_resource_kwargs(),
+            verbose=True,
+        )
+    except modal_exc.AlreadyExistsError:
+        SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", SANDBOX_NAME)
 
     # Optional: set tags after creation
     await SANDBOX.set_tags.aio(
@@ -698,7 +744,10 @@ class AgentRunner:
         from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
         self._options = build_agent_options(
-            get_mcp_servers(), get_allowed_tools(), self.system_prompt
+            get_mcp_servers(),
+            get_allowed_tools(),
+            self.system_prompt,
+            max_turns=_settings.agent_max_turns,
         )
 
     @modal.enter(snap=False)
@@ -714,7 +763,10 @@ class AgentRunner:
             from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
             self._options = build_agent_options(
-                get_mcp_servers(), get_allowed_tools(), self.system_prompt
+                get_mcp_servers(),
+                get_allowed_tools(),
+                self.system_prompt,
+                max_turns=_settings.agent_max_turns,
             )
 
     @modal.exit()
@@ -753,6 +805,45 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
         question: Natural-language query to send to the agent.
     """
     AgentRunner().run.remote(question)
+
+
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
+def load_test(num_queries: int = 10, question: str = DEFAULT_QUESTION) -> dict:
+    """Run parallel queries to test scaling behavior.
+
+    Spawns multiple agent queries in parallel using Modal's distributed execution
+    and measures throughput. Useful for validating autoscaling configuration
+    and measuring system performance under load.
+
+    Usage:
+        modal run -m agent_sandbox.app::load_test --num-queries 10
+        modal run -m agent_sandbox.app::load_test --num-queries 100 --question "Hello"
+
+    Args:
+        num_queries: Number of parallel queries to spawn.
+        question: Query to send to each agent instance.
+
+    Returns:
+        Dict with load test results:
+            - total_queries: Number of queries executed
+            - duration_seconds: Total time taken
+            - throughput_per_second: Queries completed per second
+    """
+    start = time.time()
+
+    # Spawn queries in parallel using Modal's distributed execution
+    handles = [run_agent_remote.spawn(question) for _ in range(num_queries)]
+
+    # Wait for all to complete
+    for h in handles:
+        h.get()
+
+    duration = time.time() - start
+    return {
+        "total_queries": num_queries,
+        "duration_seconds": round(duration, 2),
+        "throughput_per_second": round(num_queries / duration, 3),
+    }
 
 
 @app.function(
