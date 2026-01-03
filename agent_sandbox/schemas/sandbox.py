@@ -7,3 +7,6 @@ class QueryBody(BaseSchema):
     """Request body for agent queries."""
 
     question: str
+    session_id: str | None = None
+    session_key: str | None = None
+    fork_session: bool = False

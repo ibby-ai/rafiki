@@ -58,6 +58,8 @@ _logger = logging.getLogger(__name__)
 # minimum intervals between commits to avoid excessive I/O overhead.
 # See: https://modal.com/docs/guide/volumes
 _LAST_VOLUME_COMMIT_TS: float | None = None
+SESSION_STORE = modal.Dict.from_name(_settings.session_store_name, create_if_missing=True)
+SESSION_CACHE: dict[str, str] = {}
 
 
 def _require_connect_token(request: Request) -> None:
@@ -142,6 +144,32 @@ def _maybe_commit_volume() -> None:
             _logger.warning("Failed to commit persistent volume", exc_info=True)
 
 
+def _resolve_session_id(body: QueryBody) -> str | None:
+    """Resolve the session ID from the request body or stored mapping."""
+    if body.session_id:
+        return body.session_id
+    if body.session_key:
+        try:
+            stored = SESSION_STORE.get(body.session_key)
+            if stored:
+                return stored
+        except Exception:
+            _logger.warning("Session store unavailable; falling back to memory cache")
+        return SESSION_CACHE.get(body.session_key)
+    return None
+
+
+def _persist_session_id(session_key: str | None, session_id: str | None) -> None:
+    """Persist session ID mapping when a session key is provided."""
+    if not session_key or not session_id:
+        return
+    try:
+        SESSION_STORE[session_key] = session_id
+    except Exception:
+        _logger.warning("Session store unavailable; persisting to memory cache only")
+        SESSION_CACHE[session_key] = session_id
+
+
 async def allow_web_only(
     tool_name: str,
     tool_input: dict[str, Any],
@@ -162,7 +190,7 @@ async def allow_web_only(
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 
-def _options() -> ClaudeAgentOptions:
+def _options(session_id: str | None = None, fork_session: bool = False) -> ClaudeAgentOptions:
     """Build default `ClaudeAgentOptions` used by this service.
 
     Uses "acceptEdits" permission mode which auto-approves file edits but still
@@ -181,6 +209,9 @@ def _options() -> ClaudeAgentOptions:
         # acceptEdits: Auto-approve file operations, but still check tools via can_use_tool.
         # bypassPermissions would skip all checks but isn't allowed with root access.
         permission_mode="acceptEdits",
+        resume=session_id,
+        fork_session=fork_session,
+        max_turns=_settings.agent_max_turns,
     )
 
 
@@ -248,10 +279,13 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     _require_connect_token(request)
 
     _maybe_reload_volume()
+    resolved_session_id = _resolve_session_id(body)
     try:
         messages: list[Message] = []
         result_message: ResultMessage | None = None
-        async with ClaudeSDKClient(options=_options()) as client:
+        async with ClaudeSDKClient(
+            options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
+        ) as client:
             await client.query(body.question)
             async for msg in client.receive_response():
                 messages.append(msg)
@@ -265,10 +299,14 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         elif text_blocks:
             final_text = "\n".join(text_blocks)
 
+        summary = build_final_summary(result_message, final_text)
+        session_id = summary.get("session_id")
+        _persist_session_id(body.session_key, session_id)
         return {
             "ok": True,
             "messages": [serialize_message(message) for message in messages],
-            "summary": build_final_summary(result_message, final_text),
+            "summary": summary,
+            "session_id": session_id,
         }
     finally:
         _maybe_commit_volume()
@@ -298,10 +336,13 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
     async def sse():
         _maybe_reload_volume()
+        resolved_session_id = _resolve_session_id(body)
         messages: list[Message] = []
         result_message: ResultMessage | None = None
         try:
-            async with ClaudeSDKClient(options=_options()) as client:
+            async with ClaudeSDKClient(
+                options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
+            ) as client:
                 await client.query(body.question)
                 async for msg in client.receive_response():
                     messages.append(msg)
@@ -317,7 +358,9 @@ async def query_agent_stream(body: QueryBody, request: Request):
             elif text_blocks:
                 final_text = "\n".join(text_blocks)
 
-            yield _format_sse("done", build_final_summary(result_message, final_text))
+            summary = build_final_summary(result_message, final_text)
+            _persist_session_id(body.session_key, summary.get("session_id"))
+            yield _format_sse("done", summary)
         finally:
             _maybe_commit_volume()
 

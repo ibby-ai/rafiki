@@ -182,6 +182,25 @@ set -a; source .env; set +a
 
 before running the HTTP examples or Makefile curl commands so the headers are picked up.
 
+### Session Resumption (Hybrid)
+
+The `/query` and `/query_stream` endpoints accept optional session fields to resume prior context:
+
+- `session_id`: resume a specific prior session returned by the API
+- `session_key`: a server-side key that maps to the last session for a user (stored in a Modal Dict)
+- `fork_session`: when resuming, start a new branched session instead of continuing the original
+
+Example (server remembers the last session for `user-123`):
+
+```bash
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Continue the plan","session_key":"user-123"}'
+```
+
+The response includes a top-level `session_id` you can store for explicit resumption later. You can
+configure the backing Modal Dict name with `SESSION_STORE_NAME` in `agent_sandbox/config/settings.py`.
+
 ## Execution Patterns
 
 This starter supports **two patterns** for running the agent. Choose based on your use case:

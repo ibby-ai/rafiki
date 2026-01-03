@@ -61,6 +61,7 @@ class QueryResponse(BaseSchema):
     ok: bool
     messages: list[dict[str, Any]]
     summary: SummarySchema
+    session_id: str | None = None
 
 
 class ErrorResponse(BaseSchema):

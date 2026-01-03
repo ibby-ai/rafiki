@@ -105,11 +105,11 @@ Override or remove `.env` values to return to Modal defaults.
 |---------|---------|-------------|
 | `sandbox_cpu_limit` | `null` | Hard CPU limit when set (tuple with `sandbox_cpu`) |
 | `sandbox_memory_limit` | `null` | Hard memory limit in MB (tuple with `sandbox_memory`) |
-| `sandbox_ephemeral_disk` | `null` | Ephemeral disk in MB for function-based workloads |
+| `sandbox_ephemeral_disk` | `null` | Ephemeral disk in MiB for function-based workloads |
 
 **Notes**:
 - CPU/memory limits apply to Modal functions and sandboxes where configured.
-- Ephemeral disk currently applies to Modal functions (not the long-lived sandbox).
+- Ephemeral disk applies to Modal functions and to sandboxes when supported by the Modal SDK. Modal enforces a maximum of 3.0 TiB; values above that are ignored and a warning is logged.
 
 ### Autoscaling & Concurrency (Optional)
 
@@ -167,6 +167,12 @@ No requests for `sandbox_idle_timeout`? → Sandbox terminates
 Request arrives → Cold start again
 ```
 
+### Agent Behavior
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `agent_max_turns` | `50` | Maximum conversation turns before the agent stops (set to `null` for unlimited) |
+
 ### Security
 
 | Setting | Default | Description |
@@ -183,6 +189,7 @@ Request arrives → Cold start again
 | `job_queue_name` | `"agent-job-queue"` | Modal Queue name for async jobs |
 | `job_results_dict` | `"agent-job-results"` | Modal Dict name for job results |
 | `job_queue_cron` | `null` | Optional cron schedule for `process_job_queue` |
+| `session_store_name` | `"agent-session-store"` | Modal Dict name for session resumption mapping |
 
 **When to enable**: Set `job_queue_cron` when you want the queue worker to run automatically on a schedule (for example, `*/1 * * * *` for every minute). Leave unset to run the worker manually.
 

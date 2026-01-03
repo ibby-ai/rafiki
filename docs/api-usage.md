@@ -118,7 +118,10 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "question": "Your question here"
+  "question": "Your question here",
+  "session_id": null,
+  "session_key": null,
+  "fork_session": false
 }
 ```
 
@@ -127,6 +130,13 @@ Content-Type: application/json
 curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the capital of Canada?"}'
+```
+
+**Session Resumption Example:**
+```bash
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Continue the plan", "session_key": "user-123"}'
 ```
 
 **Response:**
@@ -161,6 +171,12 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
 - `ok` (boolean): Indicates success
 - `messages` (array of objects): Structured agent messages (`assistant`, `result`, etc.)
 - `summary` (object): Convenience summary of the completed run
+- `session_id` (string, optional): Session identifier for resumption
+
+**Session fields:**
+- `session_id`: Resume from a specific session returned by a prior response.
+- `session_key`: Server-side key used to store or resume the last session for a user.
+- `fork_session`: When resuming, start a new branched session instead of continuing the original.
 
 **Status Codes:**
 - `200 OK`: Query executed successfully
@@ -198,7 +214,10 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "question": "Your question here"
+  "question": "Your question here",
+  "session_id": null,
+  "session_key": null,
+  "fork_session": false
 }
 ```
 
