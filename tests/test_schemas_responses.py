@@ -186,10 +186,12 @@ class TestQueryResponse:
             ok=True,
             messages=[{"type": "assistant", "content": []}],
             summary=SummarySchema(is_complete=True, text="Done"),
+            provider="claude",
         )
         assert response.ok is True
         assert len(response.messages) == 1
         assert response.summary.is_complete is True
+        assert response.provider == "claude"
 
     def test_query_response_empty_messages(self):
         """Test query response with empty messages list."""
