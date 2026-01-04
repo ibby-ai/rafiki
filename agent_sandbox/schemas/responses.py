@@ -62,6 +62,8 @@ class QueryResponse(BaseSchema):
     messages: list[dict[str, Any]]
     summary: SummarySchema
     session_id: str | None = None
+    provider: str | None = None
+    provider_payload: dict[str, Any] | None = None
 
 
 class ErrorResponse(BaseSchema):
