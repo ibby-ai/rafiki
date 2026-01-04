@@ -134,7 +134,7 @@ class Settings(BaseSettings):
 
     # Snapshot and lifecycle
     enable_memory_snapshot: bool = Field(
-        default=False,
+        default=True,
         description="Enable Modal memory snapshots for faster cold starts",
     )
 
