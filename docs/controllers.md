@@ -6,7 +6,7 @@ This document explains the role and implementation of the `agent_sandbox.control
 
 The controller is a **FastAPI microservice** that runs inside a long-lived `modal.Sandbox`. It's responsible for:
 
-1. **Executing agent queries** using the Claude Agent SDK
+1. **Executing agent queries** using the configured agent provider (Claude by default)
 2. **Managing tool permissions** and MCP server connections
 3. **Maintaining warm state** to avoid cold-start latency
 4. **Handling streaming responses** via Server-Sent Events (SSE)
@@ -18,8 +18,8 @@ The controller is a **FastAPI microservice** that runs inside a long-lived `moda
 **Key Components:**
 
 - FastAPI application instance (`app`)
-- Permission handlers (`allow_web_only`, `allow_web_only_with_updates`)
-- Configuration builder (`_options()`)
+- Provider resolution and permission hooks
+- Configuration builder (`_build_options()`)
 - HTTP endpoints (`/health_check`, `/query`, `/query_stream`)
 
 ## How It's Started
@@ -49,7 +49,7 @@ SANDBOX = modal.Sandbox.create(
 
 ### Permission Handlers
 
-The controller implements permission handlers to control which tools the agent can use:
+The controller delegates permission handling to the provider (Claude defaults to web-only tools):
 
 ```python
 async def allow_web_only(
@@ -71,25 +71,18 @@ async def allow_web_only(
 
 ### Configuration Builder
 
-The `_options()` function centralizes Claude Agent SDK configuration:
+The `_build_options()` function centralizes provider configuration:
 
 ```python
-def _options() -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
-        mcp_servers=get_mcp_servers(),
-        allowed_tools=get_allowed_tools(),
-        can_use_tool=allow_web_only,
-        permission_mode="acceptEdits"
-    )
+provider_id, provider, options = _build_options(body, session_id)
 ```
 
 **What it configures:**
 
 - System prompt (from `agent_sandbox.prompts.prompts`)
-- MCP servers (from `agent_sandbox.tools`)
+- MCP servers (from provider/tool registry)
 - Allowed tools list
-- Permission handling strategy
+- Permission handling strategy (provider-specific)
 
 ## HTTP Endpoints
 
@@ -279,7 +272,7 @@ The controller runs on an encrypted port (default: 8001) that's only accessible 
 **Without controller (short-lived function):**
 
 - Every request spawns new Modal function
-- Must initialize Claude Agent SDK client
+- Must initialize agent provider client
 - Must connect to MCP servers
 - Must load tools and configuration
 - **Latency:** 5-15 seconds per request
@@ -287,7 +280,7 @@ The controller runs on an encrypted port (default: 8001) that's only accessible 
 **With controller (long-lived sandbox):**
 
 - Service stays warm between requests
-- Claude Agent SDK client can be reused
+- Agent provider client can be reused
 - MCP connections are maintained
 - Tools are already loaded
 - **Latency:** < 1 second per request

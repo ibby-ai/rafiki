@@ -39,7 +39,7 @@ The application uses a **two-tier architecture pattern** optimized for low laten
 │         Background Sandbox (Long-lived Process)              │
 │  - modal.Sandbox running uvicorn                            │
 │  - FastAPI service: agent_sandbox.controllers.controller     │
-│  - Hosts Claude Agent SDK client                            │
+│  - Hosts agent provider client (Claude default)             │
 │  - Maintains warm state for low latency                      │
 │  - Persistent volume mounted at /data                       │
 │  - Session store & job results via Modal Dicts              │
@@ -100,7 +100,7 @@ def http_app():
 - `GET /service_info` - Returns information about the background sandbox
 
 **Why it's lightweight:**
-- Doesn't run the Claude Agent SDK directly
+- Doesn't run the agent provider directly
 - Doesn't maintain long-lived connections to Anthropic
 - Simply forwards requests and returns responses
 - Can scale independently from the background service
@@ -134,7 +134,7 @@ def http_app():
 **Location:** `agent_sandbox/controllers/controller.py`
 
 **What it does:**
-- Runs the actual Claude Agent SDK client
+- Runs the actual agent provider client
 - Executes agent queries and tool calls
 - Maintains warm state (avoids cold-start latency)
 - Handles MCP server connections
@@ -308,4 +308,3 @@ Both commands:
 - [Controllers Deep Dive](./controllers.md) - Detailed explanation of the controller service
 - [Modal Ingress](./modal-ingress.md) - How Modal handles HTTP ingress
 - [Configuration](./configuration.md) - Configuration options and settings
-

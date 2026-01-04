@@ -7,7 +7,7 @@ follow INTEGRATION.md to enable these tools.
 
 from typing import Any
 
-from claude_agent_sdk import tool
+from agent_sandbox.tools.decorators import tool
 
 
 @tool(

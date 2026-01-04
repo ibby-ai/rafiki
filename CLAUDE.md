@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolated sandboxed environments. The architecture enables running autonomous AI agents with secure execution, persistent background services, and HTTP API endpoints.
+This is a Modal-based agent sandbox starter that runs the Claude Agent SDK by default, with support for alternative providers and custom images. The architecture enables running autonomous AI agents with secure execution, persistent background services, and HTTP API endpoints.
 
 **Key Technologies:**
 
 - Modal (serverless infrastructure and sandboxing)
-- Claude Agent SDK (`claude-agent-sdk`)
+- Claude Agent SDK (`claude-agent-sdk`) as the default provider
 - FastAPI (HTTP endpoints and internal service)
 - MCP (Model Context Protocol) for tool integration
 - uv (Python package manager)
@@ -22,7 +22,7 @@ Before working with this codebase:
 2. Activate the virtual environment: `source .venv/bin/activate`
 3. Sync dependencies: `uv sync`
 4. Modal must be configured: `modal setup`
-5. Anthropic API key must be stored in Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
+5. If using the Claude provider, store the Anthropic API key in the Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
 
 **Important:** Always activate the `.venv` before running commands. Use `uv run` to run Python commands (e.g., `uv run pytest`).
 
@@ -112,7 +112,7 @@ The codebase demonstrates two distinct patterns for running agents:
 
 **`agent_sandbox/agents/loop.py`** - CLI-based agent execution
 
-- Builds `ClaudeAgentOptions` from MCP servers and prompts
+- Builds provider-specific options from MCP servers and prompts
 - `run_agent()`: Single query execution with streaming output
 - Used by short-lived sandboxes via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
 
@@ -122,7 +122,7 @@ The codebase demonstrates two distinct patterns for running agents:
 - `POST /query`: Agent query endpoint that returns responses
 - `POST /query_stream`: Agent query endpoint that streams responses as SSE
 - Runs via `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
-- Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
+- Uses `permission_mode="acceptEdits"` with a provider permission handler for controlled tool access
 - Supports session resumption via `session_id`, `session_key`, `fork_session`
 
 **`agent_sandbox/app.py`** - HTTP Gateway endpoints (in addition to above)
@@ -137,9 +137,9 @@ The codebase demonstrates two distinct patterns for running agents:
 - `get_modal_secrets()`: Returns Modal Secret objects
 - Centralized configuration for sandbox settings, timeouts, resources, etc.
 
-**`agent_sandbox/app.py`** - Image building
+**`agent_sandbox/images/`** - Image building
 
-- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
+- `claude_image.py`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
 - Working directory: `/root/app`
 - Copies local project and installs dependencies
 
@@ -190,8 +190,9 @@ When adding new endpoints or execution patterns, choose permission mode based on
 1. Create a new file in `agent_sandbox/tools/` (e.g., `my_tool.py`):
 
 ```python
-from claude_agent_sdk import tool
 from typing import Any
+
+from agent_sandbox.tools.decorators import tool
 
 @tool("my_tool_name", "Description", {"param": str})
 async def my_tool(args: dict[str, Any]) -> dict[str, Any]:
@@ -228,7 +229,7 @@ Edit `agent_sandbox/config/settings.py`:
 
 Edit `agent_sandbox/app.py`:
 
-- Modify `_base_anthropic_sdk_image()` to add pip packages (`.pip_install()`)
+- Modify `ClaudeImageBuilder` in `agent_sandbox/images/claude_image.py` to add pip packages (`.pip_install()`)
 - Add apt packages (`.apt_install()`)
 - Adjust image build steps
 
@@ -258,7 +259,7 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Sandbox Timeouts**: Background sandbox runs for max 24 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
 - **Autoscaling**: `min_containers=1` keeps containers warm by default; adjust `max_containers`, `scaledown_window` for cost/latency tradeoffs
 - **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (agent_sandbox/tools/registry.py)
-- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/app.py)
+- **Node.js Dependency**: Claude Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/images/claude_image.py)
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
 - **Agent Turn Limits**: Set `agent_max_turns` to limit conversation turns and prevent runaway loops

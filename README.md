@@ -1,4 +1,4 @@
-# Agent Sandbox Starter (Modal + Claude Agent SDK)
+# Agent Sandbox Starter (Modal + Claude Agent SDK default)
 
 ![CI](https://github.com/Saidiibrahim/agent-sandbox-starter/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
@@ -9,7 +9,7 @@
 
 ![Agent Sandbox Starter](docs/images/readme-image.png)
 
-A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolated, secure sandboxed environments. Infrastructure for running autonomous AI agents with:
+A Modal-based agent sandbox starter that runs the **Claude Agent SDK by default**, with support for alternative providers and custom images. Infrastructure for running autonomous AI agents with:
 
 - **Secure execution** via Modal sandboxes
 - **HTTP API endpoints** for querying agents
@@ -45,7 +45,7 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
 ## Requirements
 
 - **Modal CLI**: `pip install modal` and `modal setup`
-- **Anthropic API key**: store in a Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
+- **Anthropic API key** (Claude provider only): store in a Modal Secret named `anthropic-secret` with key `ANTHROPIC_API_KEY`
 
 ## Setup
 
@@ -77,6 +77,13 @@ agent_sandbox/
 │
 ├── agents/                  # Agent execution logic
 │   └── loop.py             # Single-shot agent interaction runner
+│
+├── images/                  # Modal image builders
+│   ├── claude_image.py      # Default Claude image
+│   └── custom_image.py      # Custom base image support
+│
+├── providers/               # Agent provider implementations
+│   └── claude.py            # Claude Agent SDK provider
 │
 ├── controllers/            # FastAPI service for background sandbox
 │   └── controller.py       # HTTP endpoints (/query, /query_stream, /health_check)
@@ -329,7 +336,7 @@ User Request ───────────▶│  /query, /query_stream → 
                          ┌──────────────────────────────────────────────────┐
                          │       Background Sandbox (FastAPI :8001)          │
                          │                                                   │
-                         │   Claude Agent SDK ─── MCP Tools                  │
+                         │   Agent Provider (Claude default) ─── MCP Tools   │
                          │          │                                        │
                          │   ┌──────┴──────┐                                 │
                          │   │ /data vol   │  Session/Job Store (Modal Dict) │
@@ -367,7 +374,7 @@ This project uses a **persistent sandbox service pattern**:
                                  │  │              │            ││     │
                                  │  │              ▼            ││     │
                                  │  │  ┌─────────────────────┐  ││     │
-                                 │  │  │   Claude Agent SDK  │  ││     │
+                                 │  │  │  Agent Provider     │  ││     │
                                  │  │  │   ┌─────┐ ┌───────┐ │  ││     │
                                  │  │  │   │ MCP │ │ Tools │ │  ││     │
                                  │  │  │   └─────┘ └───────┘ │  ││     │
@@ -393,8 +400,8 @@ This project uses a **persistent sandbox service pattern**:
 | **JOB_QUEUE (Modal Queue)** | Async job processing | Fire-and-forget workloads; long-running tasks processed by workers |
 | **Proxy connection** | Internal forwarding | Decouples the public API from the agent runtime; enables independent scaling |
 | **Long-lived Modal Sandbox** | Persistent agent environment | Stays warm for hours; eliminates cold-start delays on each request |
-| **FastAPI Controller** | Agent orchestration service | Manages Claude SDK client, tool permissions, and streaming responses |
-| **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
+| **FastAPI Controller** | Agent orchestration service | Manages provider client, tool permissions, and streaming responses |
+| **Agent Provider + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
 | **/data vol (persist)** | Durable file storage | Files written here survive sandbox restarts; critical for stateful operations |
 | **Modal Dicts (SESSION/JOB)** | Session & job state storage | Resume conversations; track async job status |
 
@@ -411,7 +418,7 @@ This project uses a **persistent sandbox service pattern**:
 - `agent_sandbox/controllers/controller.py`: FastAPI microservice running inside the sandbox with `/health_check`, `/query`, and `/query_stream` endpoints
 - `agent_sandbox/agents/loop.py`: Standalone agent runner (used by `run_agent_remote` for one-off executions)
 - `agent_sandbox/config/settings.py`: Pydantic Settings for configuration and Modal secrets management
-- `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations (WebSearch, WebFetch, Read, Write). Obtained from [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python)
+- `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations (WebSearch, WebFetch, Read, Write). Default tooling uses the [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python)
 - `agent_sandbox/prompts/prompts.py`: System prompt and default question
 
 ### Persistent Storage

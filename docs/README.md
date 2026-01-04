@@ -162,7 +162,7 @@ Learn how to create custom tools:
 The infrastructure that accepts incoming HTTP/HTTPS requests and routes them to your application. Modal handles this automatically - see [Modal Ingress](./modal-ingress.md).
 
 ### Controller
-The long-lived background service that actually runs the Claude Agent SDK. It's a FastAPI microservice running inside a Modal Sandbox - see [Controllers](./controllers.md).
+The long-lived background service that actually runs the agent provider (Claude default). It's a FastAPI microservice running inside a Modal Sandbox - see [Controllers](./controllers.md).
 
 ### Two-Tier Architecture
 The pattern used in this application:
@@ -176,4 +176,3 @@ This pattern optimizes for low latency and resource efficiency - see [Architectu
 - [Main README](../README.md) - Quickstart and project overview
 - [Modal Documentation](https://modal.com/docs) - Official Modal platform docs
 - [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python) - Agent SDK reference
-
