@@ -39,6 +39,7 @@ from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import Settings, get_modal_secrets
+from agent_sandbox.images import get_agent_image
 from agent_sandbox.jobs import (
     JOB_QUEUE,
     bump_attempts,
@@ -63,36 +64,6 @@ web_app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def _base_anthropic_sdk_image() -> modal.Image:
-    """Build a base image with Python, FastAPI, uvicorn, httpx and Claude SDK.
-
-    - Uses Debian slim with Python 3.11
-    - Installs `claude-agent-sdk` plus FastAPI/uvicorn/httpx
-    - Installs Node.js and `@anthropic-ai/claude-agent-sdk` (Agent SDK dependency)
-    - Sets `/root/app` as the workdir and copies the local project into place
-    """
-    return (
-        modal.Image.debian_slim(python_version="3.11")
-        .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
-        .pip_install("uv")
-        .apt_install("curl")
-        .run_commands(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
-            "apt-get install -y nodejs",
-            "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
-        )
-        .env({"AGENT_FS_ROOT": "/data"})
-        .workdir("/root/app")
-        .add_local_dir(
-            ".",
-            remote_path="/root/app",
-            copy=True,
-            ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
-        )
-        .run_commands("cd /root/app && uv pip install -e . --system --no-cache")
-    )
 
 
 def _autoscale_kwargs() -> dict[str, int]:
@@ -244,13 +215,13 @@ def _job_queue_schedule() -> modal.Cron | None:
 
 
 # Create image and secrets
-agent_sdk_image = _base_anthropic_sdk_image()
-agent_sdk_secrets = get_modal_secrets()
+agent_image = get_agent_image(_settings)
+agent_secrets = get_modal_secrets()
 
 
 @app.function(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     **_function_runtime_kwargs(include_retries=False),
 )
 @_maybe_concurrent()
@@ -359,7 +330,7 @@ async def service_info():
     return {"url": url, "sandbox_id": sb.object_id}
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
+@app.function(image=agent_image, secrets=agent_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
 
@@ -454,8 +425,8 @@ def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") 
 # If the sandbox has died, marks it as "missing" so get_or_start_background_sandbox()
 # will create a new one on the next request.
 @app.function(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     schedule=modal.Cron("*/2 * * * *"),
     **_retry_kwargs(),
 )
@@ -527,8 +498,8 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             str(SERVICE_PORT),
             # MODAL-SPECIFIC PARAMETERS EXPLAINED:
             app=app,  # Associates sandbox with this Modal App
-            image=agent_sdk_image,  # Container image with all dependencies
-            secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
+            image=agent_image,  # Container image with all dependencies
+            secrets=agent_secrets,  # Inject secrets (API keys) into environment
             workdir="/root/app",  # Working directory inside container
             name=SANDBOX_NAME,  # Named sandbox enables discovery via from_name()
             # encrypted_ports: Makes these ports accessible via Modal's secure tunnels.
@@ -659,8 +630,8 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
             "--port",
             str(SERVICE_PORT),
             app=app,
-            image=agent_sdk_image,
-            secrets=agent_sdk_secrets,
+            image=agent_image,
+            secrets=agent_secrets,
             workdir="/root/app",
             name=SANDBOX_NAME,
             encrypted_ports=_settings.service_ports,
@@ -710,8 +681,8 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
 
 
 @app.cls(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     volumes={"/data": _get_persist_volume()},
     enable_memory_snapshot=_settings.enable_memory_snapshot,
     **_function_runtime_kwargs(include_autoscale=False),
@@ -741,13 +712,11 @@ class AgentRunner:
         subsequent container starts, avoiding re-initialization overhead.
         """
         from agent_sandbox.agents.loop import build_agent_options
-        from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
         self._options = build_agent_options(
-            get_mcp_servers(),
-            get_allowed_tools(),
-            self.system_prompt,
+            system_prompt=self.system_prompt,
             max_turns=_settings.agent_max_turns,
+            provider_config=_settings.agent_provider_options,
         )
 
     @modal.enter(snap=False)
@@ -760,13 +729,11 @@ class AgentRunner:
         """
         if getattr(self, "_options", None) is None:
             from agent_sandbox.agents.loop import build_agent_options
-            from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
             self._options = build_agent_options(
-                get_mcp_servers(),
-                get_allowed_tools(),
-                self.system_prompt,
+                system_prompt=self.system_prompt,
                 max_turns=_settings.agent_max_turns,
+                provider_config=_settings.agent_provider_options,
             )
 
     @modal.exit()
@@ -778,20 +745,22 @@ class AgentRunner:
     def run(self, question: str = DEFAULT_QUESTION) -> None:
         """Execute an agent query and stream responses to stdout."""
         import anyio
-        from claude_agent_sdk import ClaudeSDKClient
+
+        from agent_sandbox.providers import get_provider
 
         async def _run() -> None:
-            async with ClaudeSDKClient(options=self._options) as client:
+            provider = get_provider(_settings.agent_provider)
+            async with provider.create_client(options=self._options) as client:
                 await client.query(question)
                 async for msg in client.receive_response():
-                    print(msg)
+                    print(provider.serialize_message(msg))
 
         anyio.run(_run)
 
 
 @app.function(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     volumes={"/data": _get_persist_volume()},
     **_function_runtime_kwargs(include_autoscale=False),
 )
@@ -807,7 +776,7 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     AgentRunner().run.remote(question)
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
+@app.function(image=agent_image, secrets=agent_secrets, timeout=600)
 def load_test(num_queries: int = 10, question: str = DEFAULT_QUESTION) -> dict:
     """Run parallel queries to test scaling behavior.
 
@@ -847,8 +816,8 @@ def load_test(num_queries: int = 10, question: str = DEFAULT_QUESTION) -> dict:
 
 
 @app.function(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     volumes={"/data": _get_persist_volume()},
     schedule=_job_queue_schedule(),
     **_function_runtime_kwargs(include_autoscale=False),
@@ -909,8 +878,8 @@ def process_job_queue() -> None:
 
 
 @app.function(
-    image=agent_sdk_image,
-    secrets=agent_sdk_secrets,
+    image=agent_image,
+    secrets=agent_secrets,
     **_retry_kwargs(),
 )
 def terminate_service_sandbox() -> dict:
@@ -951,7 +920,7 @@ def terminate_service_sandbox() -> dict:
         return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
+@app.function(image=agent_image, secrets=agent_secrets, timeout=300, **_retry_kwargs())
 def snapshot_service() -> dict:
     """Capture the sandbox filesystem as a reusable Modal Image.
 
@@ -992,8 +961,8 @@ def main():
     """
     sb = modal.Sandbox.create(
         app=app,
-        image=agent_sdk_image,
-        secrets=agent_sdk_secrets,
+        image=agent_image,
+        secrets=agent_secrets,
         workdir="/root/app",
         timeout=60 * 10,  # 10 minutes
         **_sandbox_resource_kwargs(),

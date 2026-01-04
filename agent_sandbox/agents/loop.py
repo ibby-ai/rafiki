@@ -5,7 +5,7 @@ This module is invoked in two ways:
 - From a Modal sandbox via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
 - Directly as a script (`python -m agent_sandbox.agents.loop --question ...`) for local testing.
 
-It constructs `ClaudeAgentOptions` using our local MCP tool server(s) and
+It constructs provider-specific options using our local MCP tool server(s) and
 system prompt, then issues a query and prints streamed responses.
 """
 
@@ -13,46 +13,36 @@ import argparse
 from typing import Any
 
 import anyio
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
-from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+from agent_sandbox.providers import get_provider
 
 _settings = get_settings()
 
 
 def build_agent_options(
-    mcp_servers: dict[str, Any],
-    allowed_tools: list[str],
+    mcp_servers: dict[str, Any] | None = None,
+    allowed_tools: list[str] | None = None,
     system_prompt: str = SYSTEM_PROMPT,
     resume: str | None = None,
     fork_session: bool = False,
     max_turns: int | None = None,
-) -> ClaudeAgentOptions:
-    """Create `ClaudeAgentOptions` for a CLI or sandbox run.
-
-    Args:
-        mcp_servers: Mapping of MCP server name to server instance created by
-            `create_sdk_mcp_server`.
-        allowed_tools: Whitelist of tool names the agent is allowed to invoke.
-        system_prompt: Behavior-shaping prompt for the agent.
-
-    Returns:
-        A configured `ClaudeAgentOptions`.
-
-    See also:
-        Modal docs for sandbox execution and file mounting; tools are
-        defined in `agent_sandbox.tools` and the environment is configured in
-        `agent_sandbox.config.settings`.
-    """
-    return ClaudeAgentOptions(
+    provider_id: str | None = None,
+    provider_config: dict[str, Any] | None = None,
+) -> Any:
+    """Create provider-specific options for a CLI or sandbox run."""
+    provider = get_provider(provider_id or _settings.agent_provider)
+    mcp_servers = mcp_servers or provider.get_mcp_servers()
+    allowed_tools = allowed_tools or provider.get_allowed_tools()
+    return provider.build_options(
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-        resume=resume,
+        session_id=resume,
         fork_session=fork_session,
         max_turns=max_turns,
+        provider_config=provider_config,
     )
 
 
@@ -66,21 +56,20 @@ async def run_agent(
     Args:
         question: Natural-language input to pass to the agent.
     """
+    provider = get_provider(_settings.agent_provider)
     options = build_agent_options(
-        get_mcp_servers(),
-        get_allowed_tools(),
-        SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT,
         resume=session_id,
         fork_session=fork_session,
         max_turns=_settings.agent_max_turns,
+        provider_id=provider.provider_id,
+        provider_config=_settings.agent_provider_options,
     )
 
-    async with ClaudeSDKClient(options=options) as client:
+    async with provider.create_client(options) as client:
         await client.query(question)
-
-        # Extract and print response
         async for msg in client.receive_response():
-            print(msg)
+            print(provider.serialize_message(msg))
 
 
 if __name__ == "__main__":

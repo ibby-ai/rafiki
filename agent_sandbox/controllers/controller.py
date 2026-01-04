@@ -3,8 +3,8 @@ FastAPI microservice that runs inside a long-lived Modal Sandbox.
 
 This service exposes endpoints:
 - `GET /health_check` used by the controller to know when the service is ready.
-- `POST /query` which returns a response from the Claude Agent SDK.
-- `POST /query_stream` which streams a response from the Claude Agent SDK.
+- `POST /query` which returns a response from the configured agent provider.
+- `POST /query_stream` which streams a response from the configured agent provider.
 
 This file is started inside the sandbox via `uvicorn agent_sandbox.controllers.controller:app`
 (see `agent_sandbox.app.get_or_start_background_sandbox`). The sandbox is created with an
@@ -25,29 +25,16 @@ import time
 from typing import Any
 
 import modal
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
-from claude_agent_sdk.types import Message, ResultMessage
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.controllers.middleware import RequestIdMiddleware
-from agent_sandbox.controllers.serialization import (
-    build_final_summary,
-    iter_text_blocks,
-    serialize_message,
-)
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
+from agent_sandbox.providers import get_provider
 from agent_sandbox.schemas import QueryBody
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
-from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
@@ -170,49 +157,42 @@ def _persist_session_id(session_key: str | None, session_id: str | None) -> None
         SESSION_CACHE[session_key] = session_id
 
 
-async def allow_web_only(
-    tool_name: str,
-    tool_input: dict[str, Any],
-    ctx: ToolPermissionContext,
-):
-    """Permission handler that allows only web-related tools.
-
-    Args:
-        tool_name: Name of the tool being requested.
-        tool_input: Input parameters for the tool.
-        ctx: Permission context.
-
-    Returns:
-        PermissionResultAllow if tool is web-related, otherwise PermissionResultDeny.
-    """
-    if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
-        return PermissionResultAllow(updated_input=tool_input)
-    return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
+def _resolve_provider_id(body: QueryBody) -> str:
+    provider_id = body.provider or _settings.agent_provider
+    if body.provider and body.provider != _settings.agent_provider:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider override '{body.provider}' is not enabled for this deployment",
+        )
+    return provider_id
 
 
-def _options(session_id: str | None = None, fork_session: bool = False) -> ClaudeAgentOptions:
-    """Build default `ClaudeAgentOptions` used by this service.
-
-    Uses "acceptEdits" permission mode which auto-approves file edits but still
-    requires tool permission checks via can_use_tool. This is safer than
-    "bypassPermissions" while still enabling autonomous operation in the sandbox.
-
-    Returns:
-        A configured `ClaudeAgentOptions` instance using our local MCP servers,
-        allowed tools, and `SYSTEM_PROMPT`.
-    """
-    return ClaudeAgentOptions(
+def _build_options(body: QueryBody, session_id: str | None) -> tuple[str, Any, Any]:
+    provider_id = _resolve_provider_id(body)
+    try:
+        provider = get_provider(provider_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    mcp_servers = provider.get_mcp_servers()
+    allowed_tools = provider.get_allowed_tools()
+    permission_handler = None
+    if hasattr(provider, "default_tool_permission_handler"):
+        permission_handler = provider.default_tool_permission_handler()
+    merged_config: dict[str, Any] | None = None
+    if _settings.agent_provider_options or body.provider_config:
+        merged_config = {**_settings.agent_provider_options, **(body.provider_config or {})}
+    options = provider.build_options(
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers=get_mcp_servers(),
-        allowed_tools=get_allowed_tools(),
-        can_use_tool=allow_web_only,
-        # acceptEdits: Auto-approve file operations, but still check tools via can_use_tool.
-        # bypassPermissions would skip all checks but isn't allowed with root access.
-        permission_mode="acceptEdits",
-        resume=session_id,
-        fork_session=fork_session,
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
+        session_id=session_id,
+        fork_session=body.fork_session,
         max_turns=_settings.agent_max_turns,
+        provider_config=merged_config,
+        permission_mode="acceptEdits",
+        can_use_tool=permission_handler,
     )
+    return provider_id, provider, options
 
 
 @app.exception_handler(Exception)
@@ -280,33 +260,24 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
 
     _maybe_reload_volume()
     resolved_session_id = _resolve_session_id(body)
+    provider_id, provider, options = _build_options(body, resolved_session_id)
     try:
-        messages: list[Message] = []
-        result_message: ResultMessage | None = None
-        async with ClaudeSDKClient(
-            options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
-        ) as client:
+        messages: list[Any] = []
+        async with provider.create_client(options) as client:
             await client.query(body.question)
             async for msg in client.receive_response():
                 messages.append(msg)
-                if isinstance(msg, ResultMessage):
-                    result_message = msg
 
-        text_blocks = iter_text_blocks(messages)
-        final_text = None
-        if result_message and result_message.result:
-            final_text = result_message.result
-        elif text_blocks:
-            final_text = "\n".join(text_blocks)
-
-        summary = build_final_summary(result_message, final_text)
+        summary = provider.build_summary(messages)
         session_id = summary.get("session_id")
         _persist_session_id(body.session_key, session_id)
         return {
             "ok": True,
-            "messages": [serialize_message(message) for message in messages],
+            "messages": [provider.serialize_message(message) for message in messages],
             "summary": summary,
             "session_id": session_id,
+            "provider": provider_id,
+            "provider_payload": summary.pop("provider_payload", None),
         }
     finally:
         _maybe_commit_volume()
@@ -337,30 +308,25 @@ async def query_agent_stream(body: QueryBody, request: Request):
     async def sse():
         _maybe_reload_volume()
         resolved_session_id = _resolve_session_id(body)
-        messages: list[Message] = []
-        result_message: ResultMessage | None = None
+        provider_id, provider, options = _build_options(body, resolved_session_id)
+        messages: list[Any] = []
         try:
-            async with ClaudeSDKClient(
-                options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
-            ) as client:
+            async with provider.create_client(options) as client:
                 await client.query(body.question)
                 async for msg in client.receive_response():
                     messages.append(msg)
-                    if isinstance(msg, ResultMessage):
-                        result_message = msg
-                    serialized = serialize_message(msg)
+                    serialized = provider.serialize_message(msg)
                     yield _format_sse(serialized["type"], serialized)
 
-            text_blocks = iter_text_blocks(messages)
-            final_text = None
-            if result_message and result_message.result:
-                final_text = result_message.result
-            elif text_blocks:
-                final_text = "\n".join(text_blocks)
-
-            summary = build_final_summary(result_message, final_text)
+            summary = provider.build_summary(messages)
             _persist_session_id(body.session_key, summary.get("session_id"))
-            yield _format_sse("done", summary)
+            provider_payload = summary.pop("provider_payload", None)
+            done_payload = {
+                **summary,
+                "provider": provider_id,
+                "provider_payload": provider_payload,
+            }
+            yield _format_sse("done", done_payload)
         finally:
             _maybe_commit_volume()
 

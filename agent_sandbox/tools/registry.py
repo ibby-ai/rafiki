@@ -1,47 +1,39 @@
-"""Tool registry for managing MCP servers and allowed tools."""
+"""Tool registry for managing provider-agnostic tools and allowed tools."""
 
-from typing import Any
+from agent_sandbox.tools.protocol import ToolDefinition
 
-from claude_agent_sdk import create_sdk_mcp_server
-
-from agent_sandbox.tools.calculate_tool import calculate
+_DEFAULTS_LOADED = False
 
 
 class ToolRegistry:
-    """Registry for MCP tool servers and allowed tools."""
+    """Registry for tool definitions and allowed tools."""
 
     def __init__(self):
-        self._servers: dict[str, Any] = {}
+        self._servers: dict[str, list[ToolDefinition]] = {}
         self._allowed_tools: list[str] = []
         self._initialize_defaults()
 
     def _initialize_defaults(self):
-        """Initialize default MCP servers and allowed tools."""
-        # Create multi-tool server with utilities
-        multi_tool_server = create_sdk_mcp_server(
-            name="utilities", version="1.0.0", tools=[calculate]
-        )
-
-        self._servers = {"utilities": multi_tool_server}
-
+        """Initialize default allowed tools."""
         self._allowed_tools = [
             # Built-in tools that may be available in runtime
             "Read",
             "Write",
             "WebSearch(*)",
             "WebFetch(*)",
-            # Custom MCP tools
-            "mcp__utilities__calculate",
         ]
 
-    def register_server(self, name: str, server: Any):
-        """Register an MCP server.
+    def register_tool(self, tool_def: ToolDefinition):
+        """Register a tool definition under its server name.
 
         Args:
-            name: Server identifier.
-            server: MCP server instance.
+            tool_def: Tool definition to register.
         """
-        self._servers[name] = server
+        server_name = tool_def.server
+        self._servers.setdefault(server_name, [])
+        if tool_def not in self._servers[server_name]:
+            self._servers[server_name].append(tool_def)
+        self.add_allowed_tool(f"mcp__{server_name}__{tool_def.name}")
 
     def add_allowed_tool(self, tool_name: str):
         """Add a tool to the allowed list.
@@ -52,13 +44,13 @@ class ToolRegistry:
         if tool_name not in self._allowed_tools:
             self._allowed_tools.append(tool_name)
 
-    def get_servers(self) -> dict[str, Any]:
-        """Get all registered MCP servers.
+    def get_tool_definitions(self) -> dict[str, list[ToolDefinition]]:
+        """Get all registered tool definitions.
 
         Returns:
-            Dictionary mapping server names to server instances.
+            Dictionary mapping server names to tool definitions.
         """
-        return self._servers.copy()
+        return {name: tools[:] for name, tools in self._servers.items()}
 
     def get_allowed_tools(self) -> list[str]:
         """Get list of allowed tool names.
@@ -73,13 +65,9 @@ class ToolRegistry:
 _registry = ToolRegistry()
 
 
-def get_mcp_servers() -> dict[str, Any]:
-    """Get all registered MCP servers.
-
-    Returns:
-        Dictionary mapping server names to server instances.
-    """
-    return _registry.get_servers()
+def register_tool(tool_def: ToolDefinition) -> None:
+    """Register a provider-agnostic tool definition."""
+    _registry.register_tool(tool_def)
 
 
 def get_allowed_tools() -> list[str]:
@@ -88,4 +76,21 @@ def get_allowed_tools() -> list[str]:
     Returns:
         List of allowed tool identifiers.
     """
+    ensure_default_tools_loaded()
     return _registry.get_allowed_tools()
+
+
+def get_tool_definitions() -> dict[str, list[ToolDefinition]]:
+    """Get all registered tool definitions."""
+    ensure_default_tools_loaded()
+    return _registry.get_tool_definitions()
+
+
+def ensure_default_tools_loaded() -> None:
+    """Load default tools on first access to avoid import cycles."""
+    global _DEFAULTS_LOADED
+    if _DEFAULTS_LOADED:
+        return
+    from agent_sandbox.tools import calculate_tool as _calculate_tool  # noqa: F401
+
+    _DEFAULTS_LOADED = True
