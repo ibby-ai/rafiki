@@ -372,6 +372,73 @@ Edit `agent_sandbox/prompts/prompts.py` - the controller imports `SYSTEM_PROMPT`
 
 Modify `agent_sandbox/tools/` to add/remove tools or MCP servers.
 
+## Session Handling
+
+The controller supports session resumption for multi-turn conversations:
+
+### Request Fields
+
+- `session_id`: Resume from a specific session returned by a prior response
+- `session_key`: Server-side key that maps to the last session for a user
+- `fork_session`: When resuming, start a new branched session instead of continuing the original
+
+### How It Works
+
+1. **First request** (no session fields):
+   - Controller creates a new agent session
+   - Returns `session_id` in the response
+
+2. **With `session_key`**:
+   - Controller looks up the last `session_id` from `SESSION_STORE` Modal Dict
+   - Uses that session for context resumption
+   - After query, stores the new `session_id` back to `SESSION_STORE`
+
+3. **With explicit `session_id`**:
+   - Controller directly resumes from that specific session
+   - Ignores `session_key` if both are provided
+
+4. **With `fork_session=true`**:
+   - Creates a new session branched from the prior context
+   - Original session remains unchanged
+   - Useful for exploring alternative paths
+
+### Storage
+
+Session mappings are stored in a Modal Dict:
+- Default name: `agent-session-store` (configurable via `session_store_name`)
+- Key: `session_key` value
+- Value: Latest `session_id` for that key
+
+## Volume Commit Behavior
+
+When `volume_commit_interval` is configured, the controller manages volume persistence:
+
+### Before Each Query
+
+1. If `volume_commit_interval` is set, the persistent volume is **reloaded**
+2. This ensures the controller sees the latest committed state
+3. Changes from other processes or prior commits become visible
+
+### After Each Query
+
+1. Controller checks if enough time has passed since last commit
+2. If `volume_commit_interval` seconds have elapsed:
+   - Calls `volume.commit()` to persist all `/data` changes
+   - Resets the commit timer
+3. If interval not reached, skips commit (will commit on next eligible request)
+
+### Benefits
+
+- Writes persist without terminating the sandbox
+- Multiple queries can accumulate changes before commit
+- Read operations see consistent state via reload
+
+### Trade-offs
+
+- Commits add latency (~100-500ms depending on data size)
+- Very frequent queries may hit commit overhead
+- Set `volume_commit_interval=None` to disable (commits only on sandbox termination)
+
 ## Troubleshooting
 
 ### Service Not Starting

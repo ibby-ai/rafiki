@@ -608,11 +608,11 @@ import json
 
 def stream_agent_response(question: str, base_url: str):
     """Stream agent responses as they're generated.
-    
+
     Args:
         question: The question to ask the agent
         base_url: Base URL of the deployed service
-        
+
     Yields:
         String chunks of the agent's response
     """
@@ -649,6 +649,130 @@ base_url = "https://acme-corp--test-sandbox-http-app.modal.run"
 for chunk in stream_agent_response("Explain AI", base_url):
     print(chunk, end='', flush=True)
 print()  # Newline at end
+```
+
+### Python/Requests with Session Resumption
+
+```python
+import requests
+from typing import Optional
+
+class AgentClient:
+    """Client with session management for multi-turn conversations."""
+
+    def __init__(self, base_url: str, session_key: Optional[str] = None):
+        self.base_url = base_url
+        self.session_key = session_key
+        self.last_session_id = None
+
+    def query(self, question: str, fork: bool = False) -> dict:
+        """Send a query, optionally resuming prior context.
+
+        Args:
+            question: The question to ask
+            fork: If True, branch from prior session instead of continuing it
+
+        Returns:
+            Response dict with messages and session_id
+        """
+        payload = {"question": question}
+
+        # Use session_key for server-side session tracking
+        if self.session_key:
+            payload["session_key"] = self.session_key
+        # Or use explicit session_id from prior response
+        elif self.last_session_id:
+            payload["session_id"] = self.last_session_id
+
+        if fork:
+            payload["fork_session"] = True
+
+        response = requests.post(
+            f"{self.base_url}/query",
+            json=payload,
+            timeout=120
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        # Store session_id for future resumption
+        self.last_session_id = result.get("session_id")
+        return result
+
+# Usage with session_key (server tracks last session)
+client = AgentClient(
+    base_url="https://acme-corp--test-sandbox-http-app.modal.run",
+    session_key="user-123"
+)
+
+# First message
+result = client.query("Create a plan for building a web app")
+print(result["summary"]["text"])
+
+# Follow-up (automatically resumes prior context)
+result = client.query("Add user authentication to the plan")
+print(result["summary"]["text"])
+
+# Fork to try a different direction
+result = client.query("Actually, make it a mobile app instead", fork=True)
+print(result["summary"]["text"])
+```
+
+### JavaScript/Fetch with Session Management
+
+```javascript
+class AgentClient {
+  constructor(baseUrl, sessionKey = null) {
+    this.baseUrl = baseUrl;
+    this.sessionKey = sessionKey;
+    this.lastSessionId = null;
+  }
+
+  async query(question, { fork = false } = {}) {
+    const payload = { question };
+
+    if (this.sessionKey) {
+      payload.session_key = this.sessionKey;
+    } else if (this.lastSessionId) {
+      payload.session_id = this.lastSessionId;
+    }
+
+    if (fork) {
+      payload.fork_session = true;
+    }
+
+    const response = await fetch(`${this.baseUrl}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+    this.lastSessionId = result.session_id;
+    return result;
+  }
+}
+
+// Usage
+const client = new AgentClient(
+  'https://acme-corp--test-sandbox-http-app.modal.run',
+  'user-123' // session_key
+);
+
+// Conversation with automatic session resumption
+const result1 = await client.query('Plan a vacation to Japan');
+console.log(result1.summary.text);
+
+const result2 = await client.query('Add restaurant recommendations');
+console.log(result2.summary.text);
+
+// Fork to explore alternative
+const result3 = await client.query('What about Korea instead?', { fork: true });
+console.log(result3.summary.text);
 ```
 
 ### Python/httpx (Async Streaming)
@@ -937,8 +1061,50 @@ curl -X POST https://your-url.modal.run/query \
 For the bundled HTTP examples, set `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` so the scripts include these headers
 automatically.
 
-**Rotate tokens**: Create a new Proxy Auth token, update `MODAL_PROXY_KEY`/`MODAL_PROXY_SECRET` in your environment or
-CI secrets, redeploy/restart the app, then revoke the old token in the Modal dashboard.
+**Environment Variable Pattern:**
+```bash
+# In .env file
+MODAL_PROXY_KEY=ak-xxxxx
+MODAL_PROXY_SECRET=as-xxxxx
+
+# Load before running commands
+set -a; source .env; set +a
+
+# Then curl commands can use:
+curl -H "Modal-Key: $MODAL_PROXY_KEY" -H "Modal-Secret: $MODAL_PROXY_SECRET" ...
+```
+
+**Token Rotation:**
+1. Create a new Proxy Auth token in Modal Dashboard (Workspace > Proxy Auth Tokens)
+2. Update `MODAL_PROXY_KEY`/`MODAL_PROXY_SECRET` in your environment, CI secrets, or `.env` file
+3. Redeploy or restart the app to pick up new credentials
+4. Verify the new token works with a test request
+5. Revoke the old token in the Modal dashboard
+
+**Python Client with Proxy Auth:**
+```python
+import os
+import requests
+
+class AuthenticatedAgentClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.headers = {
+            "Content-Type": "application/json",
+            "Modal-Key": os.environ["MODAL_PROXY_KEY"],
+            "Modal-Secret": os.environ["MODAL_PROXY_SECRET"],
+        }
+
+    def query(self, question: str) -> dict:
+        response = requests.post(
+            f"{self.base_url}/query",
+            json={"question": question},
+            headers=self.headers,
+            timeout=120
+        )
+        response.raise_for_status()
+        return response.json()
+```
 
 **JavaScript Example:**
 ```javascript

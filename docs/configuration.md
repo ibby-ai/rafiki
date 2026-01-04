@@ -203,6 +203,12 @@ Request arrives → Cold start again
 **When to enable**: Use `volume_commit_interval` to persist `/data` without terminating the sandbox. Remove
 `VOLUME_COMMIT_INTERVAL` to commit only on sandbox termination.
 
+**Behavior when enabled**:
+- The persistent volume is **reloaded before each query** to get the latest committed state
+- The volume is **committed after each query** (respecting the configured interval)
+- This ensures writes are persisted without requiring sandbox termination
+- Note: Commits occur after all requests when the interval is reached
+
 **Verify commits**: Run `examples/03_file_persistence/run.sh` with `SKIP_TERMINATE=true` and wait for the
 commit interval (defaults to 60s). Then `modal volume ls svc-runner-8001-vol` should show the new file without
 terminating the sandbox.

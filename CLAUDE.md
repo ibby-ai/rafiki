@@ -123,6 +123,13 @@ The codebase demonstrates two distinct patterns for running agents:
 - `POST /query_stream`: Agent query endpoint that streams responses as SSE
 - Runs via `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
 - Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
+- Supports session resumption via `session_id`, `session_key`, `fork_session`
+
+**`agent_sandbox/app.py`** - HTTP Gateway endpoints (in addition to above)
+
+- `POST /submit`: Enqueue async job to `JOB_QUEUE`
+- `GET /jobs/{job_id}`: Check job status from `JOB_RESULTS` dict
+- `DELETE /jobs/{job_id}`: Cancel a queued job
 
 **`agent_sandbox/config/settings.py`** - Configuration management
 
@@ -148,6 +155,14 @@ The codebase demonstrates two distinct patterns for running agents:
 
 - `SYSTEM_PROMPT`: Configures agent behavior and tone
 - `DEFAULT_QUESTION`: Fallback query when none provided
+
+**`agent_sandbox/jobs.py`** - Async job processing
+
+- `enqueue_job()`: Submit job to Modal Queue
+- `get_job_status()`: Check job status from Modal Dict
+- `cancel_job()`: Cancel a queued job
+- `process_job_queue()`: Worker function that consumes jobs
+- Uses Modal Queue and Dict for distributed state
 
 ### Background Sandbox Lifecycle
 
@@ -240,11 +255,13 @@ async def your_endpoint(body: QueryBody, request: Request):
 ## Important Notes
 
 - **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (agent_sandbox/tools/calculate_tool.py)
-- **Sandbox Timeouts**: Background sandbox runs for max 12 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
+- **Sandbox Timeouts**: Background sandbox runs for max 24 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
+- **Autoscaling**: `min_containers=1` keeps containers warm by default; adjust `max_containers`, `scaledown_window` for cost/latency tradeoffs
 - **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (agent_sandbox/tools/registry.py)
 - **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/app.py)
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
+- **Agent Turn Limits**: Set `agent_max_turns` to limit conversation turns and prevent runaway loops
 
 ### Volume Persistence Behavior
 

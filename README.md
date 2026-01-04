@@ -70,6 +70,7 @@ agent_sandbox/
 ├── __init__.py              # Package initialization & module registration
 ├── app.py                   # Main Modal app definition
 ├── deploy.py                # Deployment composition
+├── jobs.py                  # Async job queue processing
 │
 ├── config/                  # Configuration management
 │   └── settings.py         # Pydantic Settings for env vars & Modal secrets
@@ -201,6 +202,35 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
 The response includes a top-level `session_id` you can store for explicit resumption later. You can
 configure the backing Modal Dict name with `SESSION_STORE_NAME` in `agent_sandbox/config/settings.py`.
 
+### Job Queue (Async Processing)
+
+For long-running tasks, use the job queue to avoid blocking:
+
+```bash
+# Submit a job
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/submit' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Analyze this large dataset..."}'
+# Returns: {"ok": true, "job_id": "abc123..."}
+
+# Check job status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123...'
+# Returns: {"ok": true, "status": "running", ...}
+
+# Cancel a queued job
+curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123...'
+```
+
+**Job lifecycle:** `queued` → `running` → `complete` | `failed` | `canceled`
+
+**When to use:**
+- Long-running analysis or generation tasks
+- Background processing where immediate response isn't needed
+- Batch operations that may take minutes
+
+**Note:** In development, run `modal run -m agent_sandbox.app::process_job_queue` to consume queued jobs.
+Set `job_queue_cron` in settings to schedule automatic processing.
+
 ## Execution Patterns
 
 This starter supports **two patterns** for running the agent. Choose based on your use case:
@@ -288,11 +318,23 @@ For more details, see [Modal's Getting Started Guide](https://modal.com/docs/gui
 ### Quick Overview
 
 ```
-User Request → Modal HTTP Gateway → Background Sandbox (FastAPI on port 8001)
-                                          ↓
-                                   Claude Agent SDK
-                                          ↓
-                                    MCP Tools (e.g., calculate)
+                         ┌──────────────────────────────────────────────────┐
+                         │               Modal HTTP Gateway                 │
+User Request ───────────▶│  /query, /query_stream → Sync Proxy              │
+(+ Proxy Auth headers)   │  /submit → Job Queue → Worker                    │
+                         │  /jobs/{job_id} → Job Status                     │
+                         └────────────────────────┬─────────────────────────┘
+                                                  │
+                                                  ▼
+                         ┌──────────────────────────────────────────────────┐
+                         │       Background Sandbox (FastAPI :8001)          │
+                         │                                                   │
+                         │   Claude Agent SDK ─── MCP Tools                  │
+                         │          │                                        │
+                         │   ┌──────┴──────┐                                 │
+                         │   │ /data vol   │  Session/Job Store (Modal Dict) │
+                         │   └─────────────┘                                 │
+                         └──────────────────────────────────────────────────┘
 ```
 
 ### Detailed Architecture
@@ -305,32 +347,40 @@ This project uses a **persistent sandbox service pattern**:
    ┌──────────────┐              │  ┌───────────────────────────────┐  │
    │              │   HTTP POST  │  │  http_app (FastAPI Gateway)   │  │
    │    Client    │─────────────────▶  /query, /query_stream        │  │
-   │              │              │  └───────────────┬───────────────┘  │
-   └──────────────┘              │                  │                  │
-                                 │                  │ proxy            │  Forwards requests to sandbox;
-                                 │                  ▼                  │  decouples HTTP from agent runtime
-                                 │  ┌───────────────────────────────┐  │
-                                 │  │   Long-lived Modal Sandbox    │  │
-                                 │  │  ┌─────────────────────────┐  │  │
-                                 │  │  │ FastAPI Controller      │  │  │  Microservice managing agent
-                                 │  │  │ (uvicorn :8001)         │  │  │  sessions, permissions & SSE
-                                 │  │  └───────────┬─────────────┘  │  │
-                                 │  │              │                │  │
-                                 │  │              ▼                │  │
-                                 │  │  ┌─────────────────────────┐  │  │
-                                 │  │  │   Claude Agent SDK      │  │  │
-                                 │  │  │   ┌─────┐ ┌─────────┐   │  │  │
-                                 │  │  │   │ MCP │ │ Tools   │   │  │  │
-                                 │  │  │   └─────┘ └─────────┘   │  │  │
-                                 │  │  └─────────────────────────┘  │  │
-                                 │  │              │                │  │
-                                 │  │              ▼                │  │
-                                 │  │      ┌──────────────┐         │  │  Modal Volume: persistent
-                                 │  │      │  /data vol   │         │  │  storage that survives
-                                 │  │      │  (persist)   │         │  │  sandbox restarts
-                                 │  │      └──────────────┘         │  │
-                                 │  └───────────────────────────────┘  │
-                                 └─────────────────────────────────────┘
+   │              │◀─ Proxy Auth ──│  /submit, /jobs/{job_id}       │  │
+   └──────────────┘              │  └───────────────┬───────────────┘  │
+                                 │                  │                  │
+                                 │     ┌────────────┼────────────┐     │
+                                 │     │            │            │     │
+                                 │     ▼ sync       ▼ async      │     │
+                                 │  ┌──────┐   ┌──────────┐      │     │
+                                 │  │Proxy │   │JOB_QUEUE │      │     │
+                                 │  └──┬───┘   └────┬─────┘      │     │
+                                 │     │            │            │     │
+                                 │     ▼            ▼            │     │
+                                 │  ┌───────────────────────────┐│     │
+                                 │  │   Long-lived Modal Sandbox││     │
+                                 │  │  ┌─────────────────────┐  ││     │
+                                 │  │  │ FastAPI Controller  │  ││     │
+                                 │  │  │ (uvicorn :8001)     │  ││     │
+                                 │  │  └───────────┬─────────┘  ││     │
+                                 │  │              │            ││     │
+                                 │  │              ▼            ││     │
+                                 │  │  ┌─────────────────────┐  ││     │
+                                 │  │  │   Claude Agent SDK  │  ││     │
+                                 │  │  │   ┌─────┐ ┌───────┐ │  ││     │
+                                 │  │  │   │ MCP │ │ Tools │ │  ││     │
+                                 │  │  │   └─────┘ └───────┘ │  ││     │
+                                 │  │  └─────────────────────┘  ││     │
+                                 │  │              │            ││     │
+                                 │  │   ┌─────────┴─────────┐   ││     │
+                                 │  │   ▼                   ▼   ││     │
+                                 │  │ ┌──────────┐ ┌───────────┐││     │
+                                 │  │ │ /data vol│ │SESSION/JOB│││     │
+                                 │  │ │ (persist)│ │Modal Dicts│││     │
+                                 │  │ └──────────┘ └───────────┘││     │
+                                 │  └───────────────────────────┘│     │
+                                 └───────────────────────────────┴─────┘
 ```
 
 ### Understanding the Diagram
@@ -339,11 +389,14 @@ This project uses a **persistent sandbox service pattern**:
 |-----------|---------|---------------|
 | **Modal Cloud** | Fully managed infrastructure | You don't deploy or manage servers; Modal handles scaling, networking, and SSL |
 | **http_app (FastAPI Gateway)** | Lightweight HTTP entry point | Scales to zero when idle; handles routing without running the full agent |
+| **Proxy Auth** | API authentication | Secure production endpoints with `Modal-Key`/`Modal-Secret` token headers |
+| **JOB_QUEUE (Modal Queue)** | Async job processing | Fire-and-forget workloads; long-running tasks processed by workers |
 | **Proxy connection** | Internal forwarding | Decouples the public API from the agent runtime; enables independent scaling |
 | **Long-lived Modal Sandbox** | Persistent agent environment | Stays warm for hours; eliminates cold-start delays on each request |
 | **FastAPI Controller** | Agent orchestration service | Manages Claude SDK client, tool permissions, and streaming responses |
 | **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
 | **/data vol (persist)** | Durable file storage | Files written here survive sandbox restarts; critical for stateful operations |
+| **Modal Dicts (SESSION/JOB)** | Session & job state storage | Resume conversations; track async job status |
 
 ### How It Works
 

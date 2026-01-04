@@ -10,22 +10,31 @@ The application uses a **two-tier architecture pattern** optimized for low laten
 ┌─────────────────────────────────────────────────────────────┐
 │                    Modal Infrastructure                      │
 │  (Handles TLS termination, routing, load balancing)          │
+│  (Optional: Proxy Auth via Modal-Key/Modal-Secret headers)   │
 └───────────────────────────┬─────────────────────────────────┘
                             │
                             │ HTTPS Request
-                            │ (e.g., POST /query)
+                            │ (e.g., POST /query, /submit)
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              http_app (Modal ASGI Function)                  │
 │  - Lightweight FastAPI app                                  │
 │  - Decorated with @modal.asgi_app()                         │
 │  - Receives all incoming HTTP traffic                        │
-│  - Proxies requests to background service                   │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-                            │ HTTP Request via Encrypted Tunnel
-                            │ (Modal Sandbox tunnel discovery)
-                            ▼
+│  - Sync endpoints: /query, /query_stream → Proxy to sandbox │
+│  - Async endpoints: /submit → JOB_QUEUE                     │
+│  - Job status: /jobs/{job_id} → JOB_RESULTS dict            │
+└───────────────────────┬─────────────────┬───────────────────┘
+                        │                 │
+           sync (proxy) │                 │ async (queue)
+                        ▼                 ▼
+┌─────────────────────────────┐  ┌────────────────────────────┐
+│  HTTP via Encrypted Tunnel  │  │  JOB_QUEUE (Modal Queue)   │
+│  (Modal Sandbox tunnels)    │  │  - Async job payloads      │
+└───────────────────────┬─────┘  │  - Worker picks up jobs    │
+                        │        └────────────┬───────────────┘
+                        │                     │
+                        ▼                     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │         Background Sandbox (Long-lived Process)              │
 │  - modal.Sandbox running uvicorn                            │
@@ -33,6 +42,7 @@ The application uses a **two-tier architecture pattern** optimized for low laten
 │  - Hosts Claude Agent SDK client                            │
 │  - Maintains warm state for low latency                      │
 │  - Persistent volume mounted at /data                       │
+│  - Session store & job results via Modal Dicts              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,6 +78,8 @@ When you deploy with `modal serve` or `modal deploy`, Modal:
 - Lightweight proxy that forwards requests to the background service
 - Handles Modal Connect token generation (optional)
 - Manages sandbox lifecycle (creates/reuses background sandbox)
+- Enqueues async jobs to the job queue
+- Retrieves job status from Modal Dict
 
 **Key code:**
 ```python
@@ -82,6 +94,9 @@ def http_app():
 - `GET /health` - Health check for the ingress layer
 - `POST /query` - Proxies to background service `/query` endpoint
 - `POST /query_stream` - Proxies to background service `/query_stream` endpoint
+- `POST /submit` - Enqueue async job to JOB_QUEUE
+- `GET /jobs/{job_id}` - Check job status from JOB_RESULTS dict
+- `DELETE /jobs/{job_id}` - Cancel a queued job
 - `GET /service_info` - Returns information about the background sandbox
 
 **Why it's lightweight:**
@@ -90,7 +105,31 @@ def http_app():
 - Simply forwards requests and returns responses
 - Can scale independently from the background service
 
-### 3. Background Sandbox Service (Controller)
+### 3. JOB_QUEUE (Modal Queue)
+
+**What it does:**
+- Receives async job payloads from `/submit` endpoint
+- Stores jobs until a worker picks them up
+- Enables fire-and-forget workload pattern
+
+**Key characteristics:**
+- Jobs persist until processed or canceled
+- Worker (`process_job_queue`) consumes jobs
+- Results stored in JOB_RESULTS Modal Dict
+- Optional cron scheduling via `job_queue_cron` setting
+
+### 4. Modal Dicts (SESSION_STORE / JOB_RESULTS)
+
+**What they do:**
+- **SESSION_STORE**: Maps `session_key` → last `session_id` for resumption
+- **JOB_RESULTS**: Stores job metadata and results by `job_id`
+
+**Key characteristics:**
+- Distributed key-value storage
+- Persists across sandbox restarts
+- Enables session continuity and job tracking
+
+### 5. Background Sandbox Service (Controller)
 
 **Location:** `agent_sandbox/controllers/controller.py`
 
@@ -144,6 +183,45 @@ def http_app():
 
 5. **Response Path:**
    - Background service → http_app → Modal Infrastructure → Client
+
+### Example: User submits an async job
+
+1. **Client Request:**
+   ```bash
+   curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/submit' \
+     -H 'Content-Type: application/json' \
+     -d '{"question":"Analyze this large dataset..."}'
+   ```
+
+2. **http_app Handler:**
+   - Receives request at `POST /submit`
+   - Generates unique `job_id`
+   - Creates job record in `JOB_RESULTS` dict (status: `queued`)
+   - Enqueues job payload to `JOB_QUEUE`
+   - Returns immediately: `{"ok": true, "job_id": "..."}`
+
+3. **Worker Processing:**
+   - `process_job_queue` function picks up job from queue
+   - Updates job status to `running`
+   - Executes agent query via background sandbox
+   - Stores result in `JOB_RESULTS` dict
+   - Updates status to `complete` or `failed`
+
+4. **Client Polling:**
+   ```bash
+   curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}'
+   ```
+   - Returns job status and result when complete
+
+### When to use sync vs async
+
+| Scenario | Pattern | Endpoint |
+|----------|---------|----------|
+| Quick queries (< 30s) | Sync | `/query` |
+| Real-time streaming UI | Sync | `/query_stream` |
+| Long-running analysis | Async | `/submit` + `/jobs/{id}` |
+| Background batch processing | Async | `/submit` |
+| Fire-and-forget tasks | Async | `/submit` |
 
 ## Why This Architecture?
 
