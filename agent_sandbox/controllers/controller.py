@@ -22,6 +22,7 @@ Important:
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import modal
@@ -114,7 +115,7 @@ def _maybe_reload_volume() -> None:
         _logger.warning("Failed to reload persistent volume", exc_info=True)
 
 
-def _maybe_commit_volume() -> None:
+def _maybe_commit_volume(*, force: bool = False) -> None:
     """Commit pending volume writes if enough time has passed.
 
     Called after each query to persist any files written during execution.
@@ -128,20 +129,34 @@ def _maybe_commit_volume() -> None:
     """
     global _LAST_VOLUME_COMMIT_TS
     interval = _settings.volume_commit_interval
-    if interval is None:
+    if interval is None and not force:
         return
     now = time.time()
-    # Commit if: first commit, interval=0 (always), or enough time elapsed
-    if (
-        _LAST_VOLUME_COMMIT_TS is None
-        or interval <= 0
-        or (now - _LAST_VOLUME_COMMIT_TS) >= interval
-    ):
+    should_commit = force
+    if interval is not None:
+        should_commit = should_commit or (
+            _LAST_VOLUME_COMMIT_TS is None
+            or interval <= 0
+            or (now - _LAST_VOLUME_COMMIT_TS) >= interval
+        )
+    if should_commit:
         try:
             _get_persist_volume().commit()
             _LAST_VOLUME_COMMIT_TS = now
         except Exception:
             _logger.warning("Failed to commit persistent volume", exc_info=True)
+
+
+def _job_workspace(job_id: str) -> Path:
+    return Path(_settings.agent_fs_root) / "jobs" / job_id
+
+
+def _ensure_job_workspace(job_id: str | None) -> Path | None:
+    if not job_id:
+        return None
+    root = _job_workspace(job_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _resolve_session_id(body: QueryBody) -> str | None:
@@ -190,7 +205,11 @@ async def allow_web_only(
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 
-def _options(session_id: str | None = None, fork_session: bool = False) -> ClaudeAgentOptions:
+def _options(
+    session_id: str | None = None,
+    fork_session: bool = False,
+    job_root: Path | None = None,
+) -> ClaudeAgentOptions:
     """Build default `ClaudeAgentOptions` used by this service.
 
     Uses "acceptEdits" permission mode which auto-approves file edits but still
@@ -201,8 +220,15 @@ def _options(session_id: str | None = None, fork_session: bool = False) -> Claud
         A configured `ClaudeAgentOptions` instance using our local MCP servers,
         allowed tools, and `SYSTEM_PROMPT`.
     """
+    system_prompt = SYSTEM_PROMPT
+    if job_root is not None:
+        system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            "This is a background job."
+            f" Write all created files under {job_root} so they are persisted."
+        )
     return ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         mcp_servers=get_mcp_servers(),
         allowed_tools=get_allowed_tools(),
         can_use_tool=allow_web_only,
@@ -279,12 +305,22 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     _require_connect_token(request)
 
     _maybe_reload_volume()
+    job_root = _ensure_job_workspace(body.job_id)
     resolved_session_id = _resolve_session_id(body)
+    request_id = getattr(request.state, "request_id", None)
+    _logger.info(
+        "agent.query.start",
+        extra={"job_id": body.job_id, "request_id": request_id, "session_id": resolved_session_id},
+    )
     try:
         messages: list[Message] = []
         result_message: ResultMessage | None = None
         async with ClaudeSDKClient(
-            options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
+            options=_options(
+                session_id=resolved_session_id,
+                fork_session=body.fork_session,
+                job_root=job_root,
+            )
         ) as client:
             await client.query(body.question)
             async for msg in client.receive_response():
@@ -302,6 +338,16 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         summary = build_final_summary(result_message, final_text)
         session_id = summary.get("session_id")
         _persist_session_id(body.session_key, session_id)
+        _logger.info(
+            "agent.query.complete",
+            extra={
+                "job_id": body.job_id,
+                "request_id": request_id,
+                "session_id": session_id,
+                "duration_ms": summary.get("duration_ms"),
+                "num_turns": summary.get("num_turns"),
+            },
+        )
         return {
             "ok": True,
             "messages": [serialize_message(message) for message in messages],
@@ -309,7 +355,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             "session_id": session_id,
         }
     finally:
-        _maybe_commit_volume()
+        _maybe_commit_volume(force=job_root is not None)
 
 
 @app.post("/query_stream")
@@ -336,12 +382,26 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
     async def sse():
         _maybe_reload_volume()
+        job_root = _ensure_job_workspace(body.job_id)
         resolved_session_id = _resolve_session_id(body)
         messages: list[Message] = []
         result_message: ResultMessage | None = None
+        request_id = getattr(request.state, "request_id", None)
+        _logger.info(
+            "agent.query_stream.start",
+            extra={
+                "job_id": body.job_id,
+                "request_id": request_id,
+                "session_id": resolved_session_id,
+            },
+        )
         try:
             async with ClaudeSDKClient(
-                options=_options(session_id=resolved_session_id, fork_session=body.fork_session)
+                options=_options(
+                    session_id=resolved_session_id,
+                    fork_session=body.fork_session,
+                    job_root=job_root,
+                )
             ) as client:
                 await client.query(body.question)
                 async for msg in client.receive_response():
@@ -360,8 +420,18 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
             summary = build_final_summary(result_message, final_text)
             _persist_session_id(body.session_key, summary.get("session_id"))
+            _logger.info(
+                "agent.query_stream.complete",
+                extra={
+                    "job_id": body.job_id,
+                    "request_id": request_id,
+                    "session_id": summary.get("session_id"),
+                    "duration_ms": summary.get("duration_ms"),
+                    "num_turns": summary.get("num_turns"),
+                },
+            )
             yield _format_sse("done", summary)
         finally:
-            _maybe_commit_volume()
+            _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
