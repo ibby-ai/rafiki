@@ -96,6 +96,8 @@ def http_app():
 - `POST /query_stream` - Proxies to background service `/query_stream` endpoint
 - `POST /submit` - Enqueue async job to JOB_QUEUE
 - `GET /jobs/{job_id}` - Check job status from JOB_RESULTS dict
+- `GET /jobs/{job_id}/artifacts` - List job artifacts from the persistent volume
+- `GET /jobs/{job_id}/artifacts/{path}` - Download job artifacts (attachment response)
 - `DELETE /jobs/{job_id}` - Cancel a queued job
 - `GET /service_info` - Returns information about the background sandbox
 
@@ -206,12 +208,20 @@ def http_app():
    - Executes agent query via background sandbox
    - Stores result in `JOB_RESULTS` dict
    - Updates status to `complete` or `failed`
+   - If webhook config is present, spawns webhook delivery attempts
 
 4. **Client Polling:**
    ```bash
    curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}'
    ```
    - Returns job status and result when complete
+
+5. **Artifact Retrieval:**
+   ```bash
+   curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}/artifacts'
+   curl -O 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}/artifacts/report.md'
+   ```
+   - Lists artifacts and downloads generated files
 
 ### When to use sync vs async
 
@@ -308,4 +318,3 @@ Both commands:
 - [Controllers Deep Dive](./controllers.md) - Detailed explanation of the controller service
 - [Modal Ingress](./modal-ingress.md) - How Modal handles HTTP ingress
 - [Configuration](./configuration.md) - Configuration options and settings
-

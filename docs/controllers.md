@@ -125,7 +125,8 @@ def health_check():
 
 ```json
 {
-  "question": "What is the capital of Canada?"
+  "question": "What is the capital of Canada?",
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a"
 }
 ```
 
@@ -165,6 +166,7 @@ def health_check():
 5. Collects all response messages
 6. Serializes SDK messages into structured JSON
 7. Returns JSON with `messages` plus a `summary` object
+8. If `job_id` is provided, ensures `/data/jobs/{job_id}` exists and forces a volume commit so artifacts are persisted
 
 **Implementation:**
 
@@ -192,7 +194,8 @@ async def query_agent(body: QueryBody, request: Request):
 
 ```json
 {
-  "question": "What is the capital of Canada?"
+  "question": "What is the capital of Canada?",
+  "job_id": "4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a"
 }
 ```
 
@@ -216,6 +219,7 @@ data: {"text":"...","is_complete":true,"duration_ms":1234}
 3. Creates `ClaudeSDKClient` with configured options
 4. Executes query and streams structured SSE events
 5. Emits `event: done` with summary when complete
+6. If `job_id` is provided, ensures `/data/jobs/{job_id}` exists and forces a volume commit
 
 **Implementation:**
 
