@@ -14,8 +14,9 @@ def test_query_body_valid():
 
 def test_query_body_with_job_id():
     """Test that job_id is accepted for background jobs."""
-    body = QueryBody(question="Run job", job_id="job-123")
-    assert body.job_id == "job-123"
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    body = QueryBody(question="Run job", job_id=job_id)
+    assert body.job_id == job_id
 
 
 def test_query_body_empty_string():
@@ -34,6 +35,12 @@ def test_query_body_extra_fields_forbidden():
     """Test that extra fields are forbidden."""
     with pytest.raises(ValidationError):
         QueryBody(question="test", extra_field="not allowed")
+
+
+def test_query_body_invalid_job_id():
+    """Test that invalid job_id values are rejected."""
+    with pytest.raises(ValidationError):
+        QueryBody(question="test", job_id="../etc/passwd")
 
 
 def test_query_body_whitespace_stripping():

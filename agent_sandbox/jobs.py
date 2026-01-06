@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import modal
 
@@ -34,6 +36,32 @@ JOB_QUEUE = modal.Queue.from_name(_settings.job_queue_name, create_if_missing=Tr
 # Distributed dictionary storing job metadata keyed by job_id. Each entry contains
 # status, timestamps, result/error, and attempt count. Persists across workers.
 JOB_RESULTS = modal.Dict.from_name(_settings.job_results_dict, create_if_missing=True)
+
+
+def normalize_job_id(job_id: str | None) -> str | None:
+    """Normalize job IDs to canonical UUID strings."""
+    if not job_id:
+        return None
+    try:
+        return str(UUID(str(job_id)))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def job_workspace_root(agent_fs_root: str, job_id: str) -> Path:
+    """Return the job workspace root directory for a job."""
+    return Path(agent_fs_root) / "jobs" / job_id
+
+
+def resolve_job_artifact(agent_fs_root: str, job_id: str, artifact_path: str) -> Path | None:
+    """Resolve an artifact path within the job workspace, preventing traversal."""
+    base = job_workspace_root(agent_fs_root, job_id).resolve()
+    candidate = (base / artifact_path).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    return candidate
 
 
 def _normalize_schedule_at(value: int | float | None) -> int | None:

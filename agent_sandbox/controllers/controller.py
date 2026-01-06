@@ -45,6 +45,7 @@ from agent_sandbox.controllers.serialization import (
     iter_text_blocks,
     serialize_message,
 )
+from agent_sandbox.jobs import job_workspace_root, normalize_job_id
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import QueryBody
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
@@ -148,13 +149,16 @@ def _maybe_commit_volume(*, force: bool = False) -> None:
 
 
 def _job_workspace(job_id: str) -> Path:
-    return Path(_settings.agent_fs_root) / "jobs" / job_id
+    return job_workspace_root(_settings.agent_fs_root, job_id)
 
 
 def _ensure_job_workspace(job_id: str | None) -> Path | None:
     if not job_id:
         return None
-    root = _job_workspace(job_id)
+    normalized = normalize_job_id(job_id)
+    if not normalized:
+        return None
+    root = _job_workspace(normalized)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
