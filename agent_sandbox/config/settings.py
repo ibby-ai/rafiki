@@ -138,6 +138,27 @@ class Settings(BaseSettings):
         description="Enable Modal memory snapshots for faster cold starts",
     )
 
+    # Webhook delivery defaults
+    webhook_default_timeout: int = Field(
+        default=10, description="Default webhook timeout in seconds"
+    )
+    webhook_default_max_attempts: int = Field(
+        default=3, description="Default max webhook delivery attempts"
+    )
+    webhook_retry_initial_delay: float = Field(
+        default=1.0, description="Initial retry delay for webhooks (seconds)"
+    )
+    webhook_retry_backoff_coefficient: float = Field(
+        default=2.0, description="Backoff multiplier for webhook retries"
+    )
+    webhook_retry_max_delay: float = Field(
+        default=30.0, description="Max delay between webhook retries (seconds)"
+    )
+    webhook_signing_secret: str | None = Field(
+        default=None,
+        description="Optional global signing secret for webhook payloads",
+    )
+
     # Agent execution limits
     agent_max_turns: int | None = Field(
         default=50, description="Maximum conversation turns (None = unlimited)"
