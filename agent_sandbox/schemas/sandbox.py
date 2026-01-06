@@ -1,7 +1,5 @@
 """Sandbox-related request/response schemas."""
 
-from typing import Any
-
 from agent_sandbox.schemas.base import BaseSchema
 
 
@@ -12,5 +10,3 @@ class QueryBody(BaseSchema):
     session_id: str | None = None
     session_key: str | None = None
     fork_session: bool = False
-    provider: str | None = None
-    provider_config: dict[str, Any] | None = None

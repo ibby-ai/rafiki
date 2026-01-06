@@ -8,10 +8,10 @@ See CLAUDE.md and docs/configuration.md for usage guidance.
 """
 
 from functools import lru_cache
-from typing import Any, Self
+from typing import Self
 
 import modal
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -143,30 +143,6 @@ class Settings(BaseSettings):
         default=50, description="Maximum conversation turns (None = unlimited)"
     )
 
-    # Agent provider selection
-    agent_provider: str = Field(
-        default="claude",
-        description="Agent provider identifier (e.g., claude)",
-    )
-    agent_provider_options: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Provider-specific options (JSON-serializable)",
-    )
-
-    # Modal image customization
-    agent_image_builder: str | None = Field(
-        default=None,
-        description="Override image builder name (defaults to agent_provider)",
-    )
-    agent_image_override: str | None = Field(
-        default=None,
-        description="Custom base image reference (e.g., org/image:tag)",
-    )
-    agent_image_secrets: list[str] = Field(
-        default_factory=list,
-        description="Additional Modal secret names to inject with the agent image",
-    )
-
     # Agent filesystem root
     agent_fs_root: str = "/data"
 
@@ -184,18 +160,6 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("agent_image_secrets", mode="before")
-    @classmethod
-    def _split_agent_image_secrets(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-            if stripped.startswith("["):
-                return value
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
 
 def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
     """Get Modal secrets required for the application.
@@ -207,16 +171,10 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
     Returns:
         List of Modal Secret objects.
     """
-    settings = get_settings()
-    from agent_sandbox.providers import get_provider
-
-    provider = get_provider(settings.agent_provider)
-    secrets = provider.required_secrets(settings)
-
-    for secret_name in settings.agent_image_secrets:
-        secrets.append(modal.Secret.from_name(secret_name))
+    secrets = [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
 
     if include_admin:
+        settings = get_settings()
         # Admin secret is optional - use required_keys=[] to avoid failure if not set
         secrets.append(modal.Secret.from_name(settings.admin_secret_name))
 

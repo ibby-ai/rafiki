@@ -12,17 +12,6 @@ def test_query_body_valid():
     assert body.question == "What is the capital of France?"
 
 
-def test_query_body_with_provider():
-    """Test creating a QueryBody with provider overrides."""
-    body = QueryBody(
-        question="Hello",
-        provider="claude",
-        provider_config={"mode": "test"},
-    )
-    assert body.provider == "claude"
-    assert body.provider_config == {"mode": "test"}
-
-
 def test_query_body_empty_string():
     """Test that empty string is allowed (validation may be added later)."""
     body = QueryBody(question="")

@@ -14,7 +14,7 @@ Tools extend the agent's capabilities by providing callable functions. This exam
 ## Tool Anatomy
 
 ```python
-from agent_sandbox.tools.decorators import tool
+from claude_agent_sdk import tool
 
 @tool(
     "tool_name",                    # Unique identifier

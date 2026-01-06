@@ -295,7 +295,7 @@ export PERSIST_VOL_NAME="agent-sandbox-prod-vol"
 
 ## Image Configuration
 
-The Modal container image is built via the ImageFactory in `agent_sandbox/images/`. The default Claude image builder lives in `agent_sandbox/images/claude_image.py` and includes:
+The Modal container image is built in `agent_sandbox/app.py` via `_base_anthropic_sdk_image()`. The default image includes:
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
@@ -308,46 +308,21 @@ The Modal container image is built via the ImageFactory in `agent_sandbox/images
 
 ### Adding Dependencies
 
-To add Python packages to the default Claude image, modify `ClaudeImageBuilder` in `agent_sandbox/images/claude_image.py`:
+To add Python packages, modify `_base_anthropic_sdk_image()` in `agent_sandbox/app.py`:
 
 ```python
-class ClaudeImageBuilder(AgentImageBuilder):
-    def build(self, settings: Settings) -> modal.Image:
-        return (
-            modal.Image.debian_slim(python_version="3.11")
-            .pip_install("your-package-here")  # Add your package
-            # ... rest of the image definition
-        )
+def _base_anthropic_sdk_image() -> modal.Image:
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .pip_install("your-package-here")  # Add your package
+        # ... rest of the image definition
+    )
 ```
 
 To add system packages:
 
 ```python
 .apt_install("your-system-package")
-
-### Custom Image Overrides
-
-You can point the deployment at a custom base image without changing code:
-
-```bash
-export AGENT_IMAGE_OVERRIDE="my-org/my-agent:latest"
-export AGENT_IMAGE_SECRETS="openai-secret,my-db-secret"
-```
-
-Optional: override the image builder name (defaults to provider id):
-
-```bash
-export AGENT_IMAGE_BUILDER="custom"
-```
-
-### Provider Selection
-
-Select the provider (Claude by default) and optional provider options:
-
-```bash
-export AGENT_PROVIDER="claude"
-export AGENT_PROVIDER_OPTIONS='{"model": "claude-3-5-sonnet"}'
-```
 ```
 
 ---

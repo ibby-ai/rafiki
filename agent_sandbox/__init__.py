@@ -20,17 +20,7 @@ Usage:
 """
 
 # Import submodules to ensure all Modal functions are registered
-from agent_sandbox import (
-    agents,
-    app,
-    config,
-    controllers,
-    images,
-    prompts,
-    providers,
-    schemas,
-    tools,
-)
+from agent_sandbox import agents, app, config, controllers, prompts, schemas, tools
 
 __all__ = [
     "app",
@@ -38,8 +28,6 @@ __all__ = [
     "controllers",
     "config",
     "prompts",
-    "images",
-    "providers",
     "schemas",
     "tools",
 ]

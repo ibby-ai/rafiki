@@ -32,7 +32,7 @@ Create a new file in `agent_sandbox/tools/`:
 # agent_sandbox/tools/my_tool.py
 """My custom tool for doing something useful."""
 
-from agent_sandbox.tools.decorators import tool
+from claude_agent_sdk import tool
 from typing import Any
 
 
@@ -176,7 +176,7 @@ Here's a more realistic example of a tool that fetches weather data:
 # agent_sandbox/tools/weather_tool.py
 """Weather lookup tool using a weather API."""
 
-from agent_sandbox.tools.decorators import tool
+from claude_agent_sdk import tool
 from typing import Any
 import httpx
 
@@ -274,18 +274,17 @@ dependencies = [
 
 ### 2. Update the Modal Image
 
-The image is rebuilt automatically when dependencies change. If you need system packages, edit `agent_sandbox/images/claude_image.py`:
+The image is rebuilt automatically when dependencies change. If you need system packages, edit `agent_sandbox/app.py`:
 
 ```python
-class ClaudeImageBuilder(AgentImageBuilder):
-    def build(self, settings: Settings) -> modal.Image:
-        return (
-            modal.Image.debian_slim(python_version="3.11")
-            .apt_install("your-system-package")  # Add system packages
-            .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
-            .pip_install("your-python-package")  # Add Python packages
-            # ... rest of image definition
-        )
+def _base_anthropic_sdk_image() -> modal.Image:
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .apt_install("your-system-package")  # Add system packages
+        .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
+        .pip_install("your-python-package")  # Add Python packages
+        # ... rest of image definition
+    )
 ```
 
 ---
@@ -330,7 +329,7 @@ You can group related tools in a single MCP server:
 
 ```python
 # agent_sandbox/tools/math_tools.py
-from agent_sandbox.tools.decorators import tool
+from claude_agent_sdk import tool
 from typing import Any
 
 
