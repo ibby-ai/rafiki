@@ -12,6 +12,12 @@ def test_query_body_valid():
     assert body.question == "What is the capital of France?"
 
 
+def test_query_body_with_job_id():
+    """Test that job_id is accepted for background jobs."""
+    body = QueryBody(question="Run job", job_id="job-123")
+    assert body.job_id == "job-123"
+
+
 def test_query_body_empty_string():
     """Test that empty string is allowed (validation may be added later)."""
     body = QueryBody(question="")
