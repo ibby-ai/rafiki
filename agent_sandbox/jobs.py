@@ -23,7 +23,7 @@ from typing import Any
 import modal
 
 from agent_sandbox.config.settings import get_settings
-from agent_sandbox.schemas.jobs import JobStatusResponse
+from agent_sandbox.schemas.jobs import JobStatusResponse, WebhookConfig
 
 _settings = get_settings()
 
@@ -36,7 +36,37 @@ JOB_QUEUE = modal.Queue.from_name(_settings.job_queue_name, create_if_missing=Tr
 JOB_RESULTS = modal.Dict.from_name(_settings.job_results_dict, create_if_missing=True)
 
 
-def enqueue_job(question: str) -> str:
+def _normalize_schedule_at(value: int | float | None) -> int | None:
+    """Normalize schedule_at inputs to integer unix timestamps."""
+    if value is None:
+        return None
+    try:
+        schedule_at = int(value)
+    except (TypeError, ValueError):
+        return None
+    return schedule_at if schedule_at > 0 else None
+
+
+def _normalize_webhook(value: WebhookConfig | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize webhook config into a plain dict for persistence."""
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def enqueue_job(
+    question: str,
+    *,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+    schedule_at: int | float | None = None,
+    webhook: WebhookConfig | dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
     """Create a new job and add it to the processing queue.
 
     Initializes job metadata in JOB_RESULTS with "queued" status, then pushes
@@ -50,6 +80,8 @@ def enqueue_job(question: str) -> str:
     """
     job_id = str(uuid.uuid4())
     now = int(time.time())
+    normalized_schedule_at = _normalize_schedule_at(schedule_at)
+    normalized_webhook = _normalize_webhook(webhook)
     # Initialize job record with queued status before pushing to queue
     JOB_RESULTS[job_id] = {
         "job_id": job_id,
@@ -58,9 +90,24 @@ def enqueue_job(question: str) -> str:
         "created_at": now,
         "updated_at": now,
         "attempts": 0,
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "schedule_at": normalized_schedule_at,
+        "webhook_config": normalized_webhook,
+        "webhook": {
+            "url": normalized_webhook.get("url") if normalized_webhook else None,
+            "secret_ref": normalized_webhook.get("secret_ref") if normalized_webhook else None,
+            "attempts": 0 if normalized_webhook else None,
+        },
+        "metadata": metadata,
     }
     JOB_QUEUE.put({"job_id": job_id, "question": question})
     return job_id
+
+
+def _status_payload(record: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = JobStatusResponse.model_fields.keys()
+    return {key: record.get(key) for key in allowed_keys if key in record}
 
 
 def get_job_status(job_id: str) -> JobStatusResponse | None:
@@ -76,7 +123,38 @@ def get_job_status(job_id: str) -> JobStatusResponse | None:
     record = JOB_RESULTS.get(job_id)
     if not record:
         return None
-    return JobStatusResponse(**record)
+    return JobStatusResponse(**_status_payload(record))
+
+
+def get_job_record(job_id: str) -> dict[str, Any] | None:
+    """Return the raw job record from the job store."""
+    record = JOB_RESULTS.get(job_id)
+    return record if record else None
+
+
+def is_job_due(job_id: str, *, now: int | None = None) -> bool:
+    """Return True if a job is scheduled to run now."""
+    record = JOB_RESULTS.get(job_id)
+    if not record:
+        return True
+    schedule_at = record.get("schedule_at")
+    if not schedule_at:
+        return True
+    now_ts = now if now is not None else int(time.time())
+    return int(schedule_at) <= now_ts
+
+
+def job_schedule_delay(job_id: str, *, now: int | None = None) -> int | None:
+    """Return seconds until job is due, or 0 if due."""
+    record = JOB_RESULTS.get(job_id)
+    if not record:
+        return None
+    schedule_at = record.get("schedule_at")
+    if not schedule_at:
+        return 0
+    now_ts = now if now is not None else int(time.time())
+    delay = int(schedule_at) - now_ts
+    return delay if delay > 0 else 0
 
 
 def cancel_job(job_id: str) -> JobStatusResponse | None:
@@ -98,7 +176,7 @@ def cancel_job(job_id: str) -> JobStatusResponse | None:
         return None
     # Terminal states cannot be canceled - return as-is
     if record.get("status") in {"complete", "failed"}:
-        return JobStatusResponse(**record)
+        return JobStatusResponse(**_status_payload(record))
     now = int(time.time())
     updated = {
         **record,
@@ -107,7 +185,7 @@ def cancel_job(job_id: str) -> JobStatusResponse | None:
         "updated_at": now,
     }
     JOB_RESULTS[job_id] = updated
-    return JobStatusResponse(**updated)
+    return JobStatusResponse(**_status_payload(updated))
 
 
 def update_job(job_id: str, updates: dict[str, Any]) -> None:

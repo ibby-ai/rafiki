@@ -10,3 +10,4 @@ class QueryBody(BaseSchema):
     session_id: str | None = None
     session_key: str | None = None
     fork_session: bool = False
+    job_id: str | None = None

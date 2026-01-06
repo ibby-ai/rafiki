@@ -26,15 +26,20 @@ Prerequisite for curl testing:
 
 import inspect
 import logging
+import mimetypes
+import re
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+from urllib.parse import quote
 
 import anyio
 import httpx
 import modal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
@@ -44,15 +49,26 @@ from agent_sandbox.jobs import (
     bump_attempts,
     cancel_job,
     enqueue_job,
+    get_job_record,
     get_job_status,
+    is_job_due,
     should_skip_job,
     update_job,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
-from agent_sandbox.schemas import JobStatusResponse, JobSubmitRequest, JobSubmitResponse, QueryBody
+from agent_sandbox.schemas import (
+    ArtifactListResponse,
+    JobStatusResponse,
+    JobSubmitRequest,
+    JobSubmitResponse,
+    QueryBody,
+)
+from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
+from agent_sandbox.services.webhooks import build_headers, build_webhook_payload, serialize_payload
 
 app = modal.App("test-sandbox")
 _settings = Settings()
+_logger = logging.getLogger(__name__)
 
 web_app = FastAPI()
 
@@ -243,6 +259,122 @@ def _job_queue_schedule() -> modal.Cron | None:
     return modal.Cron(cron)
 
 
+def _get_persist_volume() -> modal.Volume:
+    """Return the configured persistent volume handle."""
+    kwargs: dict[str, object] = {"create_if_missing": True}
+    if _settings.persist_vol_version is not None:
+        kwargs["version"] = _settings.persist_vol_version
+    return modal.Volume.from_name(_settings.persist_vol_name, **kwargs)
+
+
+def _reload_persist_volume() -> None:
+    """Reload the persistent volume to see latest committed writes."""
+    try:
+        _get_persist_volume().reload()
+    except Exception:
+        logging.getLogger(__name__).warning("Failed to reload persistent volume", exc_info=True)
+
+
+def _job_artifacts_root(job_id: str) -> Path:
+    return Path(_settings.agent_fs_root) / "jobs" / job_id
+
+
+def _resolve_artifact_path(job_id: str, artifact_path: str) -> Path | None:
+    base = _job_artifacts_root(job_id).resolve()
+    candidate = (base / artifact_path).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename for safe use in Content-Disposition header.
+
+    Removes path separators, control characters, and other dangerous characters
+    that could enable header injection or path traversal attacks.
+
+    Args:
+        filename: The original filename from the filesystem
+
+    Returns:
+        Sanitized filename safe for HTTP headers (max 255 chars)
+    """
+    # Remove path separators and control characters that could enable attacks
+    sanitized = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", filename)
+    # Limit length to prevent excessively long filenames
+    return sanitized[:255]
+
+
+def _build_artifact_manifest(job_id: str) -> ArtifactManifest:
+    root = _job_artifacts_root(job_id)
+    files: list[ArtifactEntry] = []
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            content_type, _ = mimetypes.guess_type(str(path))
+            files.append(
+                ArtifactEntry(
+                    path=str(path.relative_to(root)),
+                    size_bytes=stat.st_size,
+                    content_type=content_type,
+                    created_at=int(stat.st_ctime),
+                    modified_at=int(stat.st_mtime),
+                )
+            )
+    return ArtifactManifest(root=str(root), files=files)
+
+
+def _extract_job_metrics(result: dict) -> dict[str, object]:
+    summary = result.get("summary") or {}
+    messages = result.get("messages") or []
+    tool_calls = 0
+    models: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        model = message.get("model")
+        if model:
+            models.add(model)
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_calls += 1
+    metrics: dict[str, object] = {
+        "agent_duration_ms": summary.get("duration_ms"),
+        "agent_duration_api_ms": summary.get("duration_api_ms"),
+        "total_cost_usd": summary.get("total_cost_usd"),
+        "usage": summary.get("usage"),
+        "num_turns": summary.get("num_turns"),
+        "session_id": summary.get("session_id"),
+        "tool_call_count": tool_calls or None,
+        "models": sorted(models) if models else None,
+    }
+    return {key: value for key, value in metrics.items() if value is not None}
+
+
+def _webhook_retry_delay(settings: Settings, attempt: int) -> float:
+    delay = settings.webhook_retry_initial_delay * (
+        settings.webhook_retry_backoff_coefficient ** max(attempt - 1, 0)
+    )
+    return min(delay, settings.webhook_retry_max_delay)
+
+
+def _maybe_trigger_webhook(job_id: str, event: str) -> None:
+    record = get_job_record(job_id)
+    if not record:
+        return
+    config = record.get("webhook_config")
+    if not config or not config.get("url"):
+        return
+    deliver_webhook.spawn(job_id, event)
+
+
 # Create image and secrets
 agent_sdk_image = _base_anthropic_sdk_image()
 agent_sdk_secrets = get_modal_secrets()
@@ -251,6 +383,7 @@ agent_sdk_secrets = get_modal_secrets()
 @app.function(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
+    volumes={_settings.agent_fs_root: _get_persist_volume()},
     **_function_runtime_kwargs(include_retries=False),
 )
 @_maybe_concurrent()
@@ -330,7 +463,14 @@ async def query_stream(request: Request, body: QueryBody):
 @web_app.post("/submit", response_model=JobSubmitResponse)
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
-    job_id = enqueue_job(body.question)
+    job_id = enqueue_job(
+        body.question,
+        tenant_id=body.tenant_id,
+        user_id=body.user_id,
+        schedule_at=body.schedule_at,
+        webhook=body.webhook,
+        metadata=body.metadata,
+    )
     return JobSubmitResponse(job_id=job_id)
 
 
@@ -341,6 +481,41 @@ async def job_status(job_id: str) -> JobStatusResponse:
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+@web_app.get("/jobs/{job_id}/artifacts", response_model=ArtifactListResponse)
+async def job_artifacts(job_id: str) -> ArtifactListResponse:
+    """List artifacts generated by a job."""
+    status = get_job_status(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _reload_persist_volume()
+    manifest = status.artifacts or _build_artifact_manifest(job_id)
+    return ArtifactListResponse(job_id=job_id, artifacts=manifest)
+
+
+@web_app.get("/jobs/{job_id}/artifacts/{artifact_path:path}")
+async def download_job_artifact(job_id: str, artifact_path: str):
+    """Download a specific job artifact."""
+    status = get_job_status(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _reload_persist_volume()
+    resolved = _resolve_artifact_path(job_id, artifact_path)
+    if not resolved or not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    # Sanitize filename to prevent header injection attacks
+    safe_filename = _sanitize_filename(resolved.name)
+
+    # Use both ASCII fallback and RFC 2231 encoded filename for maximum compatibility
+    return FileResponse(
+        str(resolved),
+        filename=safe_filename,
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(safe_filename)}"
+        },
+    )
 
 
 @web_app.delete("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -395,14 +570,6 @@ SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
 SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
-
-
-def _get_persist_volume() -> modal.Volume:
-    """Return the configured persistent volume handle."""
-    kwargs: dict[str, object] = {"create_if_missing": True}
-    if _settings.persist_vol_version is not None:
-        kwargs["version"] = _settings.persist_vol_version
-    return modal.Volume.from_name(PERSIST_VOL_NAME, **kwargs)
 
 
 # =============================================================================
@@ -862,14 +1029,16 @@ def process_job_queue() -> None:
     Job Processing Flow:
         1. Pull job from JOB_QUEUE (2s timeout per poll)
         2. Check if job was canceled (skip if so)
-        3. Increment attempt counter
-        4. Set status to "running"
-        5. Forward query to background sandbox service
-        6. Update status to "complete" or "failed" with result/error
+        3. Defer job if schedule_at is in the future
+        4. Increment attempt counter
+        5. Set status to "running"
+        6. Forward query to background sandbox service
+        7. Update status to "complete" or "failed" with result/error
     """
     settings = Settings()
     jobs_processed = 0
     max_jobs = settings.max_jobs_per_run
+    deferred_jobs: set[str] = set()
 
     while True:
         # Respect per-run job limit to bound execution time
@@ -887,25 +1056,181 @@ def process_job_queue() -> None:
         if should_skip_job(job_id):
             update_job(job_id, {"status": "canceled"})
             continue
-        bump_attempts(job_id)
-        update_job(job_id, {"status": "running"})
+        # Respect scheduled execution time
+        if not is_job_due(job_id):
+            JOB_QUEUE.put(job)
+            if job_id in deferred_jobs:
+                break
+            deferred_jobs.add(job_id)
+            continue
+        attempt = bump_attempts(job_id)
+        started_at = int(time.time())
+        record = get_job_record(job_id) or {}
+        created_at = record.get("created_at")
+        queue_latency_ms = None
+        if created_at is not None:
+            queue_latency_ms = max(0, (started_at - int(created_at)) * 1000)
+        update_job(
+            job_id,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "queue_latency_ms": queue_latency_ms,
+            },
+        )
         try:
             sb, url = get_or_start_background_sandbox()
+            update_job(job_id, {"sandbox_id": sb.object_id})
+            _logger.info(
+                "job.start",
+                extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
+            )
             headers = {}
             if settings.enforce_connect_token:
                 creds = sb.create_connect_token(user_metadata={"job_id": job_id})
                 headers = {"Authorization": f"Bearer {creds.token}"}
             r = httpx.post(
                 f"{url.rstrip('/')}/query",
-                json={"question": question},
+                json={"question": question, "job_id": job_id},
                 headers=headers,
                 timeout=httpx.Timeout(120.0, connect=30.0),
             )
             r.raise_for_status()
-            update_job(job_id, {"status": "complete", "result": r.json()})
+            result = r.json()
+            _reload_persist_volume()
+            manifest = _build_artifact_manifest(job_id)
+            completed_at = int(time.time())
+            duration_ms = max(0, (completed_at - started_at) * 1000)
+            update_job(
+                job_id,
+                {
+                    "status": "complete",
+                    "result": result,
+                    "artifacts": manifest.model_dump(),
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                    **_extract_job_metrics(result),
+                },
+            )
+            _logger.info(
+                "job.complete",
+                extra={
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "duration_ms": duration_ms,
+                    "sandbox_id": sb.object_id,
+                },
+            )
+            _maybe_trigger_webhook(job_id, event="job.complete")
         except Exception as exc:
-            update_job(job_id, {"status": "failed", "error": str(exc)})
+            completed_at = int(time.time())
+            duration_ms = max(0, (completed_at - started_at) * 1000)
+            update_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                },
+            )
+            _logger.info(
+                "job.failed",
+                extra={
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "duration_ms": duration_ms,
+                    "error": str(exc),
+                },
+            )
+            _maybe_trigger_webhook(job_id, event="job.failed")
         jobs_processed += 1
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    **_retry_kwargs(),
+)
+def deliver_webhook(job_id: str, event: str) -> None:
+    """Deliver a webhook notification for a completed job."""
+    settings = Settings()
+    record = get_job_record(job_id)
+    if not record:
+        return
+    config = record.get("webhook_config")
+    if not config or not config.get("url"):
+        return
+
+    status = get_job_status(job_id)
+    if not status:
+        return
+
+    payload = build_webhook_payload(event, status)
+    serialized = serialize_payload(payload)
+
+    max_attempts = int(config.get("max_attempts") or settings.webhook_default_max_attempts)
+    timeout = float(config.get("timeout_seconds") or settings.webhook_default_timeout)
+
+    webhook_status = record.get("webhook") or {}
+    attempts_so_far = int(webhook_status.get("attempts", 0) or 0)
+    if attempts_so_far >= max_attempts:
+        return
+
+    url = str(config.get("url"))
+    for attempt in range(attempts_so_far + 1, max_attempts + 1):
+        # Regenerate headers with fresh timestamp for each attempt to ensure valid signatures
+        headers, _ = build_headers(
+            config=config, payload=serialized, default_secret=settings.webhook_signing_secret
+        )
+
+        try:
+            response = httpx.post(
+                url,
+                content=serialized,
+                headers=headers,
+                timeout=httpx.Timeout(timeout, connect=min(timeout, 30.0)),
+            )
+            if 200 <= response.status_code < 300:
+                update_job(
+                    job_id,
+                    {
+                        "webhook": {
+                            "url": url,
+                            "secret_ref": config.get("secret_ref"),
+                            "attempts": attempt,
+                            "last_status": response.status_code,
+                            "delivered_at": int(time.time()),
+                        }
+                    },
+                )
+                return
+            update_job(
+                job_id,
+                {
+                    "webhook": {
+                        "url": url,
+                        "secret_ref": config.get("secret_ref"),
+                        "attempts": attempt,
+                        "last_status": response.status_code,
+                        "last_error": response.text[:500],
+                    }
+                },
+            )
+        except Exception as exc:
+            update_job(
+                job_id,
+                {
+                    "webhook": {
+                        "url": url,
+                        "secret_ref": config.get("secret_ref"),
+                        "attempts": attempt,
+                        "last_error": str(exc),
+                    }
+                },
+            )
+        if attempt < max_attempts:
+            time.sleep(_webhook_retry_delay(settings, attempt))
 
 
 @app.function(
