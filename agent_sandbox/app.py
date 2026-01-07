@@ -283,10 +283,90 @@ def _job_artifacts_root(job_id: str) -> Path:
 
 
 def _resolve_artifact_path(job_id: str, artifact_path: str) -> Path | None:
+    """Resolve artifact path with security validation (HTTP endpoint helper).
+
+    Convenience wrapper around resolve_job_artifact() for HTTP endpoints, using
+    the configured agent_fs_root from settings. Validates that artifact_path
+    stays within the job workspace.
+
+    Args:
+        job_id: Validated UUID job identifier (call _normalize_job_id_or_400 first)
+        artifact_path: User-provided relative path from HTTP request
+                      (e.g., from path parameter /jobs/{job_id}/artifacts/{path})
+
+    Returns:
+        Absolute Path to artifact if valid and within workspace, None if path
+        traversal attempted or path escapes job boundary.
+
+    Security:
+        This function prevents directory traversal attacks. Always check return
+        value for None before accessing filesystem.
+
+    Usage in Endpoints:
+        ```python
+        @web_app.get("/jobs/{job_id}/artifacts/{artifact_path:path}")
+        def download_artifact(job_id: str, artifact_path: str):
+            job_id = _normalize_job_id_or_400(job_id)
+            path = _resolve_artifact_path(job_id, artifact_path)
+            if not path or not path.exists():
+                raise HTTPException(404, "Artifact not found")
+            return FileResponse(path)
+        ```
+
+    See Also:
+        - resolve_job_artifact(): Full documentation of security model
+        - _normalize_job_id_or_400(): Validate job_id before calling this
+    """
     return resolve_job_artifact(_settings.agent_fs_root, job_id, artifact_path)
 
 
 def _normalize_job_id_or_400(job_id: str) -> str:
+    """Validate job_id from HTTP request and return 400 if invalid.
+
+    Validates that job_id is a properly formatted UUID and raises HTTPException
+    if validation fails. This function should be called at the beginning of all
+    HTTP endpoints that accept job_id parameters.
+
+    Args:
+        job_id: Job ID from HTTP path parameter, query string, or request body
+
+    Returns:
+        Canonical UUID string if valid
+
+    Raises:
+        HTTPException: 400 Bad Request if job_id is not a valid UUID
+
+    Security:
+        Prevents injection attacks by validating job_id format before using it in:
+        - Filesystem paths
+        - Dict lookups
+        - Database queries
+        - HTTP responses
+
+    Usage:
+        ```python
+        @web_app.get("/jobs/{job_id}")
+        def get_job_status(job_id: str):
+            job_id = _normalize_job_id_or_400(job_id)
+            # Now safe to use job_id
+            return get_job_status(job_id)
+        ```
+
+    Example Responses:
+        Valid UUID:
+        >>> _normalize_job_id_or_400("550e8400-e29b-41d4-a716-446655440000")
+        '550e8400-e29b-41d4-a716-446655440000'
+
+        Invalid inputs (raises 400):
+        >>> _normalize_job_id_or_400("../../../etc/passwd")
+        HTTPException(400, "Invalid job_id")
+
+        >>> _normalize_job_id_or_400("not-a-uuid")
+        HTTPException(400, "Invalid job_id")
+
+    See Also:
+        - normalize_job_id(): Core validation logic
+    """
     normalized = normalize_job_id(job_id)
     if not normalized:
         raise HTTPException(status_code=400, detail="Invalid job_id")
@@ -294,17 +374,90 @@ def _normalize_job_id_or_400(job_id: str) -> str:
 
 
 def _sanitize_filename(filename: str) -> str:
-    """
-    Sanitize filename for safe use in Content-Disposition header.
+    """Sanitize filename for safe use in HTTP Content-Disposition header.
 
-    Removes path separators, control characters, and other dangerous characters
-    that could enable header injection or path traversal attacks.
+    Removes path separators, control characters, and special characters that
+    could enable HTTP header injection or path traversal attacks when the
+    filename appears in the Content-Disposition header.
 
     Args:
-        filename: The original filename from the filesystem
+        filename: The original filename from the filesystem (e.g., "report.pdf"
+                 or potentially malicious input like "../../etc/passwd")
 
     Returns:
-        Sanitized filename safe for HTTP headers (max 255 chars)
+        Sanitized filename safe for HTTP headers, maximum 255 characters
+
+    Security Model:
+        This prevents two types of attacks:
+
+        1. **Header Injection**: Control characters (\r, \n, \t) could inject
+           additional HTTP headers if not sanitized:
+           ```
+           filename="file.txt\r\nX-Evil-Header: malicious"
+           # Without sanitization becomes:
+           Content-Disposition: attachment; filename="file.txt
+           X-Evil-Header: malicious"
+           ```
+
+        2. **Path Traversal**: Path separators could cause browsers to save
+           files in unexpected locations:
+           ```
+           filename="../../etc/passwd"  # Could save outside download directory
+           ```
+
+    Characters Removed:
+        - Backslash (\\): Windows path separator
+        - Forward slash (/): Unix path separator
+        - Colon (:): Windows drive separator, NTFS stream separator
+        - Asterisk (*): Wildcard character
+        - Question mark (?): Wildcard character
+        - Quote ("): Header delimiter
+        - Less than (<): Angle bracket
+        - Greater than (>): Angle bracket
+        - Pipe (|): Command separator
+        - Carriage return (\r): Line ending, header injection
+        - Line feed (\n): Line ending, header injection
+        - Tab (\t): Whitespace control character
+
+        All replaced with underscore (_) to maintain readability
+
+    Length Limit:
+        Truncated to 255 characters to prevent:
+        - Buffer overflows in legacy systems
+        - Filesystem limitations (most filesystems have 255 byte filename limit)
+        - DoS via excessively long headers
+
+    Examples:
+        >>> _sanitize_filename("report.pdf")
+        'report.pdf'
+
+        >>> _sanitize_filename("../../etc/passwd")
+        '.._.._etc_passwd'
+
+        >>> _sanitize_filename("file\r\nX-Evil: header.txt")
+        'file__X-Evil_ header.txt'
+
+        >>> _sanitize_filename("data:sensitive.csv")
+        'data_sensitive.csv'
+
+    Usage in File Download:
+        ```python
+        @web_app.get("/jobs/{job_id}/artifacts/{path}")
+        def download_artifact(job_id: str, path: str):
+            resolved = _resolve_artifact_path(job_id, path)
+            if not resolved:
+                raise HTTPException(404)
+
+            safe_name = _sanitize_filename(resolved.name)
+            return FileResponse(
+                resolved,
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'}
+            )
+        ```
+
+    See Also:
+        - RFC 6266: Use of Content-Disposition Header Field
+        - OWASP: HTTP Response Splitting
     """
     # Remove path separators and control characters that could enable attacks
     sanitized = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", filename)
@@ -313,6 +466,78 @@ def _sanitize_filename(filename: str) -> str:
 
 
 def _build_artifact_manifest(job_id: str) -> ArtifactManifest:
+    """Build manifest of all artifacts created by a job.
+
+    Recursively scans the job's workspace directory and collects metadata for
+    all files, including size, MIME type, and timestamps. Used for artifact
+    listing endpoint and job status responses.
+
+    Args:
+        job_id: Validated UUID job identifier
+
+    Returns:
+        ArtifactManifest containing:
+            - root: Absolute path to job workspace
+            - files: List of ArtifactEntry objects with metadata for each file
+
+    Scanning Behavior:
+        - Uses rglob("*") for recursive traversal of all subdirectories
+        - Only includes files (not directories)
+        - Relative paths computed from workspace root
+        - Returns empty file list if workspace doesn't exist
+
+    Metadata Collected:
+        - path: Relative path from workspace root (e.g., "output.txt", "data/results.csv")
+        - size_bytes: File size from os.stat().st_size
+        - content_type: MIME type guessed from extension (e.g., "text/csv", "image/png")
+        - created_at: Unix timestamp from st_birthtime (macOS/BSD) or None (Linux)
+        - modified_at: Unix timestamp from st_mtime (all platforms)
+
+    Platform-Specific Behavior:
+        - macOS/BSD: created_at uses st_birthtime (true creation time)
+        - Linux: created_at is None (most filesystems don't track creation time)
+        - All platforms: modified_at available via st_mtime
+
+    Example Output:
+        >>> manifest = _build_artifact_manifest("550e8400-...")
+        >>> manifest.root
+        '/data/jobs/550e8400-.../
+        >>> manifest.files
+        [
+            ArtifactEntry(
+                path="output.txt",
+                size_bytes=1024,
+                content_type="text/plain",
+                created_at=1704067200,
+                modified_at=1704067300
+            ),
+            ArtifactEntry(
+                path="results/data.csv",
+                size_bytes=2048,
+                content_type="text/csv",
+                created_at=None,  # Linux system
+                modified_at=1704067400
+            )
+        ]
+
+    Usage:
+        ```python
+        # After job completion
+        manifest = _build_artifact_manifest(job_id)
+        update_job(job_id, {"artifacts": manifest.model_dump()})
+
+        # In artifact listing endpoint
+        @web_app.get("/jobs/{job_id}/artifacts")
+        def list_artifacts(job_id: str):
+            job_id = _normalize_job_id_or_400(job_id)
+            manifest = _build_artifact_manifest(job_id)
+            return ArtifactListResponse(job_id=job_id, artifacts=manifest)
+        ```
+
+    See Also:
+        - ArtifactManifest: Schema definition
+        - ArtifactEntry: Individual file metadata schema
+    """
     root = _job_artifacts_root(job_id)
     files: list[ArtifactEntry] = []
     if root.exists():
@@ -335,6 +560,91 @@ def _build_artifact_manifest(job_id: str) -> ArtifactManifest:
 
 
 def _extract_job_metrics(result: dict) -> dict[str, object]:
+    """Extract performance metrics from agent SDK response.
+
+    Parses the agent run result to extract timing, cost, token usage, and other
+    observability metrics. These metrics are stored in the job record and returned
+    in job status responses.
+
+    Args:
+        result: Agent SDK response dict containing:
+               - summary: Dict with duration_ms, total_cost_usd, usage, etc.
+               - messages: List of conversation messages with tool_use blocks
+
+    Returns:
+        Dictionary of metrics with None values filtered out. Includes:
+            - agent_duration_ms: Total agent execution time in milliseconds
+            - agent_duration_api_ms: Time spent in API calls (subset of total)
+            - total_cost_usd: Estimated cost in USD based on token usage
+            - usage: Token usage dict (input_tokens, output_tokens, cache tokens)
+            - num_turns: Number of conversation turns in the agent loop
+            - session_id: Agent session identifier for resumption
+            - tool_call_count: Number of tool invocations (counted from messages)
+            - models: Sorted list of unique model IDs used (e.g., ["claude-sonnet-4"])
+
+    Metric Sources:
+        From summary dict (provided by Claude Agent SDK):
+            - duration_ms, duration_api_ms: Timing metrics
+            - total_cost_usd: Cost calculation
+            - usage: Token counts
+            - num_turns: Conversation length
+            - session_id: Session identifier
+
+        Computed from messages:
+            - tool_call_count: Count of content blocks with type="tool_use"
+            - models: Unique set of message.model values
+
+    Example Input (result):
+        {
+            "summary": {
+                "duration_ms": 1234,
+                "duration_api_ms": 987,
+                "total_cost_usd": 0.0045,
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "num_turns": 3,
+                "session_id": "sess_abc123"
+            },
+            "messages": [
+                {
+                    "model": "claude-sonnet-4",
+                    "content": [{"type": "tool_use", "name": "calculate"}]
+                },
+                {
+                    "model": "claude-sonnet-4",
+                    "content": [{"type": "text", "text": "result"}]
+                }
+            ]
+        }
+
+    Example Output:
+        {
+            "agent_duration_ms": 1234,
+            "agent_duration_api_ms": 987,
+            "total_cost_usd": 0.0045,
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+            "num_turns": 3,
+            "session_id": "sess_abc123",
+            "tool_call_count": 1,
+            "models": ["claude-sonnet-4"]
+        }
+
+    Usage:
+        ```python
+        # After agent execution
+        result = agent_client.run(prompt)
+        metrics = _extract_job_metrics(result)
+
+        # Store in job record
+        update_job(job_id, {
+            **metrics,
+            "result": result,
+            "status": "complete"
+        })
+        ```
+
+    See Also:
+        - JobStatusResponse: Schema including these metric fields
+    """
     summary = result.get("summary") or {}
     messages = result.get("messages") or []
     tool_calls = 0
@@ -364,6 +674,63 @@ def _extract_job_metrics(result: dict) -> dict[str, object]:
 
 
 def _webhook_retry_delay(settings: Settings, attempt: int) -> float:
+    """Calculate exponential backoff delay for webhook retry attempts.
+
+    Computes the delay before the next webhook delivery attempt using exponential
+    backoff with a maximum cap. Each retry waits progressively longer to avoid
+    overwhelming failing endpoints.
+
+    Args:
+        settings: Configuration object with webhook retry parameters
+        attempt: Current attempt number (1-indexed, where 1 = first attempt)
+
+    Returns:
+        Delay in seconds before next retry attempt (float)
+
+    Formula:
+        delay = initial * (coefficient ^ (attempt - 1))
+        capped_delay = min(delay, max_delay)
+
+    Default Configuration:
+        - initial_delay: 1.0 second
+        - backoff_coefficient: 2.0 (doubles each time)
+        - max_delay: 30.0 seconds
+
+    Example Delay Sequence (with defaults):
+        Attempt 1: 1.0 * (2.0 ^ 0) = 1.0s
+        Attempt 2: 1.0 * (2.0 ^ 1) = 2.0s
+        Attempt 3: 1.0 * (2.0 ^ 2) = 4.0s
+        Attempt 4: 1.0 * (2.0 ^ 3) = 8.0s
+        Attempt 5: 1.0 * (2.0 ^ 4) = 16.0s
+        Attempt 6: 1.0 * (2.0 ^ 5) = 32.0s → capped to 30.0s
+        Attempt 7+: 30.0s (all capped at max_delay)
+
+    Rationale:
+        - **Exponential Backoff**: Gives failing services time to recover without
+          immediate hammering
+        - **Max Delay Cap**: Prevents waiting excessively long (e.g., hours) for
+          endpoints that will never recover
+        - **First Attempt Immediate**: attempt=1 means delay=0 for first try
+          (exponent is attempt-1)
+
+    Usage in deliver_webhook:
+        ```python
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = httpx.post(url, ...)
+                if response.ok:
+                    return
+            except Exception:
+                pass
+
+            if attempt < max_attempts:
+                time.sleep(_webhook_retry_delay(settings, attempt))
+        ```
+
+    See Also:
+        - Settings: webhook_retry_* configuration fields
+        - deliver_webhook(): Uses this for retry timing
+    """
     delay = settings.webhook_retry_initial_delay * (
         settings.webhook_retry_backoff_coefficient ** max(attempt - 1, 0)
     )
@@ -371,6 +738,64 @@ def _webhook_retry_delay(settings: Settings, attempt: int) -> float:
 
 
 def _maybe_trigger_webhook(job_id: str, event: str) -> None:
+    """Trigger webhook delivery asynchronously if configured for the job.
+
+    Checks if the job has a webhook configured and spawns an async Modal function
+    to deliver the webhook notification. This function returns immediately without
+    waiting for delivery completion.
+
+    Args:
+        job_id: UUID of the job that triggered the event
+        event: Event type, typically "job.complete" or "job.failed"
+
+    Behavior:
+        - Checks job record exists
+        - Checks webhook_config exists and has a URL
+        - If both checks pass, spawns deliver_webhook.spawn(job_id, event)
+        - Returns immediately (non-blocking)
+        - If job or webhook not found, silently does nothing
+
+    Async Execution:
+        The webhook delivery runs in a separate Modal function invocation with:
+        - Independent retry logic (handled by deliver_webhook function)
+        - Status tracking in job record (webhook.attempts, webhook.last_status)
+        - Exponential backoff between retries
+        - Fresh signature generation for each attempt
+
+    When Called:
+        Automatically called after job completion/failure in process_job_queue:
+        ```python
+        try:
+            result = execute_agent_job(job_id)
+            update_job(job_id, {"status": "complete", "result": result})
+            _maybe_trigger_webhook(job_id, "job.complete")
+        except Exception as exc:
+            update_job(job_id, {"status": "failed", "error": str(exc)})
+            _maybe_trigger_webhook(job_id, "job.failed")
+        ```
+
+    Example Job Record with Webhook:
+        {
+            "job_id": "550e8400-...",
+            "webhook_config": {
+                "url": "https://example.com/webhook",
+                "signing_secret": "wh_secret_123",
+                "max_attempts": 3
+            }
+        }
+
+    Example Job Record without Webhook:
+        {
+            "job_id": "550e8400-...",
+            # No webhook_config field
+        }
+        # _maybe_trigger_webhook returns without doing anything
+
+    See Also:
+        - deliver_webhook(): Actual delivery implementation with retries
+        - WebhookConfig: Schema for webhook configuration
+        - WebhookStatus: Schema for delivery status tracking
+    """
     record = get_job_record(job_id)
     if not record:
         return
@@ -1162,7 +1587,128 @@ def process_job_queue() -> None:
     **_retry_kwargs(),
 )
 def deliver_webhook(job_id: str, event: str) -> None:
-    """Deliver a webhook notification for a completed job."""
+    """Deliver webhook notification with retry logic and signature regeneration.
+
+    Sends HTTP POST request to webhook URL with signed payload containing job
+    status and event information. Implements exponential backoff retry with
+    fresh signature generation for each attempt. Tracks delivery status in job record.
+
+    Args:
+        job_id: UUID of the job that triggered the webhook
+        event: Event type (typically "job.complete" or "job.failed")
+
+    Retry Logic:
+        - Max attempts: Configurable per webhook or global default (default: 3)
+        - Exponential backoff between retries with formula:
+          delay = initial * (coefficient ^ (attempt - 1))
+        - Default backoff: 1s, 2s, 4s, 8s, 16s, ... (capped at 30s)
+        - Continues from last recorded attempt (supports restarts)
+
+    Signature Regeneration:
+        **CRITICAL**: Headers are regenerated for each retry attempt with a fresh
+        timestamp. This ensures:
+        - Signatures remain valid even if retries span multiple minutes
+        - Recipients can validate timestamp freshness (prevent replay attacks)
+        - Each delivery attempt has its own unique signature
+
+    Status Tracking:
+        After each delivery attempt, updates job record with:
+        - webhook.url: Endpoint URL
+        - webhook.secret_ref: Reference to secret (if configured)
+        - webhook.attempts: Current attempt number
+        - webhook.last_status: HTTP status code from last attempt
+        - webhook.last_error: Error message (truncated to 500 chars)
+        - webhook.delivered_at: Unix timestamp (only on success)
+
+    Success Criteria:
+        HTTP status codes 200-299 are considered successful. Any 2xx response
+        stops retries and marks webhook as delivered.
+
+    Failure Handling:
+        - Non-2xx responses: Records status code and response body (first 500 chars)
+        - Exceptions (network errors, timeouts): Records exception message
+        - After max attempts: Stops retrying, last error preserved in job record
+
+    Example Workflow:
+        ```python
+        # Job completes
+        update_job(job_id, {"status": "complete", "result": {...}})
+
+        # Trigger webhook
+        _maybe_trigger_webhook(job_id, "job.complete")
+
+        # deliver_webhook.spawn(job_id, "job.complete") called
+        # Attempt 1: POST https://example.com/webhook
+        #   → 503 Service Unavailable
+        #   → Wait 1s, regenerate signature
+        # Attempt 2: POST with fresh signature
+        #   → 503 Service Unavailable
+        #   → Wait 2s, regenerate signature
+        # Attempt 3: POST with fresh signature
+        #   → 200 OK
+        #   → Update job record with delivered_at
+        #   → Return (success)
+        ```
+
+    Configuration:
+        Per-webhook config (from WebhookConfig):
+            - max_attempts: Override global default
+            - timeout_seconds: HTTP timeout override
+
+        Global defaults (from Settings):
+            - webhook_default_max_attempts: 3
+            - webhook_default_timeout: 10 seconds
+            - webhook_signing_secret: Default signing secret
+            - webhook_retry_initial_delay: 1.0 second
+            - webhook_retry_backoff_coefficient: 2.0
+            - webhook_retry_max_delay: 30.0 seconds
+
+    Timeout Behavior:
+        - Read timeout: Configured timeout value
+        - Connect timeout: Min of configured timeout and 30s (prevents long hangs)
+        - Example: timeout=60s → connect timeout = 30s, read timeout = 60s
+
+    Modal Function Behavior:
+        This function is decorated with Modal's retry policy (@app.function with
+        **_retry_kwargs()). If the entire function fails (not just HTTP delivery),
+        Modal will retry the whole function. The function tracks attempts internally
+        to avoid duplication.
+
+    Example Job Record After Delivery:
+        {
+            "job_id": "550e8400-...",
+            "status": "complete",
+            "result": {...},
+            "webhook": {
+                "url": "https://example.com/webhook",
+                "secret_ref": "customer_webhook_secret",
+                "attempts": 2,
+                "last_status": 200,
+                "delivered_at": 1704067890
+            }
+        }
+
+    Example Job Record After Failed Delivery:
+        {
+            "job_id": "550e8400-...",
+            "status": "complete",
+            "result": {...},
+            "webhook": {
+                "url": "https://example.com/webhook",
+                "attempts": 3,
+                "last_status": 503,
+                "last_error": "Service Temporarily Unavailable"
+            }
+        }
+
+    See Also:
+        - _maybe_trigger_webhook(): Spawns this function
+        - _webhook_retry_delay(): Calculates backoff delay
+        - build_webhook_payload(): Constructs event payload
+        - build_headers(): Generates signed headers
+        - WebhookConfig: Schema for webhook configuration
+        - WebhookStatus: Schema for delivery status
+    """
     settings = Settings()
     record = get_job_record(job_id)
     if not record:
