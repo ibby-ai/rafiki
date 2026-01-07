@@ -120,7 +120,22 @@ class Settings(BaseSettings):
     )
     volume_commit_interval: int | None = Field(
         default=None,
-        description="Seconds between volume commits (None=commit on termination only)",
+        description=(
+            "Seconds between automatic volume commits. Controls persistence behavior: "
+            "None (default) = No automatic commits; writes persist only on sandbox termination. "
+            "  - Pro: No I/O overhead during execution. "
+            "  - Con: Writes lost if sandbox crashes before graceful shutdown. "
+            "  - Best for: Short-lived sandboxes, non-critical artifacts. "
+            "0 or negative = Commit after every request (immediate persistence). "
+            "  - Pro: Maximum durability, no data loss on crashes. "
+            "  - Con: High I/O overhead, slower request latency. "
+            "  - Best for: Critical artifacts requiring immediate persistence. "
+            "Positive integer (e.g., 60) = Commit at most once per N seconds. "
+            "  - Pro: Balances durability and performance. "
+            "  - Con: Up to N seconds of writes may be lost on crash. "
+            "  - Best for: Long-lived sandboxes with moderate artifact frequency. "
+            "Note: Job workspaces force commit regardless of interval to ensure artifacts are available."
+        ),
     )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
@@ -140,7 +155,13 @@ class Settings(BaseSettings):
 
     # Webhook delivery defaults
     webhook_default_timeout: int = Field(
-        default=10, description="Default webhook timeout in seconds"
+        default=10,
+        description=(
+            "Default webhook HTTP request timeout in seconds. "
+            "Example: 10 seconds allows most webhook endpoints to respond. "
+            "Increase for slow endpoints, decrease for faster failure detection. "
+            "Can be overridden per-webhook via WebhookConfig.timeout_seconds."
+        ),
     )
     webhook_default_max_attempts: int = Field(
         default=3, description="Default max webhook delivery attempts"
@@ -149,10 +170,26 @@ class Settings(BaseSettings):
         default=1.0, description="Initial retry delay for webhooks (seconds)"
     )
     webhook_retry_backoff_coefficient: float = Field(
-        default=2.0, description="Backoff multiplier for webhook retries"
+        default=2.0,
+        description=(
+            "Exponential backoff multiplier for webhook retry delays. "
+            "Formula: delay = min(initial_delay * (coefficient ^ attempt), max_delay). "
+            "With default 2.0: attempt 1 waits 1s, attempt 2 waits 2s, attempt 3 waits 4s. "
+            "Higher values (e.g., 3.0) increase delays faster. Lower values (e.g., 1.5) are gentler. "
+            "Can be overridden per-webhook via WebhookConfig."
+        ),
     )
     webhook_retry_max_delay: float = Field(
-        default=30.0, description="Max delay between webhook retries (seconds)"
+        default=30.0,
+        description=(
+            "Maximum delay cap between webhook retry attempts in seconds. "
+            "Prevents exponential backoff from growing unbounded. "
+            "Scenarios: With backoff_coefficient=2.0 and initial_delay=1.0: "
+            "attempt 1→1s, attempt 2→2s, attempt 3→4s, attempt 4→8s, attempt 5→16s, "
+            "attempt 6→30s (capped), attempt 7→30s (capped). "
+            "Lower values (e.g., 10s) speed up retry cycles. "
+            "Higher values (e.g., 60s) reduce webhook endpoint load."
+        ),
     )
     webhook_signing_secret: str | None = Field(
         default=None,
@@ -165,7 +202,18 @@ class Settings(BaseSettings):
     )
 
     # Agent filesystem root
-    agent_fs_root: str = "/data"
+    agent_fs_root: str = Field(
+        default="/data",
+        description=(
+            "Root directory for agent filesystem operations and job workspaces. "
+            "This is the Modal persistent volume mount point. "
+            "Default: /data (matches Modal Volume mount in sandbox creation). "
+            "Job workspaces are isolated at {agent_fs_root}/jobs/{job_id}/. "
+            "Files written here persist across sandbox restarts when volume is committed. "
+            "Must match the path where the Modal Volume is mounted in the sandbox. "
+            "Change only if using a different volume mount path."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_concurrency_settings(self) -> Self:
