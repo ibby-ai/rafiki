@@ -6,14 +6,21 @@ from agent_sandbox.schemas.jobs import (
     JobSubmitRequest,
     JobSubmitResponse,
 )
-from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse, SummarySchema
-from agent_sandbox.schemas.sandbox import QueryBody
+from agent_sandbox.schemas.responses import (
+    ClaudeCliResponse,
+    ErrorResponse,
+    QueryResponse,
+    SummarySchema,
+)
+from agent_sandbox.schemas.sandbox import ClaudeCliRequest, QueryBody
 
 __all__ = [
     "QueryBody",
     "QueryResponse",
     "ErrorResponse",
     "SummarySchema",
+    "ClaudeCliRequest",
+    "ClaudeCliResponse",
     "JobSubmitRequest",
     "JobSubmitResponse",
     "JobStatusResponse",

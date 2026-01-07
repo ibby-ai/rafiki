@@ -71,3 +71,13 @@ class ErrorResponse(BaseSchema):
     error: str
     error_type: str
     request_id: str | None = None
+
+
+class ClaudeCliResponse(BaseSchema):
+    """Schema for Claude Code CLI responses."""
+
+    ok: bool
+    result: Any | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
