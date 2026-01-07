@@ -22,8 +22,11 @@ Important:
 
 import json
 import logging
+import os
+import pwd
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +62,58 @@ app.add_middleware(RequestIdMiddleware)
 _settings = get_settings()
 _logger = logging.getLogger(__name__)
 
+# Claude CLI runs as a non-root user to allow --dangerously-skip-permissions.
+_CLAUDE_CLI_USER = "claude"
+_CLAUDE_CLI_HOME = Path("/home/claude")
+_CLAUDE_CLI_PATH = f"{_CLAUDE_CLI_HOME}/.local/bin:{_CLAUDE_CLI_HOME}/.claude/bin"
+
 # Tracks the last time we committed the persistent volume. Used to enforce
 # minimum intervals between commits to avoid excessive I/O overhead.
 # See: https://modal.com/docs/guide/volumes
 _LAST_VOLUME_COMMIT_TS: float | None = None
 SESSION_STORE = modal.Dict.from_name(_settings.session_store_name, create_if_missing=True)
 SESSION_CACHE: dict[str, str] = {}
+
+
+def _claude_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(_CLAUDE_CLI_HOME)
+    env["USER"] = _CLAUDE_CLI_USER
+    env["PATH"] = f"{_CLAUDE_CLI_PATH}:{env.get('PATH', '')}"
+    return env
+
+
+def _claude_cli_ids() -> tuple[int, int]:
+    try:
+        entry = pwd.getpwnam(_CLAUDE_CLI_USER)
+    except KeyError as exc:
+        raise RuntimeError("Claude CLI user not found; rebuild the image to create it.") from exc
+    return entry.pw_uid, entry.pw_gid
+
+
+def _demote_to_claude() -> Callable[[], None]:
+    uid, gid = _claude_cli_ids()
+
+    def _inner() -> None:
+        os.setgid(gid)
+        if hasattr(os, "setgroups"):
+            os.setgroups([gid])
+        os.setuid(uid)
+
+    return _inner
+
+
+def _maybe_chown_for_claude(path: Path) -> None:
+    try:
+        uid, gid = _claude_cli_ids()
+    except RuntimeError:
+        _logger.warning("Claude CLI user missing; skipping workspace chown")
+        return
+    try:
+        os.chown(path, uid, gid)
+        path.chmod(0o775)
+    except PermissionError:
+        _logger.warning("Unable to chown workspace for Claude CLI user", exc_info=True)
 
 
 def _require_connect_token(request: Request) -> None:
@@ -318,6 +367,7 @@ def _ensure_job_workspace(job_id: str | None) -> Path | None:
         return None
     root = _job_workspace(normalized)
     root.mkdir(parents=True, exist_ok=True)
+    _maybe_chown_for_claude(root)
     return root
 
 
@@ -618,16 +668,16 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
 
     # Build Claude CLI command for non-interactive execution.
     #
-    # IMPORTANT: Do NOT use --dangerously-skip-permissions here.
-    # The Modal sandbox runs as root, and the Claude CLI refuses to use
-    # --dangerously-skip-permissions with root/sudo privileges for security.
-    # Instead, use --allowedTools to pre-approve specific tools, which works
-    # with root and avoids permission prompts for those tools.
+    # IMPORTANT: Claude CLI runs as a non-root user so
+    # --dangerously-skip-permissions can be used when requested.
+    # Prefer --allowedTools when possible to scope approvals to specific tools.
     #
     # The -p flag enables "print mode" which is inherently non-interactive.
     # Combined with stdin=DEVNULL, this ensures the CLI won't hang waiting
     # for user input.
     cmd = ["claude", "-p", body.prompt, "--output-format", body.output_format]
+    if body.dangerously_skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
     if body.allowed_tools:
         cmd.extend(["--allowedTools", ",".join(body.allowed_tools)])
     if body.max_turns is not None:
@@ -639,8 +689,10 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
             capture_output=True,
             text=True,
             timeout=body.timeout_seconds,
-            cwd=str(job_root) if job_root is not None else None,
+            cwd=str(job_root) if job_root is not None else str(_CLAUDE_CLI_HOME),
             stdin=subprocess.DEVNULL,  # Prevent CLI from waiting on stdin
+            env=_claude_cli_env(),
+            preexec_fn=_demote_to_claude(),
         )
 
     try:

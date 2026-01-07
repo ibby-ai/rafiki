@@ -37,6 +37,7 @@ class ClaudeCliRequest(BaseSchema):
 
     prompt: str
     allowed_tools: list[str] | None = None
+    dangerously_skip_permissions: bool = False
     output_format: Literal["json", "text"] = "json"
     timeout_seconds: int = 120
     max_turns: int | None = None

@@ -104,14 +104,20 @@ def _base_anthropic_sdk_image() -> modal.Image:
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
             "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
-            "curl -fsSL https://claude.ai/install.sh | bash",
-            "bash -lc 'export PATH=/root/.local/bin:/root/.claude/bin:$PATH && command -v claude'",
+            "useradd -m -s /bin/bash -U claude",
+            "su -l claude -c 'curl -fsSL https://claude.ai/install.sh | bash'",
+            (
+                "su -l claude -c "
+                "'export PATH=/home/claude/.local/bin:/home/claude/.claude/bin:$PATH "
+                "&& command -v claude'"
+            ),
         )
         .env(
             {
                 "AGENT_FS_ROOT": "/data",
                 "PATH": (
                     "/root/.local/bin:/root/.claude/bin:"
+                    "/home/claude/.local/bin:/home/claude/.claude/bin:"
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 ),
             }
@@ -1455,6 +1461,7 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
 def run_claude_cli_remote(
     prompt: str = DEFAULT_QUESTION,
     allowed_tools: str | None = None,
+    dangerously_skip_permissions: bool = False,
     output_format: str = "json",
     timeout_seconds: int = 120,
 ) -> dict:
@@ -1473,6 +1480,7 @@ def run_claude_cli_remote(
     payload = {
         "prompt": prompt,
         "allowed_tools": tools_list,
+        "dangerously_skip_permissions": dangerously_skip_permissions,
         "output_format": output_format,
         "timeout_seconds": timeout_seconds,
     }

@@ -276,8 +276,8 @@ async def your_endpoint(body: QueryBody, request: Request):
 
 The `/claude_cli` endpoint runs the Claude Code CLI via subprocess. Important considerations:
 
-- **No `--dangerously-skip-permissions`**: The Modal sandbox runs as root, and the Claude CLI refuses to use `--dangerously-skip-permissions` with root/sudo privileges for security reasons. This flag will cause the CLI to exit with an error.
-- **Use `--allowedTools` instead**: Pre-approve specific tools via `--allowedTools` (e.g., `["Read", "Bash"]`) to avoid permission prompts for those tools.
+- **Non-root execution**: The CLI is executed as the `claude` user so `--dangerously-skip-permissions` can be used when requested. Use with care.
+- **Prefer `--allowedTools`**: Pre-approve specific tools via `--allowedTools` (e.g., `["Read", "Bash"]`) to avoid permission prompts for those tools.
 - **Non-interactive mode**: The `-p` flag enables "print mode" which is non-interactive. Combined with `stdin=subprocess.DEVNULL`, this ensures the CLI won't hang waiting for user input.
 - **Volume operations**: `reload()` and `commit()` on Modal Volumes can only be called from within a Modal function context, not from a sandbox subprocess. The code handles these errors gracefully.
 
