@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-01-07
+
+### Added
+
+- **Job Artifacts**: Support for storing and retrieving job output artifacts
+- **Multi-Tenancy**: Enhanced job isolation and workspace management for multiple tenants
+- **Job Scheduling**: Ability to schedule jobs for future execution
+- **Webhook Delivery System**: Automated webhook callbacks for job completion events with retry logic
+- Comprehensive test coverage for job schemas and webhook features
+- Webhook security and implementation guide documentation
+- Enhanced job schema documentation with lifecycle information and examples
+- Security and validation documentation to jobs.py
+- Workspace and filesystem documentation to controller.py
+- Enhanced configuration field descriptions in settings.py
+- Comprehensive documentation to app.py helper functions
+- Updated API and architecture documentation for new features
+
+### Changed
+
+- Enhanced controller with dedicated job workspace and improved logging
+- Hardened job ID handling for better security and validation
+
+### Fixed
+
+- Replaced hardcoded example secrets in webhooks.py docstrings with placeholder values
+
 ## [0.3.0] - 2026-01-04
 
 ### Added
