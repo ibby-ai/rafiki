@@ -5,6 +5,7 @@ environment and exposing lightweight HTTP endpoints.
 Quickstart (CLI):
 - run local_entrypoint: `modal run -m agent_sandbox.app` (runs the agent once in a short-lived Modal function)
 - run run_agent_remote: `modal run -m agent_sandbox.app::run_agent_remote --question "..."`
+- run run_claude_cli_remote: `modal run -m agent_sandbox.app::run_claude_cli_remote --prompt "..."`
 - keep dev deployment running: `modal serve -m agent_sandbox.app`
 - deploy to production: `modal deploy -m agent_sandbox.deploy`
 
@@ -61,6 +62,7 @@ from agent_sandbox.jobs import (
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.schemas import (
     ArtifactListResponse,
+    ClaudeCliRequest,
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
@@ -90,6 +92,7 @@ def _base_anthropic_sdk_image() -> modal.Image:
     - Uses Debian slim with Python 3.11
     - Installs `claude-agent-sdk` plus FastAPI/uvicorn/httpx
     - Installs Node.js and `@anthropic-ai/claude-agent-sdk` (Agent SDK dependency)
+    - Installs Claude Code CLI via the official curl installer
     - Sets `/root/app` as the workdir and copies the local project into place
     """
     return (
@@ -101,8 +104,18 @@ def _base_anthropic_sdk_image() -> modal.Image:
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
             "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
+            "curl -fsSL https://claude.ai/install.sh | bash",
+            "bash -lc 'export PATH=/root/.local/bin:/root/.claude/bin:$PATH && command -v claude'",
         )
-        .env({"AGENT_FS_ROOT": "/data"})
+        .env(
+            {
+                "AGENT_FS_ROOT": "/data",
+                "PATH": (
+                    "/root/.local/bin:/root/.claude/bin:"
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ),
+            }
+        )
         .workdir("/root/app")
         .add_local_dir(
             ".",
@@ -890,6 +903,31 @@ async def query_stream(request: Request, body: QueryBody):
     )
 
 
+@web_app.post("/claude_cli")
+async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
+    """Proxy Claude Code CLI requests to the background sandbox service."""
+    sb, url = await get_or_start_background_sandbox_aio()
+
+    headers = {}
+    settings = Settings()
+    if settings.enforce_connect_token:
+        creds = await sb.create_connect_token.aio(
+            user_metadata={"ip": request.client.host or "unknown"}
+        )
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
+    timeout_seconds = max(30.0, float(body.timeout_seconds))
+    timeout = httpx.Timeout(timeout_seconds + 5.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            f"{url.rstrip('/')}/claude_cli",
+            json=body.model_dump(),
+            headers=headers,
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 @web_app.post("/submit", response_model=JobSubmitResponse)
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
@@ -1406,6 +1444,46 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
         question: Natural-language query to send to the agent.
     """
     AgentRunner().run.remote(question)
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    volumes={"/data": _get_persist_volume()},
+    **_function_runtime_kwargs(include_autoscale=False),
+)
+def run_claude_cli_remote(
+    prompt: str = DEFAULT_QUESTION,
+    allowed_tools: str | None = None,
+    output_format: str = "json",
+    timeout_seconds: int = 120,
+) -> dict:
+    """Run Claude Code CLI via the background sandbox and return the response."""
+    settings = Settings()
+    sb, url = get_or_start_background_sandbox()
+    headers = {}
+    if settings.enforce_connect_token:
+        creds = sb.create_connect_token(user_metadata={"source": "run_claude_cli_remote"})
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
+    tools_list = None
+    if allowed_tools:
+        tools_list = [tool.strip() for tool in allowed_tools.split(",") if tool.strip()]
+
+    payload = {
+        "prompt": prompt,
+        "allowed_tools": tools_list,
+        "output_format": output_format,
+        "timeout_seconds": timeout_seconds,
+    }
+    r = httpx.post(
+        f"{url.rstrip('/')}/claude_cli",
+        json=payload,
+        headers=headers,
+        timeout=httpx.Timeout(float(timeout_seconds) + 5.0, connect=30.0),
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
