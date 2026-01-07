@@ -149,10 +149,154 @@ def _maybe_commit_volume(*, force: bool = False) -> None:
 
 
 def _job_workspace(job_id: str) -> Path:
+    """Get the workspace directory path for a specific job.
+
+    Returns the isolated filesystem path where a job should write artifacts,
+    logs, and other output files. This is a lightweight wrapper around
+    job_workspace_root() that uses the configured agent_fs_root from settings.
+
+    Args:
+        job_id: Unique job identifier (should be pre-validated with normalize_job_id,
+                but this function does not perform validation itself)
+
+    Returns:
+        Path object pointing to the job's workspace directory:
+        {agent_fs_root}/jobs/{job_id}/
+
+        Example: /data/jobs/550e8400-e29b-41d4-a716-446655440000/
+
+    Important Behavior:
+        - Directory is NOT created automatically by this function
+        - Caller must use _ensure_job_workspace() to create if needed
+        - Path is returned even if directory doesn't exist yet
+
+    Workspace Isolation:
+        Each job gets its own isolated directory to:
+        - Prevent cross-job file access
+        - Enable safe artifact collection
+        - Allow parallel job execution without conflicts
+        - Support cleanup by removing entire job directory
+
+    Volume Persistence:
+        When agent_fs_root is a Modal persistent volume mount (typically /data):
+        - Files written to workspace persist across sandbox restarts
+        - Artifacts remain accessible after job completion
+        - Volume commits (if configured) ensure durability
+
+    Usage in Endpoints:
+        ```python
+        @app.post("/query")
+        async def query_agent(body: QueryBody):
+            job_root = _job_workspace(body.job_id)
+            # job_root exists but may not be created yet
+            # Use _ensure_job_workspace() to create if needed
+        ```
+
+    See Also:
+        - _ensure_job_workspace(): Creates workspace directory
+        - job_workspace_root(): Underlying implementation from jobs module
+        - agent_fs_root in settings: Configured volume mount point
+    """
     return job_workspace_root(_settings.agent_fs_root, job_id)
 
 
 def _ensure_job_workspace(job_id: str | None) -> Path | None:
+    """Create and return the workspace directory for a job, validating job_id.
+
+    Validates the job_id, creates the workspace directory if it doesn't exist,
+    and returns the Path. This is the primary function to call before job
+    execution to ensure the workspace is ready for artifact writes.
+
+    Args:
+        job_id: Potential job identifier from user input (HTTP request, queue payload).
+                Can be None (for non-job queries), invalid UUID, or valid UUID.
+
+    Returns:
+        - Path to created workspace directory if job_id is valid
+        - None if job_id is None (non-job execution) or fails validation
+
+    Security & Validation:
+        This function performs security validation before filesystem operations:
+        1. Checks if job_id is None → return None (non-job query)
+        2. Validates job_id format using normalize_job_id()
+        3. Rejects invalid UUIDs to prevent path traversal attacks
+        4. Only creates directories for validated job IDs
+
+    Directory Creation:
+        Uses mkdir(parents=True, exist_ok=True) which:
+        - Creates all intermediate directories (/data, /data/jobs, /data/jobs/{id})
+        - Succeeds silently if directory already exists (exist_ok=True)
+        - Raises PermissionError if filesystem is read-only (unlikely in Modal sandbox)
+
+    When Called:
+        This function is called at the start of every job-related query execution:
+        - Before agent SDK query() is invoked
+        - After volume reload (to see latest committed state)
+        - In both /query and /query_stream endpoints
+
+    Volume Interaction:
+        If agent_fs_root is a Modal persistent volume:
+        - Directory persists across sandbox restarts
+        - Subsequent jobs reuse existing workspace (don't re-create)
+        - Volume commits preserve directory and contents
+
+    Examples:
+        Valid job_id (directory created):
+        >>> workspace = _ensure_job_workspace("550e8400-e29b-41d4-a716-446655440000")
+        >>> workspace
+        PosixPath('/data/jobs/550e8400-e29b-41d4-a716-446655440000')
+        >>> workspace.exists()
+        True
+
+        None job_id (non-job query):
+        >>> workspace = _ensure_job_workspace(None)
+        >>> workspace
+        None
+
+        Invalid job_id (security rejection):
+        >>> workspace = _ensure_job_workspace("../../../etc/passwd")
+        >>> workspace
+        None  # Path traversal blocked
+
+        >>> workspace = _ensure_job_workspace("not-a-uuid")
+        >>> workspace
+        None  # Invalid UUID format
+
+    Usage in Endpoints:
+        ```python
+        @app.post("/query")
+        async def query_agent(body: QueryBody):
+            # Validate and create workspace if job_id provided
+            job_root = _ensure_job_workspace(body.job_id)
+
+            # Pass to agent options to inform system prompt
+            async with ClaudeSDKClient(options=_options(job_root=job_root)):
+                # Agent writes to job_root if not None
+                await client.query(body.question)
+
+            # Force commit if job workspace was used
+            _maybe_commit_volume(force=job_root is not None)
+        ```
+
+    System Prompt Integration:
+        When job_root is not None, _options() extends the system prompt:
+        "This is a background job. Write all created files under {job_root}
+        so they are persisted."
+
+        This guides the agent to write outputs to the correct location for
+        artifact collection.
+
+    Error Handling:
+        - Invalid job_id → Returns None (caller should handle gracefully)
+        - Filesystem errors → Raises exception (OSError, PermissionError)
+        - Volume unavailable → May raise VolumeError
+
+    See Also:
+        - _job_workspace(): Get path without validation or creation
+        - normalize_job_id(): UUID validation logic
+        - job_workspace_root(): Path construction from jobs module
+        - _options(): Uses job_root to extend system prompt
+    """
     if not job_id:
         return None
     normalized = normalize_job_id(job_id)
