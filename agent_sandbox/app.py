@@ -26,9 +26,13 @@ Prerequisite for curl testing:
 """
 
 import inspect
+import json
 import logging
 import mimetypes
+import os
+import pwd
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -75,6 +79,11 @@ app = modal.App("test-sandbox")
 _settings = Settings()
 _logger = logging.getLogger(__name__)
 
+_CLAUDE_CLI_USER = "claude"
+_CLAUDE_CLI_HOME = Path("/home/claude")
+_CLAUDE_CLI_PATH = f"{_CLAUDE_CLI_HOME}/.local/bin:{_CLAUDE_CLI_HOME}/.claude/bin"
+_CLAUDE_CLI_APP_ROOT = _CLAUDE_CLI_HOME / "app"
+
 web_app = FastAPI()
 
 web_app.add_middleware(
@@ -104,6 +113,38 @@ def _base_anthropic_sdk_image() -> modal.Image:
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
             "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
+        )
+        .env(
+            {
+                "AGENT_FS_ROOT": "/data",
+                "PATH": (
+                    "/root/.local/bin:/root/.claude/bin:"
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ),
+            }
+        )
+        .workdir("/root/app")
+        .add_local_dir(
+            ".",
+            remote_path="/root/app",
+            copy=True,
+            ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
+        )
+        .run_commands("cd /root/app && uv pip install -e . --system --no-cache")
+    )
+
+
+def _claude_cli_image() -> modal.Image:
+    """Build a dedicated image for running the Claude Code CLI."""
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
+        .pip_install("uv")
+        .apt_install("curl")
+        .run_commands(
+            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
+            "apt-get install -y nodejs",
+            "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
             "useradd -m -s /bin/bash -U claude",
             "su -l claude -c 'curl -fsSL https://claude.ai/install.sh | bash'",
             (
@@ -122,14 +163,17 @@ def _base_anthropic_sdk_image() -> modal.Image:
                 ),
             }
         )
-        .workdir("/root/app")
+        .workdir(str(_CLAUDE_CLI_APP_ROOT))
         .add_local_dir(
             ".",
-            remote_path="/root/app",
+            remote_path=str(_CLAUDE_CLI_APP_ROOT),
             copy=True,
             ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
         )
-        .run_commands("cd /root/app && uv pip install -e . --system --no-cache")
+        .run_commands(
+            f"chown -R {_CLAUDE_CLI_USER}:{_CLAUDE_CLI_USER} {_CLAUDE_CLI_APP_ROOT}",
+            f"cd {_CLAUDE_CLI_APP_ROOT} && uv pip install -e . --system --no-cache",
+        )
     )
 
 
@@ -154,6 +198,47 @@ def _autoscale_kwargs() -> dict[str, int]:
     if _settings.scaledown_window is not None:
         kwargs["scaledown_window"] = _settings.scaledown_window
     return kwargs
+
+
+def _claude_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(_CLAUDE_CLI_HOME)
+    env["USER"] = _CLAUDE_CLI_USER
+    env["PATH"] = f"{_CLAUDE_CLI_PATH}:{env.get('PATH', '')}"
+    return env
+
+
+def _claude_cli_ids() -> tuple[int, int]:
+    try:
+        entry = pwd.getpwnam(_CLAUDE_CLI_USER)
+    except KeyError as exc:
+        raise RuntimeError("Claude CLI user not found; rebuild the image to create it.") from exc
+    return entry.pw_uid, entry.pw_gid
+
+
+def _demote_to_claude():
+    uid, gid = _claude_cli_ids()
+
+    def _inner() -> None:
+        os.setgid(gid)
+        if hasattr(os, "setgroups"):
+            os.setgroups([gid])
+        os.setuid(uid)
+
+    return _inner
+
+
+def _maybe_chown_for_claude(path: Path) -> None:
+    try:
+        uid, gid = _claude_cli_ids()
+    except RuntimeError:
+        _logger.warning("Claude CLI user missing; skipping workspace chown")
+        return
+    try:
+        os.chown(path, uid, gid)
+        path.chmod(0o775)
+    except PermissionError:
+        _logger.warning("Unable to chown workspace for Claude CLI user", exc_info=True)
 
 
 def _function_resource_kwargs() -> dict[str, object]:
@@ -826,6 +911,7 @@ def _maybe_trigger_webhook(job_id: str, event: str) -> None:
 
 # Create image and secrets
 agent_sdk_image = _base_anthropic_sdk_image()
+claude_cli_image = _claude_cli_image()
 agent_sdk_secrets = get_modal_secrets()
 
 
@@ -911,27 +997,23 @@ async def query_stream(request: Request, body: QueryBody):
 
 @web_app.post("/claude_cli")
 async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
-    """Proxy Claude Code CLI requests to the background sandbox service."""
-    sb, url = await get_or_start_background_sandbox_aio()
+    """Run Claude Code CLI in the dedicated CLI environment."""
+    allowed_tools = None
+    if body.allowed_tools:
+        allowed_tools = ",".join(body.allowed_tools)
 
-    headers = {}
-    settings = Settings()
-    if settings.enforce_connect_token:
-        creds = await sb.create_connect_token.aio(
-            user_metadata={"ip": request.client.host or "unknown"}
+    def _run():
+        return run_claude_cli_remote.remote(
+            prompt=body.prompt,
+            allowed_tools=allowed_tools,
+            dangerously_skip_permissions=body.dangerously_skip_permissions,
+            output_format=body.output_format,
+            timeout_seconds=body.timeout_seconds,
+            max_turns=body.max_turns,
+            job_id=body.job_id,
         )
-        headers = {"Authorization": f"Bearer {creds.token}"}
 
-    timeout_seconds = max(30.0, float(body.timeout_seconds))
-    timeout = httpx.Timeout(timeout_seconds + 5.0, connect=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(
-            f"{url.rstrip('/')}/claude_cli",
-            json=body.model_dump(),
-            headers=headers,
-        )
-        r.raise_for_status()
-        return r.json()
+    return await anyio.to_thread.run_sync(_run)
 
 
 @web_app.post("/submit", response_model=JobSubmitResponse)
@@ -1453,7 +1535,7 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
 
 
 @app.function(
-    image=agent_sdk_image,
+    image=claude_cli_image,
     secrets=agent_sdk_secrets,
     volumes={"/data": _get_persist_volume()},
     **_function_runtime_kwargs(include_autoscale=False),
@@ -1464,34 +1546,59 @@ def run_claude_cli_remote(
     dangerously_skip_permissions: bool = False,
     output_format: str = "json",
     timeout_seconds: int = 120,
+    max_turns: int | None = None,
+    job_id: str | None = None,
 ) -> dict:
-    """Run Claude Code CLI via the background sandbox and return the response."""
-    settings = Settings()
-    sb, url = get_or_start_background_sandbox()
-    headers = {}
-    if settings.enforce_connect_token:
-        creds = sb.create_connect_token(user_metadata={"source": "run_claude_cli_remote"})
-        headers = {"Authorization": f"Bearer {creds.token}"}
-
+    """Run Claude Code CLI in a dedicated image and return the response."""
     tools_list = None
     if allowed_tools:
         tools_list = [tool.strip() for tool in allowed_tools.split(",") if tool.strip()]
 
-    payload = {
-        "prompt": prompt,
-        "allowed_tools": tools_list,
-        "dangerously_skip_permissions": dangerously_skip_permissions,
-        "output_format": output_format,
-        "timeout_seconds": timeout_seconds,
-    }
-    r = httpx.post(
-        f"{url.rstrip('/')}/claude_cli",
-        json=payload,
-        headers=headers,
-        timeout=httpx.Timeout(float(timeout_seconds) + 5.0, connect=30.0),
+    job_root = None
+    normalized_job_id = normalize_job_id(job_id)
+    if normalized_job_id:
+        job_root = job_workspace_root(_settings.agent_fs_root, normalized_job_id)
+        job_root.mkdir(parents=True, exist_ok=True)
+        _maybe_chown_for_claude(job_root)
+
+    cmd = ["claude", "-p", prompt, "--output-format", output_format]
+    if dangerously_skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
+    if tools_list:
+        cmd.extend(["--allowedTools", ",".join(tools_list)])
+    if max_turns is not None:
+        cmd.extend(["--max-turns", str(max_turns)])
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        cwd=str(job_root) if job_root is not None else str(_CLAUDE_CLI_APP_ROOT),
+        stdin=subprocess.DEVNULL,
+        env=_claude_cli_env(),
+        preexec_fn=_demote_to_claude(),
     )
-    r.raise_for_status()
-    return r.json()
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Claude CLI failed with exit code "
+            f"{result.returncode}: {stderr or stdout or 'no output'}"
+        )
+    parsed = stdout
+    if output_format == "json":
+        try:
+            parsed = json.loads(stdout) if stdout else None
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Failed to parse Claude CLI JSON output") from exc
+    return {
+        "ok": True,
+        "result": parsed,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.returncode,
+    }
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)

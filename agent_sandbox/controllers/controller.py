@@ -655,7 +655,12 @@ async def query_agent_stream(body: QueryBody, request: Request):
     responses={500: {"model": ErrorResponse}},
 )
 async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliResponse:
-    """Run Claude Code CLI and return the parsed response."""
+    """Run Claude Code CLI and return the parsed response.
+
+    Note: The primary HTTP path now proxies to a dedicated CLI image via
+    agent_sandbox.app.run_claude_cli_remote. This endpoint is kept for
+    legacy/background-sandbox use.
+    """
     _require_connect_token(request)
 
     _maybe_reload_volume()
