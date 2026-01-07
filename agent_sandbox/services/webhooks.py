@@ -186,11 +186,11 @@ def sign_payload(secret: str, timestamp: int, payload: str) -> str:
         - Recipients can verify both payload and timestamp haven't been tampered with
 
     Example:
-        >>> secret = "wh_secret_abc123"
+        >>> secret = "your-webhook-secret-here"  # Example only, not a real secret
         >>> timestamp = 1704067200
         >>> payload = '{"event":"job.complete","job":{"id":"123"}}'
         >>> sign_payload(secret, timestamp, payload)
-        '3a7f2c1b5d8e9f4a6c3b2e1d0f9a8c7b5e3d2c1a0f9e8d7c6b5a4e3d2c1b0a9f'
+        'a1b2c3d4e5f6...'  # Actual signature would be 64 hex characters
 
     Verification:
         Recipients must reconstruct the same message and compute their own signature
@@ -257,7 +257,7 @@ def build_headers(
         - No signature is generated if no secret is available (unsigned webhook)
 
     Example (with signature):
-        >>> config = {"signing_secret": "wh_secret_123", "headers": {"X-Custom": "value"}}
+        >>> config = {"signing_secret": "your-secret-key", "headers": {"X-Custom": "value"}}
         >>> payload = '{"event":"job.complete"}'
         >>> headers, ts = build_headers(config=config, payload=payload, default_secret=None)
         >>> headers
