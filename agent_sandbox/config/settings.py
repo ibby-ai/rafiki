@@ -241,9 +241,9 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
         List of Modal Secret objects.
     """
     secrets = [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
+    settings = get_settings()
 
     if include_admin:
-        settings = get_settings()
         # Admin secret is optional - use required_keys=[] to avoid failure if not set
         secrets.append(modal.Secret.from_name(settings.admin_secret_name))
 
