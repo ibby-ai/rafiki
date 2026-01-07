@@ -55,6 +55,9 @@ modal run -m agent_sandbox.app
 # Run agent as remote function
 modal run -m agent_sandbox.app::run_agent_remote --question "Your question here"
 
+# Run Claude Code CLI via the background sandbox
+modal run -m agent_sandbox.app::run_claude_cli_remote --prompt "Summarize repo layout" --allowed-tools "Read"
+
 # Start dev server with hot reload (enables HTTP endpoints)
 modal serve -m agent_sandbox.app
 
@@ -71,6 +74,11 @@ When `modal serve -m agent_sandbox.app` or `modal deploy -m agent_sandbox.deploy
 curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is the capital of Canada?"}'
+
+# Test the Claude Code CLI endpoint
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize repo layout","allowed_tools":["Read"],"output_format":"json"}'
 
 # Test streaming endpoint
 curl -N -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query_stream' \
@@ -121,6 +129,7 @@ The codebase demonstrates two distinct patterns for running agents:
 - `GET /health_check`: Liveness probe used by controller
 - `POST /query`: Agent query endpoint that returns responses
 - `POST /query_stream`: Agent query endpoint that streams responses as SSE
+- `POST /claude_cli`: Claude Code CLI endpoint for programmatic CLI calls
 - Runs via `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
 - Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
 - Supports session resumption via `session_id`, `session_key`, `fork_session`
@@ -139,7 +148,7 @@ The codebase demonstrates two distinct patterns for running agents:
 
 **`agent_sandbox/app.py`** - Image building
 
-- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
+- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, @anthropic-ai/claude-agent-sdk, and the Claude Code CLI
 - Working directory: `/root/app`
 - Copies local project and installs dependencies
 
@@ -262,6 +271,15 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
 - **Agent Turn Limits**: Set `agent_max_turns` to limit conversation turns and prevent runaway loops
+
+### Claude Code CLI in Modal Sandbox
+
+The `/claude_cli` endpoint runs the Claude Code CLI via subprocess. Important considerations:
+
+- **No `--dangerously-skip-permissions`**: The Modal sandbox runs as root, and the Claude CLI refuses to use `--dangerously-skip-permissions` with root/sudo privileges for security reasons. This flag will cause the CLI to exit with an error.
+- **Use `--allowedTools` instead**: Pre-approve specific tools via `--allowedTools` (e.g., `["Read", "Bash"]`) to avoid permission prompts for those tools.
+- **Non-interactive mode**: The `-p` flag enables "print mode" which is non-interactive. Combined with `stdin=subprocess.DEVNULL`, this ensures the CLI won't hang waiting for user input.
+- **Volume operations**: `reload()` and `commit()` on Modal Volumes can only be called from within a Modal function context, not from a sandbox subprocess. The code handles these errors gracefully.
 
 ### Volume Persistence Behavior
 
