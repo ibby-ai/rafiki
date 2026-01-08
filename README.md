@@ -318,69 +318,80 @@ For more details, see [Modal's Getting Started Guide](https://modal.com/docs/gui
 ### Quick Overview
 
 ```
-                         ┌──────────────────────────────────────────────────┐
-                         │               Modal HTTP Gateway                 │
-User Request ───────────▶│  /query, /query_stream → Sync Proxy              │
-(+ Proxy Auth headers)   │  /submit → Job Queue → Worker                    │
-                         │  /jobs/{job_id} → Job Status                     │
-                         └────────────────────────┬─────────────────────────┘
-                                                  │
-                                                  ▼
-                         ┌──────────────────────────────────────────────────┐
-                         │       Background Sandbox (FastAPI :8001)          │
-                         │                                                   │
-                         │   Claude Agent SDK ─── MCP Tools                  │
-                         │          │                                        │
-                         │   ┌──────┴──────┐                                 │
-                         │   │ /data vol   │  Session/Job Store (Modal Dict) │
-                         │   └─────────────┘                                 │
-                         └──────────────────────────────────────────────────┘
+                         ┌──────────────────────────────────────────────────────────────┐
+                         │                    Modal HTTP Gateway                         │
+User Request ───────────▶│                                                              │
+(+ Proxy Auth headers)   │  /query, /query_stream ────────▶ Background Sandbox Proxy    │
+                         │  /submit, /jobs/{id} ──────────▶ Job Queue / Status          │
+                         │  /claude_cli ──────────────────▶ Direct Function Call        │
+                         └──────────────┬───────────────────────────┬──────────────────┘
+                                        │                           │
+               ┌────────────────────────┘                           └────────────────────┐
+               │                                                                         │
+               ▼                                                                         ▼
+┌──────────────────────────────────────────┐      ┌────────────────────────────────────────────┐
+│   Background Sandbox (Agent SDK Image)   │      │     Claude CLI Function (CLI Image)        │
+│   ────────────────────────────────────   │      │   ──────────────────────────────────────   │
+│   FastAPI Controller on :8001            │      │   Short-lived Modal function               │
+│   Runs as: root in /root/app             │      │   Runs as: claude user (non-root)          │
+│                                          │      │   Working dir: /home/claude/app            │
+│   Claude Agent SDK ─── MCP Tools         │      │                                            │
+│          │                               │      │   Claude Code CLI subprocess               │
+│   ┌──────┴──────┐                        │      │   (supports --dangerously-skip-permissions)│
+│   │ /data vol   │  Session Store         │      │          │                                 │
+│   └─────────────┘  (Modal Dict)          │      │   ┌──────┴──────┐                          │
+└──────────────────────────────────────────┘      │   │ /data vol   │                          │
+                                                  │   └─────────────┘                          │
+                                                  └────────────────────────────────────────────┘
 ```
 
 ### Detailed Architecture
 
-This project uses a **persistent sandbox service pattern**:
+This project uses a **dual-image architecture** with separate containers for the Agent SDK and Claude CLI:
 
 ```
-                                 ┌─────────────────────────────────────┐
-                                 │           Modal Cloud               │
-   ┌──────────────┐              │  ┌───────────────────────────────┐  │
-   │              │   HTTP POST  │  │  http_app (FastAPI Gateway)   │  │
-   │    Client    │─────────────────▶  /query, /query_stream        │  │
-   │              │◀─ Proxy Auth ──│  /submit, /jobs/{job_id}       │  │
-   └──────────────┘              │  └───────────────┬───────────────┘  │
-                                 │                  │                  │
-                                 │     ┌────────────┼────────────┐     │
-                                 │     │            │            │     │
-                                 │     ▼ sync       ▼ async      │     │
-                                 │  ┌──────┐   ┌──────────┐      │     │
-                                 │  │Proxy │   │JOB_QUEUE │      │     │
-                                 │  └──┬───┘   └────┬─────┘      │     │
-                                 │     │            │            │     │
-                                 │     ▼            ▼            │     │
-                                 │  ┌───────────────────────────┐│     │
-                                 │  │   Long-lived Modal Sandbox││     │
-                                 │  │  ┌─────────────────────┐  ││     │
-                                 │  │  │ FastAPI Controller  │  ││     │
-                                 │  │  │ (uvicorn :8001)     │  ││     │
-                                 │  │  └───────────┬─────────┘  ││     │
-                                 │  │              │            ││     │
-                                 │  │              ▼            ││     │
-                                 │  │  ┌─────────────────────┐  ││     │
-                                 │  │  │   Claude Agent SDK  │  ││     │
-                                 │  │  │   ┌─────┐ ┌───────┐ │  ││     │
-                                 │  │  │   │ MCP │ │ Tools │ │  ││     │
-                                 │  │  │   └─────┘ └───────┘ │  ││     │
-                                 │  │  └─────────────────────┘  ││     │
-                                 │  │              │            ││     │
-                                 │  │   ┌─────────┴─────────┐   ││     │
-                                 │  │   ▼                   ▼   ││     │
-                                 │  │ ┌──────────┐ ┌───────────┐││     │
-                                 │  │ │ /data vol│ │SESSION/JOB│││     │
-                                 │  │ │ (persist)│ │Modal Dicts│││     │
-                                 │  │ └──────────┘ └───────────┘││     │
-                                 │  └───────────────────────────┘│     │
-                                 └───────────────────────────────┴─────┘
+                                 ┌─────────────────────────────────────────────────────────────────┐
+                                 │                           Modal Cloud                           │
+   ┌──────────────┐              │  ┌─────────────────────────────────────────────────────────┐   │
+   │              │   HTTP POST  │  │              http_app (FastAPI Gateway)                 │   │
+   │    Client    │─────────────────▶  /query, /query_stream  │  /claude_cli                 │   │
+   │              │◀─ Proxy Auth ──│  /submit, /jobs/{id}     │                              │   │
+   └──────────────┘              │  └────────────┬────────────┴────────────────┬─────────────┘   │
+                                 │               │                             │                  │
+                                 │     ┌─────────┴─────────┐         ┌─────────┴─────────┐       │
+                                 │     │                   │         │                   │       │
+                                 │     ▼ proxy             │         ▼ .remote()         │       │
+                                 │  ┌──────────────────────┴──┐   ┌──────────────────────┴──┐    │
+                                 │  │    Agent SDK Image      │   │    Claude CLI Image     │    │
+                                 │  │   (Background Sandbox)  │   │  (Short-lived Function) │    │
+                                 │  │  ────────────────────   │   │  ────────────────────   │    │
+                                 │  │                         │   │                         │    │
+                                 │  │  ┌───────────────────┐  │   │  User: claude (non-root)│    │
+                                 │  │  │ FastAPI :8001     │  │   │  Dir: /home/claude/app  │    │
+                                 │  │  │ (uvicorn)         │  │   │                         │    │
+                                 │  │  └─────────┬─────────┘  │   │  ┌───────────────────┐  │    │
+                                 │  │            │            │   │  │ Claude Code CLI   │  │    │
+                                 │  │  User: root             │   │  │ subprocess        │  │    │
+                                 │  │  Dir: /root/app         │   │  └─────────┬─────────┘  │    │
+                                 │  │            │            │   │            │            │    │
+                                 │  │            ▼            │   │            │            │    │
+                                 │  │  ┌───────────────────┐  │   │            │            │    │
+                                 │  │  │ Claude Agent SDK  │  │   │            │            │    │
+                                 │  │  │ ┌─────┐ ┌───────┐ │  │   │            │            │    │
+                                 │  │  │ │ MCP │ │ Tools │ │  │   │            │            │    │
+                                 │  │  │ └─────┘ └───────┘ │  │   │            │            │    │
+                                 │  │  └───────────────────┘  │   │            │            │    │
+                                 │  │            │            │   │            │            │    │
+                                 │  └────────────┼────────────┘   └────────────┼────────────┘    │
+                                 │               │                             │                  │
+                                 │               └──────────────┬──────────────┘                  │
+                                 │                              ▼                                 │
+                                 │               ┌──────────────────────────────┐                 │
+                                 │               │  Shared Resources            │                 │
+                                 │               │  • /data Volume (persistent) │                 │
+                                 │               │  • Modal Dicts (session/job) │                 │
+                                 │               └──────────────────────────────┘                 │
+                                 └────────────────────────────────────────────────────────────────┘
 ```
 
 ### Understanding the Diagram
@@ -390,6 +401,9 @@ This project uses a **persistent sandbox service pattern**:
 | **Modal Cloud** | Fully managed infrastructure | You don't deploy or manage servers; Modal handles scaling, networking, and SSL |
 | **http_app (FastAPI Gateway)** | Lightweight HTTP entry point | Scales to zero when idle; handles routing without running the full agent |
 | **Proxy Auth** | API authentication | Secure production endpoints with `Modal-Key`/`Modal-Secret` token headers |
+| **Agent SDK Image** | Container for agent queries | Runs as root in `/root/app`; long-lived sandbox with FastAPI controller |
+| **Claude CLI Image** | Container for CLI requests | Runs as non-root `claude` user in `/home/claude/app`; short-lived function |
+| **run_claude_cli_remote** | Dedicated CLI function | Executes Claude Code CLI in isolated container with skip-permissions support |
 | **JOB_QUEUE (Modal Queue)** | Async job processing | Fire-and-forget workloads; long-running tasks processed by workers |
 | **Proxy connection** | Internal forwarding | Decouples the public API from the agent runtime; enables independent scaling |
 | **Long-lived Modal Sandbox** | Persistent agent environment | Stays warm for hours; eliminates cold-start delays on each request |
