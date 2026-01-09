@@ -104,6 +104,25 @@ class RalphStartRequest(BaseModel):
     max_consecutive_failures: int = Field(default=3, ge=1, le=10)
 
 
+class RalphExecuteRequest(BaseModel):
+    """Request body to execute a Ralph loop in a CLI sandbox."""
+
+    job_id: str
+    prd: Prd
+    workspace_source: WorkspaceSource = Field(default_factory=WorkspaceSource)
+    prompt_template: str | None = None
+    max_iterations: int = Field(default=10, ge=1, le=100)
+    timeout_per_iteration: int = Field(default=300, ge=60, le=3600)
+    first_iteration_timeout: int | None = Field(default=None, ge=60, le=3600)
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: ["Read", "Write", "Bash", "Glob", "Grep"]
+    )
+    feedback_commands: list[str] = Field(default_factory=list)
+    feedback_timeout: int = Field(default=120, ge=10, le=600)
+    auto_commit: bool = True
+    max_consecutive_failures: int = Field(default=3, ge=1, le=10)
+
+
 class RalphStartResponse(BaseModel):
     """Response from starting a Ralph loop."""
 

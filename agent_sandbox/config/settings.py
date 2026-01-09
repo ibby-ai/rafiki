@@ -48,6 +48,42 @@ class Settings(BaseSettings):
             "Default: /data-cli."
         ),
     )
+    claude_cli_service_port: int = Field(
+        default=8002,
+        description="Internal port for the Claude CLI controller service",
+    )
+    claude_cli_service_ports: list[int] = Field(
+        default=[8002],
+        description="List of encrypted ports to expose for the Claude CLI sandbox",
+    )
+    claude_cli_sandbox_timeout: int = Field(
+        default=60 * 60 * 24,
+        description="Max Claude CLI sandbox lifetime (seconds, default 24h)",
+    )
+    claude_cli_sandbox_idle_timeout: int = Field(
+        default=60 * 30,
+        description="Shutdown Claude CLI sandbox after idle (seconds, default 30min)",
+    )
+    claude_cli_sandbox_cpu: float = Field(
+        default=1.0,
+        description="Claude CLI sandbox CPU cores requested",
+    )
+    claude_cli_sandbox_memory: int = Field(
+        default=2048,
+        description="Claude CLI sandbox memory requested (MB)",
+    )
+    claude_cli_sandbox_cpu_limit: float | None = Field(
+        default=None,
+        description="Max Claude CLI sandbox CPU cores (None = no limit)",
+    )
+    claude_cli_sandbox_memory_limit: int | None = Field(
+        default=None,
+        description="Max Claude CLI sandbox memory (MB, None = no limit)",
+    )
+    claude_cli_sandbox_ephemeral_disk: int | None = Field(
+        default=None,
+        description="Claude CLI sandbox ephemeral disk size (MiB)",
+    )
 
     # Custom domains for production deployments
     custom_domains: list[str] | None = Field(

@@ -64,6 +64,7 @@ from agent_sandbox.jobs import (
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.ralph.feedback import validate_feedback_commands
 from agent_sandbox.ralph.schemas import (
+    RalphExecuteRequest,
     RalphLoopResult,
     RalphStartRequest,
     RalphStartResponse,
@@ -280,6 +281,31 @@ def _sandbox_resource_kwargs() -> dict[str, object]:
     return kwargs
 
 
+def _cli_sandbox_resource_kwargs() -> dict[str, object]:
+    """Build resource kwargs for Claude CLI sandboxes."""
+    kwargs: dict[str, object] = {}
+    if _settings.claude_cli_sandbox_cpu_limit is not None:
+        kwargs["cpu"] = (
+            _settings.claude_cli_sandbox_cpu,
+            _settings.claude_cli_sandbox_cpu_limit,
+        )
+    else:
+        kwargs["cpu"] = _settings.claude_cli_sandbox_cpu
+
+    if _settings.claude_cli_sandbox_memory_limit is not None:
+        kwargs["memory"] = (
+            _settings.claude_cli_sandbox_memory,
+            _settings.claude_cli_sandbox_memory_limit,
+        )
+    else:
+        kwargs["memory"] = _settings.claude_cli_sandbox_memory
+
+    ephemeral_disk = _validated_cli_ephemeral_disk()
+    if ephemeral_disk is not None and _sandbox_supports_ephemeral_disk():
+        kwargs["ephemeral_disk"] = ephemeral_disk
+    return kwargs
+
+
 def _sandbox_supports_ephemeral_disk() -> bool:
     """Return True if modal.Sandbox.create accepts ephemeral_disk."""
     try:
@@ -309,6 +335,27 @@ def _validated_ephemeral_disk() -> int | None:
     return _settings.sandbox_ephemeral_disk
 
 
+def _validated_cli_ephemeral_disk() -> int | None:
+    """Validate Claude CLI ephemeral disk size against Modal limits."""
+    if _settings.claude_cli_sandbox_ephemeral_disk is None:
+        return None
+    max_mib = 3145728
+    if _settings.claude_cli_sandbox_ephemeral_disk <= 0:
+        logging.getLogger(__name__).warning(
+            "claude_cli_sandbox_ephemeral_disk=%s MiB must be positive; skipping",
+            _settings.claude_cli_sandbox_ephemeral_disk,
+        )
+        return None
+    if _settings.claude_cli_sandbox_ephemeral_disk > max_mib:
+        logging.getLogger(__name__).warning(
+            "claude_cli_sandbox_ephemeral_disk=%s MiB exceeds Modal maximum %s; skipping",
+            _settings.claude_cli_sandbox_ephemeral_disk,
+            max_mib,
+        )
+        return None
+    return _settings.claude_cli_sandbox_ephemeral_disk
+
+
 def _function_runtime_kwargs(
     *, include_retries: bool = True, include_autoscale: bool = True
 ) -> dict[str, object]:
@@ -325,8 +372,8 @@ def _function_runtime_kwargs(
 def _cli_sandbox_timeout(timeout_seconds: int | None) -> int:
     """Return a sandbox timeout with a small buffer over CLI execution."""
     if timeout_seconds is None:
-        return _settings.sandbox_timeout
-    return min(_settings.sandbox_timeout, timeout_seconds + 300)
+        return _settings.claude_cli_sandbox_timeout
+    return min(_settings.claude_cli_sandbox_timeout, timeout_seconds + 300)
 
 
 def _build_cli_sandbox_name(suffix: str | None) -> str:
@@ -349,10 +396,10 @@ def _create_claude_cli_sandbox(
         "workdir": str(CLAUDE_CLI_APP_ROOT),
         "volumes": {_settings.claude_cli_fs_root: _get_claude_cli_volume()},
         "timeout": _cli_sandbox_timeout(timeout_seconds),
-        "idle_timeout": _settings.sandbox_idle_timeout,
+        "idle_timeout": _settings.claude_cli_sandbox_idle_timeout,
         "verbose": True,
     }
-    kwargs.update(_sandbox_resource_kwargs())
+    kwargs.update(_cli_sandbox_resource_kwargs())
 
     name = _build_cli_sandbox_name(job_id) if _settings.claude_cli_sandbox_name else None
     if name:
@@ -1501,6 +1548,10 @@ SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
 SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
+CLI_SANDBOX_NAME = _settings.claude_cli_sandbox_name
+CLI_SERVICE_PORT = _settings.claude_cli_service_port
+CLI_SERVICE_PORTS = _settings.claude_cli_service_ports
+CLI_PERSIST_VOL_NAME = _settings.claude_cli_persist_vol_name
 
 
 # =============================================================================
@@ -1521,6 +1572,8 @@ PERSIST_VOL_NAME = _settings.persist_vol_name
 # =============================================================================
 SANDBOX: modal.Sandbox | None = None
 SERVICE_URL: str | None = None
+CLI_SANDBOX: modal.Sandbox | None = None
+CLI_SERVICE_URL: str | None = None
 
 
 def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") -> None:
@@ -1571,6 +1624,15 @@ def cleanup_sessions():
         SESSIONS[SANDBOX_NAME] = {"status": "missing"}
     except Exception:
         logging.getLogger(__name__).exception("Unexpected error cleaning up sessions")
+
+    try:
+        cli_sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
+        _ = cli_sb.tunnels()
+        SESSIONS[CLI_SANDBOX_NAME] = {**SESSIONS.get(CLI_SANDBOX_NAME, {}), "status": "running"}
+    except modal_exc.NotFoundError:
+        SESSIONS[CLI_SANDBOX_NAME] = {"status": "missing"}
+    except Exception:
+        logging.getLogger(__name__).exception("Unexpected error cleaning up Claude CLI sessions")
 
 
 def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
@@ -1644,7 +1706,13 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        SANDBOX = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        try:
+            SANDBOX = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        except modal_exc.NotFoundError:
+            # In dev mode, from_name doesn't work since app isn't deployed.
+            raise modal_exc.AlreadyExistsError(
+                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
+            )
 
     # Optional: set tags after creation (useful for filtering in Modal dashboard)
     SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
@@ -1769,7 +1837,13 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", SANDBOX_NAME)
+        try:
+            SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", SANDBOX_NAME)
+        except modal_exc.NotFoundError:
+            # In dev mode, from_name doesn't work since app isn't deployed.
+            raise modal_exc.AlreadyExistsError(
+                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
+            )
 
     # Optional: set tags after creation
     await SANDBOX.set_tags.aio(
@@ -1805,6 +1879,186 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
         pass
 
     return SANDBOX, SERVICE_URL
+
+
+def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
+    """Return a running Claude CLI sandbox and its encrypted service URL."""
+    global CLI_SANDBOX, CLI_SERVICE_URL
+
+    if CLI_SANDBOX is not None and CLI_SERVICE_URL:
+        return CLI_SANDBOX, CLI_SERVICE_URL
+
+    try:
+        sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
+        tunnels = sb.tunnels()
+        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
+            CLI_SANDBOX = sb
+            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
+            _wait_for_service(CLI_SERVICE_URL)
+            return CLI_SANDBOX, CLI_SERVICE_URL
+    except Exception:
+        pass
+
+    cli_vol = _get_claude_cli_volume()
+    try:
+        CLI_SANDBOX = modal.Sandbox.create(
+            "uvicorn",
+            "agent_sandbox.controllers.cli_controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(CLI_SERVICE_PORT),
+            app=app,
+            image=claude_cli_image,
+            secrets=agent_sdk_secrets,
+            workdir=str(CLAUDE_CLI_APP_ROOT),
+            name=CLI_SANDBOX_NAME,
+            encrypted_ports=CLI_SERVICE_PORTS,
+            volumes={_settings.claude_cli_fs_root: cli_vol},
+            timeout=_settings.claude_cli_sandbox_timeout,
+            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
+            **_cli_sandbox_resource_kwargs(),
+            verbose=True,
+        )
+    except modal_exc.AlreadyExistsError:
+        try:
+            CLI_SANDBOX = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
+        except modal_exc.NotFoundError:
+            # In dev mode, from_name doesn't work since app isn't deployed.
+            raise modal_exc.AlreadyExistsError(
+                f"Sandbox '{CLI_SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
+            )
+
+    CLI_SANDBOX.set_tags(
+        {"role": "claude-cli-service", "app": "test-sandbox", "port": str(CLI_SERVICE_PORT)}
+    )
+
+    CLI_SERVICE_URL = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        tunnels = CLI_SANDBOX.tunnels()
+        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
+            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
+            break
+        time.sleep(0.5)
+
+    if not CLI_SERVICE_URL:
+        raise RuntimeError("Failed to start Claude CLI sandbox or get service URL")
+
+    _wait_for_service(CLI_SERVICE_URL)
+    try:
+        SESSIONS[CLI_SANDBOX_NAME] = {
+            "id": CLI_SANDBOX.object_id,
+            "url": CLI_SERVICE_URL,
+            "volume": CLI_PERSIST_VOL_NAME,
+            "created_at": int(time.time()),
+            "tags": {
+                "role": "claude-cli-service",
+                "app": "test-sandbox",
+                "port": str(CLI_SERVICE_PORT),
+            },
+            "status": "running",
+        }
+    except modal_exc.Error as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to persist Claude CLI session metadata: %s", exc
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Unexpected error persisting Claude CLI session metadata"
+        )
+
+    return CLI_SANDBOX, CLI_SERVICE_URL
+
+
+async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
+    """Async version of get_or_start_cli_sandbox."""
+    global CLI_SANDBOX, CLI_SERVICE_URL
+
+    if CLI_SANDBOX and CLI_SERVICE_URL:
+        return CLI_SANDBOX, CLI_SERVICE_URL
+
+    try:
+        sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
+        deadline = anyio.current_time() + 30
+        url = None
+        while anyio.current_time() < deadline:
+            tunnels = await sb.tunnels.aio()
+            if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
+                url = tunnels[CLI_SERVICE_PORT].url
+                break
+            await anyio.sleep(0.5)
+        if url:
+            CLI_SANDBOX, CLI_SERVICE_URL = sb, url
+            await _wait_for_service_aio(CLI_SERVICE_URL)
+            return CLI_SANDBOX, CLI_SERVICE_URL
+    except Exception:
+        pass
+
+    cli_vol = _get_claude_cli_volume()
+    try:
+        CLI_SANDBOX = await modal.Sandbox.create.aio(
+            "uvicorn",
+            "agent_sandbox.controllers.cli_controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(CLI_SERVICE_PORT),
+            app=app,
+            image=claude_cli_image,
+            secrets=agent_sdk_secrets,
+            workdir=str(CLAUDE_CLI_APP_ROOT),
+            name=CLI_SANDBOX_NAME,
+            encrypted_ports=CLI_SERVICE_PORTS,
+            volumes={_settings.claude_cli_fs_root: cli_vol},
+            timeout=_settings.claude_cli_sandbox_timeout,
+            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
+            **_cli_sandbox_resource_kwargs(),
+            verbose=True,
+        )
+    except modal_exc.AlreadyExistsError:
+        try:
+            CLI_SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", CLI_SANDBOX_NAME)
+        except modal_exc.NotFoundError:
+            # In dev mode, from_name doesn't work since app isn't deployed.
+            raise modal_exc.AlreadyExistsError(
+                f"Sandbox '{CLI_SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
+            )
+
+    await CLI_SANDBOX.set_tags.aio(
+        {"role": "claude-cli-service", "app": "test-sandbox", "port": str(CLI_SERVICE_PORT)}
+    )
+
+    deadline = anyio.current_time() + 30
+    CLI_SERVICE_URL = None
+    while anyio.current_time() < deadline:
+        tunnels = await CLI_SANDBOX.tunnels.aio()
+        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
+            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
+            break
+        await anyio.sleep(0.5)
+
+    if not CLI_SERVICE_URL:
+        raise RuntimeError("Failed to start Claude CLI sandbox or get service URL")
+
+    await _wait_for_service_aio(CLI_SERVICE_URL)
+    try:
+        SESSIONS[CLI_SANDBOX_NAME] = {
+            "id": CLI_SANDBOX.object_id,
+            "url": CLI_SERVICE_URL,
+            "volume": CLI_PERSIST_VOL_NAME,
+            "created_at": int(time.time()),
+            "tags": {
+                "role": "claude-cli-service",
+                "app": "test-sandbox",
+                "port": str(CLI_SERVICE_PORT),
+            },
+            "status": "running",
+        }
+    except Exception:
+        pass
+
+    return CLI_SANDBOX, CLI_SERVICE_URL
 
 
 @app.cls(
@@ -1933,79 +2187,57 @@ def run_claude_cli_remote(
     env = claude_cli_env()
     require_claude_cli_auth(env)
 
-    runner_cmd = [
-        "python",
-        "-m",
-        "agent_sandbox.sandbox.cli_runner",
-        "--prompt",
-        prompt,
-        "--output-format",
-        output_format,
-        "--timeout-seconds",
-        str(timeout_seconds),
-    ]
-    if dangerously_skip_permissions:
-        runner_cmd.append("--dangerously-skip-permissions")
-    if tools_list:
-        runner_cmd.extend(["--allowed-tools", ",".join(tools_list)])
-    if max_turns is not None:
-        runner_cmd.extend(["--max-turns", str(max_turns)])
-    if normalized_job_id:
-        runner_cmd.extend(["--job-id", normalized_job_id])
-    if debug:
-        runner_cmd.append("--debug")
-    if probe:
-        runner_cmd.extend(["--probe", probe])
-    if write_result_path:
-        runner_cmd.extend(["--write-result-path", write_result_path])
+    request_body = ClaudeCliRequest(
+        prompt=prompt,
+        allowed_tools=tools_list,
+        dangerously_skip_permissions=dangerously_skip_permissions,
+        output_format=output_format,
+        timeout_seconds=timeout_seconds,
+        max_turns=max_turns,
+        job_id=normalized_job_id,
+        debug=debug,
+        probe=probe,
+        write_result_path=write_result_path,
+    )
 
     _logger.info(
         "claude_cli.invoke",
         extra={
-            "cmd": runner_cmd,
             "job_id": normalized_job_id,
             "output_format": output_format,
             "probe": probe is not None,
         },
     )
 
-    sb = _create_claude_cli_sandbox(job_id=normalized_job_id, timeout_seconds=timeout_seconds)
+    sb, url = get_or_start_cli_sandbox()
+    headers: dict[str, str] = {}
+    settings = Settings()
+    if settings.enforce_connect_token:
+        creds = sb.create_connect_token(user_metadata={"job_id": normalized_job_id or "unknown"})
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
     try:
-        exec_timeout = min(_cli_sandbox_timeout(timeout_seconds), timeout_seconds + 60)
-        proc = sb.exec(*runner_cmd, timeout=exec_timeout)
-        stdout_raw = proc.stdout.read()
-        stderr_raw = proc.stderr.read()
-        exit_code = proc.wait()
-    finally:
-        sb.terminate()
+        timeout = httpx.Timeout(timeout_seconds + 60, connect=30.0)
+        response = httpx.post(
+            f"{url.rstrip('/')}/execute",
+            json=request_body.model_dump(),
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
         try:
-            sb.wait(raise_on_termination=False)
+            payload = exc.response.json()
         except Exception:
-            _logger.debug("Claude CLI sandbox wait failed", exc_info=True)
+            payload = {}
+        message = payload.get("error") or exc.response.text or str(exc)
+        raise RuntimeError(message) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Claude CLI sandbox request failed: {exc}") from exc
 
-    stdout_text = (
-        stdout_raw.decode("utf-8", errors="replace")
-        if isinstance(stdout_raw, bytes)
-        else (stdout_raw or "")
-    )
-    stderr_text = (
-        stderr_raw.decode("utf-8", errors="replace")
-        if isinstance(stderr_raw, bytes)
-        else (stderr_raw or "")
-    )
-    stdout_text = stdout_text.strip()
-    stderr_text = stderr_text.strip()
-
-    payload: dict = {}
-    if stdout_text:
-        try:
-            payload = json.loads(stdout_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Failed to parse Claude CLI sandbox output") from exc
-
-    if exit_code != 0 or (payload and payload.get("ok") is False):
-        error = payload.get("error") if payload else None
-        message = error or stderr_text or stdout_text or "Claude CLI sandbox run failed"
+    if payload and payload.get("ok") is False:
+        message = payload.get("error") or payload.get("stderr") or "Claude CLI sandbox run failed"
         raise RuntimeError(message)
 
     if return_stdout:
@@ -2013,7 +2245,7 @@ def run_claude_cli_remote(
         cli_stderr = (payload.get("stderr") or "").strip()
         if cli_stdout or cli_stderr:
             return cli_stdout or cli_stderr
-        return stdout_text or json.dumps(payload)
+        return json.dumps(payload)
 
     return payload
 
@@ -2052,73 +2284,48 @@ def run_ralph_remote(
     tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()]
     feedback_list = [c.strip() for c in feedback_commands.split(",") if c.strip()]
 
-    runner_cmd = [
-        "python",
-        "-m",
-        "agent_sandbox.ralph.runner",
-        "--job-id",
-        normalized_job_id,
-        "--prd-json",
-        prd_json,
-        "--workspace-source-json",
-        workspace_source_json,
-        "--max-iterations",
-        str(max_iterations),
-        "--timeout-per-iteration",
-        str(timeout_per_iteration),
-        "--feedback-timeout",
-        str(feedback_timeout),
-        "--max-consecutive-failures",
-        str(max_consecutive_failures),
-    ]
-    if prompt_template:
-        runner_cmd.extend(["--prompt-template", prompt_template])
-    if tools_list:
-        runner_cmd.extend(["--allowed-tools", ",".join(tools_list)])
-    if feedback_list:
-        runner_cmd.extend(["--feedback-commands", ",".join(feedback_list)])
-    if auto_commit:
-        runner_cmd.append("--auto-commit")
-    else:
-        runner_cmd.append("--no-auto-commit")
+    request_body = RalphExecuteRequest(
+        job_id=normalized_job_id,
+        prd=json.loads(prd_json),
+        workspace_source=json.loads(workspace_source_json),
+        prompt_template=prompt_template,
+        max_iterations=max_iterations,
+        timeout_per_iteration=timeout_per_iteration,
+        allowed_tools=tools_list,
+        feedback_commands=feedback_list,
+        feedback_timeout=feedback_timeout,
+        auto_commit=auto_commit,
+        max_consecutive_failures=max_consecutive_failures,
+    )
 
     estimated_runtime = max_iterations * timeout_per_iteration
-    exec_timeout = min(_settings.sandbox_timeout, estimated_runtime + 300)
+    sb, url = get_or_start_cli_sandbox()
+    headers: dict[str, str] = {}
+    settings = Settings()
+    if settings.enforce_connect_token:
+        creds = sb.create_connect_token(user_metadata={"job_id": normalized_job_id})
+        headers = {"Authorization": f"Bearer {creds.token}"}
 
-    sb = _create_claude_cli_sandbox(job_id=normalized_job_id, timeout_seconds=estimated_runtime)
     try:
-        proc = sb.exec(*runner_cmd, timeout=exec_timeout)
-        stdout_raw = proc.stdout.read()
-        stderr_raw = proc.stderr.read()
-        exit_code = proc.wait()
-    finally:
-        sb.terminate()
+        timeout = httpx.Timeout(estimated_runtime + 300, connect=30.0)
+        response = httpx.post(
+            f"{url.rstrip('/')}/ralph/execute",
+            json=request_body.model_dump(),
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
         try:
-            sb.wait(raise_on_termination=False)
+            payload = exc.response.json()
         except Exception:
-            _logger.debug("Ralph sandbox wait failed", exc_info=True)
+            payload = {}
+        message = payload.get("error") or exc.response.text or str(exc)
+        raise RuntimeError(message) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Ralph sandbox request failed: {exc}") from exc
 
-    stdout_text = (
-        stdout_raw.decode("utf-8", errors="replace")
-        if isinstance(stdout_raw, bytes)
-        else (stdout_raw or "")
-    )
-    stderr_text = (
-        stderr_raw.decode("utf-8", errors="replace")
-        if isinstance(stderr_raw, bytes)
-        else (stderr_raw or "")
-    )
-    stdout_text = stdout_text.strip()
-    stderr_text = stderr_text.strip()
-
-    if exit_code != 0:
-        message = stderr_text or stdout_text or "Ralph sandbox run failed"
-        raise RuntimeError(message)
-
-    try:
-        payload = json.loads(stdout_text) if stdout_text else {}
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Failed to parse Ralph sandbox output") from exc
     return payload
 
 
