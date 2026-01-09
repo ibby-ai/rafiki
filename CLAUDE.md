@@ -56,7 +56,22 @@ modal run -m agent_sandbox.app
 modal run -m agent_sandbox.app::run_agent_remote --question "Your question here"
 
 # Run Claude Code CLI via the background sandbox
-modal run -m agent_sandbox.app::run_claude_cli_remote --prompt "Summarize repo layout" --allowed-tools "Read"
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --prompt "Summarize repo layout" \
+  --allowed-tools "Read"
+
+# Run Claude Code CLI and allow code execution
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create hello.py and run it" \
+  --allowed-tools "Write,Bash,Read" \
+  --timeout-seconds 300
+
+# Capture CLI output to a file (modal run only writes string/bytes results)
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --prompt "Say hello in one sentence" \
+  --return-stdout \
+  --write-result ./claude_cli_output.txt
 
 # Start dev server with hot reload (enables HTTP endpoints)
 modal serve -m agent_sandbox.app
@@ -277,9 +292,86 @@ async def your_endpoint(body: QueryBody, request: Request):
 The `/claude_cli` endpoint runs the Claude Code CLI via subprocess. Important considerations:
 
 - **Non-root execution**: The CLI is executed as the `claude` user so `--dangerously-skip-permissions` can be used when requested. Use with care.
-- **Prefer `--allowedTools`**: Pre-approve specific tools via `--allowedTools` (e.g., `["Read", "Bash"]`) to avoid permission prompts for those tools.
+- **Default skip-permissions**: `run_claude_cli_remote` defaults to `--dangerously-skip-permissions` to avoid non-interactive approval prompts. Use `--allowedTools` to scope access when possible.
 - **Non-interactive mode**: The `-p` flag enables "print mode" which is non-interactive. Combined with `stdin=subprocess.DEVNULL`, this ensures the CLI won't hang waiting for user input.
 - **Volume operations**: `reload()` and `commit()` on Modal Volumes can only be called from within a Modal function context, not from a sandbox subprocess. The code handles these errors gracefully.
+- **Long-running CLI runs**: `run_claude_cli_remote` is configured with a 24-hour Modal function timeout. Set `--timeout-seconds` to control the CLI subprocess timeout.
+- **Shared volume access**: The Claude CLI container mounts the shared `/data` Modal volume. Use `--job-id` to write into `/data/jobs/<job_id>/` for persistence.
+- **CLI output capture**: `modal run` only writes return values when they are strings/bytes. Use `--return-stdout` with `--write-result` to capture output reliably (JSON fallback is returned if stdout/stderr is empty).
+- **If output is empty**: Check the Modal run logs and confirm `anthropic-secret` is configured with `ANTHROPIC_API_KEY` so the Claude CLI can authenticate. A successful exit with empty stdout/stderr usually indicates missing auth or misconfigured CLI settings.
+
+### Claude Code CLI Async Polling
+
+For long-running runs, use async submission with polling:
+
+```bash
+# Start a run and get a call_id
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/submit' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Create app.py and run it","allowed_tools":["Write","Bash","Read"],"job_id":"550e8400-e29b-41d4-a716-446655440000","timeout_seconds":300}'
+
+# Poll for completion
+curl -X GET 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/<call_id>'
+```
+
+Example polling loop:
+
+```bash
+call_id="<call_id>"
+while true; do
+  resp=$(curl -s "https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/${call_id}")
+  echo "$resp"
+  if echo "$resp" | grep -q '"status":"complete"\|"status":"failed"\|"status":"expired"'; then
+    break
+  fi
+  sleep 2
+done
+```
+
+Status polling behavior:
+
+- `202` + `{"status":"running"}` while the run is still executing
+- `200` + `{"status":"complete","result":{...}}` when finished
+- `410` + `{"status":"expired"}` if the result TTL has passed
+- `500` + `{"status":"failed","error":"..."}` on execution errors
+
+### Running Code with Claude Code CLI
+
+To create files and execute code, ensure you:
+
+- **Pass `--job-id`** so the CLI runs in a volume-backed workspace at `/data/jobs/<job_id>/`.
+- **Allow tools** needed for execution: `Write` for file creation and `Bash` for running code.
+- **Set timeout** for longer runs (the CLI defaults to 120 seconds).
+
+Examples:
+
+```bash
+# Python: create and run a file
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create game.py and run it to show sample output" \
+  --allowed-tools "Write,Bash,Read" \
+  --timeout-seconds 300
+
+# Node: create and run a file
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create index.js and run it with node" \
+  --allowed-tools "Write,Bash,Read" \
+  --timeout-seconds 300
+
+# Full bypass (use sparingly)
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create app.py and run it" \
+  --dangerously-skip-permissions \
+  --timeout-seconds 300
+```
+
+Notes:
+
+- Without `--job-id`, files are written under `/home/claude/app` and are not persisted.
+- Files written under `/data/jobs/<job_id>/` are persisted after the CLI finishes.
 
 ### Volume Persistence Behavior
 

@@ -444,6 +444,85 @@ with open("/tmp/myfile.py", "w") as f:
 
 The system prompt automatically instructs the agent to use `/data` for file operations.
 
+### Claude Code CLI: Running Code
+
+Claude Code CLI runs in a dedicated Modal function as a non-root user. To create files
+and execute code, use a job workspace and allow the required tools:
+
+- **Pass `--job-id`** so files land under `/data/jobs/<job_id>/` and persist.
+- **Allow tools**: `Write` to create files and `Bash` to execute them.
+- **Increase timeouts** for longer tasks (default CLI timeout is 120 seconds).
+- **Default skip-permissions**: `run_claude_cli_remote` defaults to `--dangerously-skip-permissions`.
+- **CLI output capture**: `modal run` only writes return values when they are strings/bytes. Use `--return-stdout` with `--write-result` (JSON fallback is returned if stdout/stderr is empty).
+- **If output is empty**: Check the Modal run logs and confirm `anthropic-secret` is configured with `ANTHROPIC_API_KEY` so the Claude CLI can authenticate.
+
+Examples:
+
+```bash
+# Python: create and run a file
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create game.py and run it to show sample output" \
+  --allowed-tools "Write,Bash,Read" \
+  --timeout-seconds 300
+
+# Node: create and run a file
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create index.js and run it with node" \
+  --allowed-tools "Write,Bash,Read" \
+  --timeout-seconds 300
+
+# Full bypass (use sparingly)
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --job-id "550e8400-e29b-41d4-a716-446655440000" \
+  --prompt "Create app.py and run it" \
+  --dangerously-skip-permissions \
+  --timeout-seconds 300
+
+# Capture CLI output to a file (modal run only writes string/bytes results)
+modal run -m agent_sandbox.app::run_claude_cli_remote \
+  --prompt "Say hello in one sentence" \
+  --return-stdout \
+  --write-result ./claude_cli_output.txt
+```
+
+Without `--job-id`, files are written under `/home/claude/app` and are not persisted.
+The Claude CLI container mounts the shared `/data` Modal volume for persisted artifacts.
+
+For long-running runs, use async submission and polling:
+
+```bash
+# Start a run and get a call_id
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/submit' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Create app.py and run it","allowed_tools":["Write","Bash","Read"],"job_id":"550e8400-e29b-41d4-a716-446655440000","timeout_seconds":300}'
+
+# Poll for completion
+curl -X GET 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/<call_id>'
+```
+
+Example polling loop:
+
+```bash
+call_id="<call_id>"
+while true; do
+  resp=$(curl -s "https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/${call_id}")
+  echo "$resp"
+  if echo "$resp" | grep -q '"status":"complete"\|"status":"failed"\|"status":"expired"'; then
+    break
+  fi
+  sleep 2
+done
+```
+
+Status polling behavior:
+
+- `202` + `{"status":"running"}` while the run is still executing
+- `200` + `{"status":"complete","result":{...}}` when finished
+- `410` + `{"status":"expired"}` if the result TTL has passed
+- `500` + `{"status":"failed","error":"..."}` on execution errors
+
 ## Configuration
 
 ### Makefile
