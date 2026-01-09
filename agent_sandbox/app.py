@@ -62,6 +62,17 @@ from agent_sandbox.jobs import (
     update_job,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from agent_sandbox.ralph.feedback import validate_feedback_commands
+from agent_sandbox.ralph.loop import run_ralph_loop
+from agent_sandbox.ralph.schemas import (
+    Prd,
+    RalphLoopResult,
+    RalphStartRequest,
+    RalphStartResponse,
+    RalphStatusResponse,
+    WorkspaceSource,
+)
+from agent_sandbox.ralph.status import read_status
 from agent_sandbox.schemas import (
     ArtifactListResponse,
     ClaudeCliCancelResponse,
@@ -145,7 +156,7 @@ def _claude_cli_image() -> modal.Image:
         modal.Image.debian_slim(python_version="3.11")
         .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
         .pip_install("uv")
-        .apt_install("curl")
+        .apt_install("curl", "git")
         .run_commands(
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
@@ -1234,6 +1245,116 @@ async def cancel_job_request(job_id: str) -> JobStatusResponse:
     return status
 
 
+# =============================================================================
+# RALPH WIGGUM ENDPOINTS
+# =============================================================================
+
+
+@web_app.post("/ralph/start", response_model=RalphStartResponse)
+async def start_ralph(body: RalphStartRequest) -> RalphStartResponse:
+    """Start a Ralph autonomous coding loop (async).
+
+    Starts a long-running Modal function that works through the provided PRD
+    until all tasks are complete or max iterations is reached.
+
+    Returns a job_id and call_id that can be used to poll for status.
+    """
+    # Validate feedback commands early to fail fast
+    if body.feedback_commands:
+        validate_feedback_commands(body.feedback_commands)
+
+    import uuid
+
+    job_id = str(uuid.uuid4())
+
+    call = run_ralph_remote.spawn(
+        job_id=job_id,
+        prd_json=body.prd.model_dump_json(),
+        workspace_source_json=body.workspace_source.model_dump_json(),
+        prompt_template=body.prompt_template,
+        max_iterations=body.max_iterations,
+        timeout_per_iteration=body.timeout_per_iteration,
+        allowed_tools=",".join(body.allowed_tools),
+        feedback_commands=",".join(body.feedback_commands),
+        feedback_timeout=body.feedback_timeout,
+        auto_commit=body.auto_commit,
+        max_consecutive_failures=body.max_consecutive_failures,
+    )
+
+    call_id = _function_call_id(call)
+    if not call_id:
+        raise HTTPException(status_code=500, detail="Unable to determine call id")
+
+    return RalphStartResponse(job_id=job_id, call_id=call_id)
+
+
+@web_app.get("/ralph/{job_id}", response_model=RalphStatusResponse)
+async def get_ralph_status(job_id: str, call_id: str) -> RalphStatusResponse:
+    """Get Ralph loop status by job_id.
+
+    Polls the running Ralph loop for current status. Returns live progress
+    from the workspace status.json file if available, otherwise checks the
+    Modal function call status.
+
+    Args:
+        job_id: The Ralph job ID returned from /ralph/start
+        call_id: The Modal call ID returned from /ralph/start
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    # Try to read live status from workspace first
+    workspace = Path(f"/data/jobs/{job_id}")
+    _reload_persist_volume()
+    live_status = read_status(workspace)
+
+    if live_status and live_status.get("status") == "running":
+        return RalphStatusResponse(
+            job_id=job_id,
+            status=live_status["status"],
+            current_iteration=live_status["current_iteration"],
+            max_iterations=live_status["max_iterations"],
+            tasks_completed=live_status["tasks_completed"],
+            tasks_total=live_status["tasks_total"],
+            current_task=live_status.get("current_task"),
+            result=None,
+        )
+
+    # Check Modal call status
+    try:
+        call = modal.FunctionCall.from_id(call_id)
+        try:
+            result = call.get(timeout=0)
+            return RalphStatusResponse(
+                job_id=job_id,
+                status=result["status"],
+                current_iteration=result["iterations_completed"],
+                max_iterations=result["iterations_max"],
+                tasks_completed=result["tasks_completed"],
+                tasks_total=result["tasks_total"],
+                current_task=None,
+                result=RalphLoopResult(**result),
+            )
+        except modal_exc.TimeoutError:
+            # Still running but no status file yet
+            return RalphStatusResponse(
+                job_id=job_id,
+                status="running",
+                current_iteration=0,
+                max_iterations=0,
+                tasks_completed=0,
+                tasks_total=0,
+                current_task=None,
+                result=None,
+            )
+        except modal_exc.OutputExpiredError:
+            return JSONResponse(
+                status_code=410,
+                content={"job_id": job_id, "status": "expired", "error": "Result expired"},
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @web_app.get("/service_info")
 async def service_info():
     """Get information about the background sandbox service."""
@@ -1836,6 +1957,80 @@ def run_claude_cli_remote(
         return payload
     finally:
         _commit_persist_volume()
+
+
+# =============================================================================
+# RALPH WIGGUM MODAL FUNCTION
+# =============================================================================
+
+
+persist_volume = _get_persist_volume()
+
+
+@app.function(
+    image=claude_cli_image,
+    secrets=[modal.Secret.from_name("anthropic-secret")],
+    volumes={"/data": persist_volume},
+    timeout=86400,  # 24 hours
+)
+def run_ralph_remote(
+    job_id: str,
+    prd_json: str,
+    workspace_source_json: str,
+    prompt_template: str | None = None,
+    max_iterations: int = 10,
+    timeout_per_iteration: int = 300,
+    allowed_tools: str = "Read,Write,Bash,Glob,Grep",
+    feedback_commands: str = "",
+    feedback_timeout: int = 120,
+    auto_commit: bool = True,
+    max_consecutive_failures: int = 3,
+) -> dict:
+    """Run Ralph autonomous coding loop as Modal function.
+
+    This function executes the Ralph loop inside a Modal container. It is designed
+    to be spawned asynchronously via run_ralph_remote.spawn() and polled for results.
+
+    Args:
+        job_id: Unique job identifier for workspace and tracking.
+        prd_json: JSON-serialized PRD object.
+        workspace_source_json: JSON-serialized WorkspaceSource object.
+        prompt_template: Custom prompt template (uses default if None).
+        max_iterations: Maximum iterations before stopping.
+        timeout_per_iteration: CLI timeout per iteration in seconds.
+        allowed_tools: Comma-separated list of allowed CLI tools.
+        feedback_commands: Comma-separated list of feedback commands to run.
+        feedback_timeout: Timeout for feedback commands.
+        auto_commit: Whether to auto-commit after each successful iteration.
+        max_consecutive_failures: Stop after this many consecutive CLI failures.
+
+    Returns:
+        Dict representation of RalphLoopResult.
+    """
+    workspace = Path(f"/data/jobs/{job_id}")
+
+    prd = Prd.model_validate_json(prd_json)
+    workspace_source = WorkspaceSource.model_validate_json(workspace_source_json)
+    tools = [t.strip() for t in allowed_tools.split(",") if t.strip()]
+    feedback = [c.strip() for c in feedback_commands.split(",") if c.strip()]
+
+    result = run_ralph_loop(
+        job_id=job_id,
+        prd=prd,
+        workspace=workspace,
+        workspace_source=workspace_source,
+        prompt_template=prompt_template,
+        max_iterations=max_iterations,
+        timeout_per_iteration=timeout_per_iteration,
+        allowed_tools=tools,
+        feedback_commands=feedback,
+        feedback_timeout=feedback_timeout,
+        auto_commit=auto_commit,
+        max_consecutive_failures=max_consecutive_failures,
+    )
+
+    _commit_persist_volume()
+    return result.model_dump()
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
