@@ -6,6 +6,11 @@ This guide explains how end users interact with your deployed agent sandbox appl
 
 - [Deployment and Public URLs](#deployment-and-public-urls)
 - [Available Endpoints](#available-endpoints)
+  - [Health & Info](#1-get-health---health-check)
+  - [Agent SDK](#2-post-query---execute-agent-query-non-streaming)
+  - [Jobs](#4-post-submit---enqueue-agent-job)
+  - [Claude CLI](#10-post-claude_cli---execute-claude-code-cli)
+  - [Ralph Loop](#14-post-ralphstart---start-ralph-autonomous-coding-loop)
 - [Real-World Usage Examples](#real-world-usage-examples)
 - [Authentication](#authentication)
 - [Error Handling](#error-handling)
@@ -534,6 +539,597 @@ curl https://acme-corp--test-sandbox-http-app.modal.run/service_info
 - Understanding which sandbox instance is handling requests
 
 **Note:** The `url` field contains an encrypted tunnel URL that's only accessible from within Modal's infrastructure. External clients cannot directly access this URL.
+
+---
+
+### 10. POST /claude_cli - Execute Claude Code CLI
+
+**Purpose:** Execute Claude Code CLI in the dedicated CLI sandbox
+
+**Endpoint:** `POST /claude_cli`
+
+**Request Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "prompt": "Create hello.py and run it",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "allowed_tools": ["Read", "Write", "Bash"],
+  "disallowed_tools": [],
+  "max_turns": 10,
+  "timeout_seconds": 300,
+  "dangerously_skip_permissions": true,
+  "output_format": "json"
+}
+```
+
+**Request Example:**
+```bash
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/claude_cli \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Create hello.py and run it","job_id":"550e8400-e29b-41d4-a716-446655440000","allowed_tools":["Write","Bash","Read"],"timeout_seconds":300}'
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "output": "I'll create hello.py and run it...",
+  "exit_code": 0,
+  "cost_usd": 0.0012,
+  "duration_ms": 5432,
+  "session_id": "session-abc123"
+}
+```
+
+**Request Fields:**
+- `prompt` (required): The task prompt for Claude CLI
+- `job_id` (optional): UUID for workspace directory (`/data-cli/jobs/{job_id}/`)
+- `allowed_tools` (optional): List of tools the CLI can use (e.g., `["Read", "Write", "Bash", "Glob", "Grep"]`)
+- `disallowed_tools` (optional): Tools to explicitly block
+- `max_turns` (optional): Maximum conversation turns (default: 10)
+- `timeout_seconds` (optional): CLI execution timeout (default: 120)
+- `dangerously_skip_permissions` (optional): Skip tool approval prompts (default: true)
+- `output_format` (optional): Output format (`"json"` or `"text"`)
+
+**Status Codes:**
+- `200 OK`: CLI executed successfully
+- `400 Bad Request`: Invalid request body
+- `500 Internal Server Error`: CLI execution failed
+- `503 Service Unavailable`: CLI sandbox not ready
+
+**Characteristics:**
+- **Sandbox:** Runs in dedicated CLI sandbox (`claude-cli-runner`) on port 8002
+- **User:** Executes as non-root `claude` user (required for `--dangerously-skip-permissions`)
+- **Volume:** Files persist at `/data-cli/jobs/{job_id}/`
+- **Timeout:** Default 120 seconds, configurable up to 24 hours
+
+---
+
+### 11. POST /claude_cli/submit - Submit Async CLI Job
+
+**Purpose:** Start a Claude CLI job asynchronously for polling
+
+**Endpoint:** `POST /claude_cli/submit`
+
+**Request Body:** Same as `/claude_cli`
+
+**Request Example:**
+```bash
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/claude_cli/submit \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Create app.py and run it","allowed_tools":["Write","Bash","Read"],"job_id":"550e8400-e29b-41d4-a716-446655440000","timeout_seconds":300}'
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "call_id": "fc-01KEH5JQACATAHE94X4K21A227"
+}
+```
+
+**Status Codes:**
+- `200 OK`: Job submitted
+- `400 Bad Request`: Invalid request body
+- `500 Internal Server Error`: Failed to spawn job
+
+---
+
+### 12. GET /claude_cli/result/{call_id} - Poll CLI Job Result
+
+**Purpose:** Poll for async CLI job completion
+
+**Endpoint:** `GET /claude_cli/result/{call_id}`
+
+**Request Example:**
+```bash
+curl https://acme-corp--test-sandbox-http-app.modal.run/claude_cli/result/fc-01KEH5JQACATAHE94X4K21A227
+```
+
+**Response (Running):**
+```json
+{
+  "status": "running"
+}
+```
+HTTP Status: `202 Accepted`
+
+**Response (Complete):**
+```json
+{
+  "status": "complete",
+  "result": {
+    "ok": true,
+    "output": "...",
+    "exit_code": 0,
+    "cost_usd": 0.0012,
+    "duration_ms": 5432
+  }
+}
+```
+HTTP Status: `200 OK`
+
+**Response (Failed):**
+```json
+{
+  "status": "failed",
+  "error": "CLI execution timed out"
+}
+```
+HTTP Status: `500 Internal Server Error`
+
+**Response (Expired):**
+```json
+{
+  "status": "expired"
+}
+```
+HTTP Status: `410 Gone`
+
+**Status Codes:**
+- `200 OK`: Job complete
+- `202 Accepted`: Job still running
+- `410 Gone`: Result expired (TTL passed)
+- `500 Internal Server Error`: Job failed
+
+---
+
+### 13. DELETE /claude_cli/{call_id} - Cancel CLI Job
+
+**Purpose:** Cancel a running CLI job
+
+**Endpoint:** `DELETE /claude_cli/{call_id}`
+
+**Request Example:**
+```bash
+curl -X DELETE https://acme-corp--test-sandbox-http-app.modal.run/claude_cli/fc-01KEH5JQACATAHE94X4K21A227
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "status": "cancelled"
+}
+```
+
+**Status Codes:**
+- `200 OK`: Job cancelled
+- `404 Not Found`: Job not found
+- `500 Internal Server Error`: Failed to cancel
+
+---
+
+### 14. POST /ralph/start - Start Ralph Autonomous Coding Loop
+
+**Purpose:** Start an autonomous coding loop that iterates through a PRD (Product Requirements Document)
+
+**Endpoint:** `POST /ralph/start`
+
+**Request Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "prd": {
+    "name": "my-project",
+    "userStories": [
+      {
+        "id": "task-1",
+        "category": "functional",
+        "description": "Create hello.txt with 'hi'",
+        "steps": ["Ensure hello.txt exists", "Verify content is 'hi'"],
+        "priority": 1,
+        "passes": false
+      },
+      {
+        "id": "task-2",
+        "category": "functional",
+        "description": "Create goodbye.txt with 'bye'",
+        "steps": ["Ensure goodbye.txt exists"],
+        "priority": 2,
+        "passes": false
+      }
+    ]
+  },
+  "workspace_source": {
+    "type": "empty"
+  },
+  "prompt_template": null,
+  "max_iterations": 10,
+  "timeout_per_iteration": 300,
+  "first_iteration_timeout": 600,
+  "allowed_tools": ["Read", "Write", "Bash", "Glob", "Grep"],
+  "feedback_commands": ["uv run pytest"],
+  "feedback_timeout": 120,
+  "auto_commit": true,
+  "max_consecutive_failures": 3
+}
+```
+
+**Request Example:**
+```bash
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/ralph/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prd": {
+      "name": "test-project",
+      "userStories": [{
+        "id": "task-1",
+        "category": "functional",
+        "description": "Create hello.txt with hi",
+        "steps": ["Ensure hello.txt exists"],
+        "priority": 1,
+        "passes": false
+      }]
+    },
+    "max_iterations": 5,
+    "timeout_per_iteration": 180,
+    "auto_commit": false
+  }'
+```
+
+**Response:**
+```json
+{
+  "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+  "call_id": "fc-01KEH5JQACATAHE94X4K21A227",
+  "status": "started"
+}
+```
+
+**Request Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `prd` | object | Yes | - | Product Requirements Document with tasks |
+| `prd.name` | string | Yes | - | Project name |
+| `prd.userStories` | array | Yes | - | List of tasks to complete |
+| `workspace_source` | object | No | `{"type": "empty"}` | Workspace initialization source |
+| `workspace_source.type` | string | No | `"empty"` | `"empty"` or `"git_clone"` |
+| `workspace_source.git_url` | string | No | - | Git URL (if `type: "git_clone"`) |
+| `workspace_source.git_branch` | string | No | - | Git branch (if `type: "git_clone"`) |
+| `prompt_template` | string | No | Built-in | Custom prompt template |
+| `max_iterations` | int | No | 10 | Maximum loop iterations |
+| `timeout_per_iteration` | int | No | 300 | Seconds per iteration |
+| `first_iteration_timeout` | int | No | - | Timeout for first iteration (for cold starts) |
+| `allowed_tools` | array | No | All tools | Tools the CLI can use |
+| `feedback_commands` | array | No | `[]` | Commands to validate work |
+| `feedback_timeout` | int | No | 120 | Timeout for feedback commands |
+| `auto_commit` | bool | No | true | Create git commits after each task |
+| `max_consecutive_failures` | int | No | 3 | Stop after N consecutive failures |
+
+**User Story Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Unique task identifier |
+| `category` | string | Yes | Task category (e.g., `"functional"`, `"testing"`) |
+| `description` | string | Yes | What the task should accomplish |
+| `steps` | array | Yes | Verification steps to confirm completion |
+| `priority` | int | Yes | Execution order (lower = first) |
+| `passes` | bool | Yes | Whether task is complete (set to `false` initially) |
+
+**Status Codes:**
+- `200 OK`: Loop started
+- `400 Bad Request`: Invalid PRD or request body
+- `500 Internal Server Error`: Failed to start loop
+
+**Important Characteristics:**
+- **Autonomous execution**: Ralph always runs with `--dangerously-skip-permissions` enabled (hardcoded). This is required for non-interactive execution - the loop cannot prompt for tool approval mid-iteration.
+- **Sandbox**: Runs in CLI sandbox (`claude-cli-runner`) on port 8002 as non-root `claude` user
+- **Volume**: All artifacts persist at `/data-cli/jobs/{job_id}/`
+- **Security**: Use `allowed_tools` to scope what tools the CLI can use. This is your primary security control since permission prompts are skipped.
+
+---
+
+### 15. GET /ralph/{job_id} - Poll Ralph Loop Status
+
+**Purpose:** Poll the status of a running Ralph loop
+
+**Endpoint:** `GET /ralph/{job_id}?call_id={call_id}`
+
+**Query Parameters:**
+- `call_id` (required): The Modal call ID returned from `/ralph/start`
+
+**Request Example:**
+```bash
+curl "https://acme-corp--test-sandbox-http-app.modal.run/ralph/a36f0318-2823-40fc-ae37-a029532520dc?call_id=fc-01KEH5JQACATAHE94X4K21A227"
+```
+
+**Response (Running):**
+```json
+{
+  "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+  "status": "running",
+  "current_iteration": 2,
+  "max_iterations": 10,
+  "tasks_completed": 1,
+  "tasks_total": 3,
+  "current_task": "Create authentication module",
+  "result": null
+}
+```
+
+**Response (Complete):**
+```json
+{
+  "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+  "status": "complete",
+  "current_iteration": 5,
+  "max_iterations": 10,
+  "tasks_completed": 3,
+  "tasks_total": 3,
+  "current_task": null,
+  "result": {
+    "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+    "status": "complete",
+    "iterations_completed": 5,
+    "iterations_max": 10,
+    "tasks_completed": 3,
+    "tasks_total": 3,
+    "iteration_results": [
+      {
+        "iteration": 1,
+        "task_id": "task-1",
+        "cli_exit_code": 0,
+        "cli_output": "Created hello.txt...",
+        "task_passed": true
+      }
+    ],
+    "final_prd": {
+      "name": "my-project",
+      "userStories": [
+        {"id": "task-1", "passes": true, "...": "..."},
+        {"id": "task-2", "passes": true, "...": "..."},
+        {"id": "task-3", "passes": true, "...": "..."}
+      ]
+    },
+    "error": null
+  }
+}
+```
+
+**Response (Failed):**
+```json
+{
+  "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+  "status": "failed",
+  "current_iteration": 3,
+  "max_iterations": 10,
+  "tasks_completed": 1,
+  "tasks_total": 3,
+  "current_task": null,
+  "result": {
+    "job_id": "a36f0318-2823-40fc-ae37-a029532520dc",
+    "status": "failed",
+    "error": "Max consecutive failures reached (3)",
+    "iterations_completed": 3,
+    "...": "..."
+  }
+}
+```
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | string | The Ralph job ID |
+| `status` | string | `"running"`, `"complete"`, or `"failed"` |
+| `current_iteration` | int | Current iteration number |
+| `max_iterations` | int | Maximum iterations configured |
+| `tasks_completed` | int | Number of tasks with `passes: true` |
+| `tasks_total` | int | Total number of tasks in PRD |
+| `current_task` | string | Description of current task (null when done) |
+| `result` | object | Full result when complete/failed, null while running |
+
+**Status Codes:**
+- `200 OK`: Status returned (includes running, complete, or failed states)
+- `404 Not Found`: Job not found
+- `500 Internal Server Error`: Failed to poll status
+
+---
+
+### Ralph Workspace Artifacts
+
+Ralph writes artifacts to `/data-cli/jobs/{job_id}/`:
+
+| File | Description |
+|------|-------------|
+| `status.json` | Machine-readable polling status (used by GET /ralph/{job_id}) |
+| `progress.txt` | Human-readable log of loop progress |
+| `prd.json` | PRD with updated `passes` status for each task |
+| `.git/` | Git repository (if `auto_commit: true`) |
+| Generated files | Files created by tasks (e.g., `hello.txt`, `app.py`) |
+
+---
+
+### Ralph Polling Loop Example
+
+**Bash:**
+```bash
+# Start Ralph
+resp=$(curl -s -X POST 'https://acme-corp--test-sandbox-http-app.modal.run/ralph/start' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prd": {
+      "name": "test",
+      "userStories": [{
+        "id": "task-1",
+        "category": "functional",
+        "description": "Create hello.txt with hi",
+        "steps": ["Verify file exists"],
+        "priority": 1,
+        "passes": false
+      }]
+    },
+    "max_iterations": 5
+  }')
+
+job_id=$(echo "$resp" | jq -r '.job_id')
+call_id=$(echo "$resp" | jq -r '.call_id')
+
+echo "Started job: $job_id"
+
+# Poll until complete
+while true; do
+  status=$(curl -s "https://acme-corp--test-sandbox-http-app.modal.run/ralph/${job_id}?call_id=${call_id}")
+  echo "$status" | jq .
+
+  # Check if done
+  if echo "$status" | jq -e '.status == "complete" or .status == "failed"' > /dev/null; then
+    break
+  fi
+
+  sleep 5
+done
+
+echo "Final status: $(echo "$status" | jq -r '.status')"
+echo "Tasks completed: $(echo "$status" | jq -r '.tasks_completed')/$(echo "$status" | jq -r '.tasks_total')"
+```
+
+**JavaScript:**
+```javascript
+async function runRalphLoop(prd, baseUrl) {
+  // Start the loop
+  const startResponse = await fetch(`${baseUrl}/ralph/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prd,
+      max_iterations: 10,
+      timeout_per_iteration: 180,
+      auto_commit: true
+    })
+  });
+
+  const { job_id, call_id } = await startResponse.json();
+  console.log(`Started Ralph job: ${job_id}`);
+
+  // Poll until complete
+  while (true) {
+    const statusResponse = await fetch(
+      `${baseUrl}/ralph/${job_id}?call_id=${call_id}`
+    );
+    const status = await statusResponse.json();
+
+    console.log(`Status: ${status.status}, Tasks: ${status.tasks_completed}/${status.tasks_total}`);
+
+    if (status.status === 'complete' || status.status === 'failed') {
+      return status;
+    }
+
+    // Wait before polling again
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+}
+
+// Usage
+const prd = {
+  name: 'my-project',
+  userStories: [
+    {
+      id: 'task-1',
+      category: 'functional',
+      description: 'Create hello.txt with greeting',
+      steps: ['File exists', 'Contains greeting text'],
+      priority: 1,
+      passes: false
+    }
+  ]
+};
+
+const result = await runRalphLoop(prd, 'https://acme-corp--test-sandbox-http-app.modal.run');
+console.log('Final result:', result);
+```
+
+**Python:**
+```python
+import requests
+import time
+
+def run_ralph_loop(prd: dict, base_url: str, poll_interval: float = 5.0) -> dict:
+    """Run a Ralph autonomous coding loop and poll until completion."""
+
+    # Start the loop
+    start_response = requests.post(
+        f"{base_url}/ralph/start",
+        json={
+            "prd": prd,
+            "max_iterations": 10,
+            "timeout_per_iteration": 180,
+            "auto_commit": True
+        }
+    )
+    start_response.raise_for_status()
+    start_data = start_response.json()
+
+    job_id = start_data["job_id"]
+    call_id = start_data["call_id"]
+    print(f"Started Ralph job: {job_id}")
+
+    # Poll until complete
+    while True:
+        status_response = requests.get(
+            f"{base_url}/ralph/{job_id}",
+            params={"call_id": call_id}
+        )
+        status_response.raise_for_status()
+        status = status_response.json()
+
+        print(f"Status: {status['status']}, Tasks: {status['tasks_completed']}/{status['tasks_total']}")
+
+        if status["status"] in ("complete", "failed"):
+            return status
+
+        time.sleep(poll_interval)
+
+# Usage
+prd = {
+    "name": "my-project",
+    "userStories": [
+        {
+            "id": "task-1",
+            "category": "functional",
+            "description": "Create hello.txt with greeting",
+            "steps": ["File exists", "Contains greeting text"],
+            "priority": 1,
+            "passes": False
+        }
+    ]
+}
+
+result = run_ralph_loop(prd, "https://acme-corp--test-sandbox-http-app.modal.run")
+print(f"Final: {result['status']}, completed {result['tasks_completed']} tasks")
+```
 
 ---
 
