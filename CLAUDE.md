@@ -115,22 +115,31 @@ The codebase demonstrates two distinct patterns for running agents:
 - Terminates sandbox after completion
 - Use for: batch jobs, scheduled tasks, one-off queries
 
-**2. Long-lived Background Service Pattern** (`http_app` + `agent_sandbox.controllers.controller`)
+**2. Long-lived Background Service Pattern** (Dual Sandbox Architecture)
 
-- Maintains persistent sandbox running FastAPI service via uvicorn
-- Service runs on encrypted port 8001 with tunnel URL
-- HTTP endpoint proxies requests to service
-- Sandbox persists for 12 hours (timeout) or 10 minutes idle
-- Use for: low-latency serving, repeated queries, production APIs
+The system uses **two separate sandboxes**:
+
+| Sandbox | Name | Port | Volume | Purpose |
+|---------|------|------|--------|---------|
+| Agent SDK | `svc-runner-8001` | 8001 | `/data` | Conversational queries via Claude Agent SDK |
+| CLI | `claude-cli-runner` | 8002 | `/data-cli` | Code execution via Claude CLI, Ralph loops |
+
+- Both sandboxes maintain persistent FastAPI services via uvicorn
+- HTTP gateway (`http_app`) routes requests to appropriate sandbox
+- Agent SDK sandbox: 24h timeout, 10min idle
+- CLI sandbox: 24h timeout, 30min idle
+- Use for: low-latency serving, repeated queries, production APIs, autonomous coding
 
 ### Key Components
 
 **`agent_sandbox/app.py`** - Modal app definition and entry points
 
 - Defines `modal.App("test-sandbox")`
-- `get_or_start_background_sandbox()`: Manages persistent sandbox lifecycle with health checks
-- `http_app`: ASGI app exposing HTTP endpoints that proxy to background service
+- `get_or_start_background_sandbox()`: Manages Agent SDK sandbox lifecycle
+- `get_or_start_cli_sandbox()`: Manages CLI sandbox lifecycle
+- `http_app`: ASGI app exposing HTTP endpoints that proxy to both sandboxes
 - `run_agent_remote`: Short-lived function for single queries
+- `run_ralph_remote`: Short-lived function for Ralph loops
 - `main`: Local CLI entry point for `modal run`
 
 **`agent_sandbox/agents/loop.py`** - CLI-based agent execution
@@ -139,21 +148,37 @@ The codebase demonstrates two distinct patterns for running agents:
 - `run_agent()`: Single query execution with streaming output
 - Used by short-lived sandboxes via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
 
-**`agent_sandbox/controllers/controller.py`** - FastAPI microservice for background sandbox
+**`agent_sandbox/controllers/controller.py`** - Agent SDK microservice (port 8001)
 
-- `GET /health_check`: Liveness probe used by controller
+- `GET /health_check`: Liveness probe
 - `POST /query`: Agent query endpoint that returns responses
 - `POST /query_stream`: Agent query endpoint that streams responses as SSE
-- `POST /claude_cli`: Claude Code CLI endpoint for programmatic CLI calls
-- Runs via `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
-- Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
+- `POST /claude_cli`: Claude Code CLI endpoint (may delegate to CLI sandbox)
+- Uses `permission_mode="acceptEdits"` with `can_use_tool` handler
 - Supports session resumption via `session_id`, `session_key`, `fork_session`
+
+**`agent_sandbox/controllers/cli_controller.py`** - CLI microservice (port 8002)
+
+- `GET /health_check`: Liveness probe
+- `POST /execute`: Execute Claude Code CLI as subprocess
+- `POST /ralph/execute`: Execute Ralph autonomous coding loop
+- Runs as non-root `claude` user (required for `--dangerously-skip-permissions`)
+- Volume: `/data-cli` for job workspaces
+
+**`agent_sandbox/ralph/`** - Ralph autonomous coding loop module
+
+- `loop.py`: Main orchestrator (`run_ralph_loop`)
+- `schemas.py`: Pydantic models (Prd, IterationResult, RalphLoopResult)
+- PRD-driven task execution with feedback validation
+- Git integration for commit tracking
 
 **`agent_sandbox/app.py`** - HTTP Gateway endpoints (in addition to above)
 
 - `POST /submit`: Enqueue async job to `JOB_QUEUE`
 - `GET /jobs/{job_id}`: Check job status from `JOB_RESULTS` dict
 - `DELETE /jobs/{job_id}`: Cancel a queued job
+- `POST /ralph/start`: Start async Ralph loop
+- `GET /ralph/{job_id}`: Poll Ralph status
 
 **`agent_sandbox/config/settings.py`** - Configuration management
 
@@ -190,20 +215,29 @@ The codebase demonstrates two distinct patterns for running agents:
 
 ### Background Sandbox Lifecycle
 
-The persistent sandbox pattern in `get_or_start_background_sandbox()` (agent_sandbox/app.py):
+Both sandboxes follow the same lifecycle pattern:
 
+**Agent SDK Sandbox** (`get_or_start_background_sandbox()`):
 1. Checks for existing sandbox in global `SANDBOX` and `SERVICE_URL` variables
-2. Creates sandbox with `modal.Sandbox.create()` running uvicorn command
-3. Polls `sandbox.tunnels()` for up to 30 seconds to get encrypted port URL
-4. Calls `_wait_for_service()` to poll `/health_check` until 200 OK (60s timeout)
-5. Returns sandbox handle and service URL for proxying
+2. Creates sandbox with `modal.Sandbox.create()` running uvicorn on port 8001
+3. Mounts `svc-runner-8001-vol` at `/data`
+4. Polls `sandbox.tunnels()` for up to 30 seconds to get encrypted port URL
+5. Calls `_wait_for_service()` to poll `/health_check` until 200 OK
 
-The sandbox persists across multiple requests within the same Modal worker, avoiding cold starts.
+**CLI Sandbox** (`get_or_start_cli_sandbox()`):
+1. Checks for existing sandbox in global `CLI_SANDBOX` and `CLI_SERVICE_URL` variables
+2. Creates sandbox with `modal.Sandbox.create()` running uvicorn on port 8002
+3. Mounts `claude-cli-runner-vol` at `/data-cli`
+4. Polls `sandbox.tunnels()` for up to 30 seconds to get encrypted port URL
+5. Calls `_wait_for_service()` to poll `/health_check` until 200 OK
+
+Both sandboxes persist across multiple requests within the same Modal worker, avoiding cold starts.
 
 ### Permission Modes
 
 - `agent_sandbox/agents/loop.py`: Uses default permission mode (requires user approval for tools)
 - `agent_sandbox/controllers/controller.py`: Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
+- `agent_sandbox/controllers/cli_controller.py`: CLI runs with `--dangerously-skip-permissions` as non-root `claude` user
 
 When adding new endpoints or execution patterns, choose permission mode based on trust level and use case.
 

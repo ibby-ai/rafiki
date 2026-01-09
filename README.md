@@ -318,80 +318,96 @@ For more details, see [Modal's Getting Started Guide](https://modal.com/docs/gui
 ### Quick Overview
 
 ```
-                         ┌──────────────────────────────────────────────────────────────┐
-                         │                    Modal HTTP Gateway                         │
-User Request ───────────▶│                                                              │
-(+ Proxy Auth headers)   │  /query, /query_stream ────────▶ Background Sandbox Proxy    │
-                         │  /submit, /jobs/{id} ──────────▶ Job Queue / Status          │
-                         │  /claude_cli ──────────────────▶ Direct Function Call        │
-                         └──────────────┬───────────────────────────┬──────────────────┘
-                                        │                           │
-               ┌────────────────────────┘                           └────────────────────┐
-               │                                                                         │
-               ▼                                                                         ▼
-┌──────────────────────────────────────────┐      ┌────────────────────────────────────────────┐
-│   Background Sandbox (Agent SDK Image)   │      │     Claude CLI Function (CLI Image)        │
-│   ────────────────────────────────────   │      │   ──────────────────────────────────────   │
-│   FastAPI Controller on :8001            │      │   Short-lived Modal function               │
-│   Runs as: root in /root/app             │      │   Runs as: claude user (non-root)          │
-│                                          │      │   Working dir: /home/claude/app            │
-│   Claude Agent SDK ─── MCP Tools         │      │                                            │
-│          │                               │      │   Claude Code CLI subprocess               │
-│   ┌──────┴──────┐                        │      │   (supports --dangerously-skip-permissions)│
-│   │ /data vol   │  Session Store         │      │          │                                 │
-│   └─────────────┘  (Modal Dict)          │      │   ┌──────┴──────┐                          │
-└──────────────────────────────────────────┘      │   │ /data vol   │                          │
-                                                  │   └─────────────┘                          │
-                                                  └────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                            Modal App (test-sandbox)                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                         HTTP Gateway (web_app)                         │  │
+│  │                                                                        │  │
+│  │  /health              /query, /query_stream       /claude_cli/*        │  │
+│  │  /submit              /claude_cli (proxy)         /ralph/start         │  │
+│  │  /jobs/*                                          /ralph/{job_id}      │  │
+│  │  /service_info                                                         │  │
+│  └───────────────────────────┬────────────────────────────┬───────────────┘  │
+│                              │                            │                  │
+│              ┌───────────────┘                            └───────────────┐  │
+│              │                                                            │  │
+│              ▼                                                            ▼  │
+│  ┌───────────────────────────────────┐        ┌───────────────────────────────────┐
+│  │      Agent SDK Sandbox            │        │       CLI Sandbox                 │
+│  │      (svc-runner-8001)            │        │       (claude-cli-runner)         │
+│  │                                   │        │                                   │
+│  │  ┌─────────────────────────────┐  │        │  ┌─────────────────────────────┐  │
+│  │  │  controller.py :8001        │  │        │  │  cli_controller.py :8002    │  │
+│  │  │                             │  │        │  │                             │  │
+│  │  │  GET  /health_check         │  │        │  │  GET  /health_check         │  │
+│  │  │  POST /query                │  │        │  │  POST /execute              │  │
+│  │  │  POST /query_stream         │  │        │  │  POST /ralph/execute        │  │
+│  │  │  POST /claude_cli           │  │        │  │                             │  │
+│  │  └─────────────────────────────┘  │        │  └─────────────────────────────┘  │
+│  │                                   │        │                                   │
+│  │  Volume: svc-runner-8001-vol      │        │  Volume: claude-cli-runner-vol    │
+│  │  Mount:  /data                    │        │  Mount:  /data-cli                │
+│  │                                   │        │                                   │
+│  │  Image: _base_anthropic_sdk_image │        │  Image: _claude_cli_image         │
+│  │  (Claude Agent SDK)               │        │  (Claude Code CLI)                │
+│  └───────────────────────────────────┘        └───────────────────────────────────┘
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Detailed Architecture
 
-This project uses a **dual-image architecture** with separate containers for the Agent SDK and Claude CLI:
+This project uses a **dual-sandbox architecture** with separate long-lived sandboxes for the Agent SDK and Claude CLI:
 
 ```
                                  ┌─────────────────────────────────────────────────────────────────┐
                                  │                           Modal Cloud                           │
    ┌──────────────┐              │  ┌─────────────────────────────────────────────────────────┐   │
    │              │   HTTP POST  │  │              http_app (FastAPI Gateway)                 │   │
-   │    Client    │─────────────────▶  /query, /query_stream  │  /claude_cli                 │   │
+   │    Client    │─────────────────▶  /query, /query_stream  │  /claude_cli, /ralph/*       │   │
    │              │◀─ Proxy Auth ──│  /submit, /jobs/{id}     │                              │   │
    └──────────────┘              │  └────────────┬────────────┴────────────────┬─────────────┘   │
                                  │               │                             │                  │
                                  │     ┌─────────┴─────────┐         ┌─────────┴─────────┐       │
                                  │     │                   │         │                   │       │
-                                 │     ▼ proxy             │         ▼ .remote()         │       │
+                                 │     ▼ proxy to :8001    │         ▼ proxy to :8002    │       │
                                  │  ┌──────────────────────┴──┐   ┌──────────────────────┴──┐    │
-                                 │  │    Agent SDK Image      │   │    Claude CLI Image     │    │
-                                 │  │   (Background Sandbox)  │   │  (Short-lived Function) │    │
+                                 │  │    Agent SDK Sandbox    │   │     CLI Sandbox         │    │
+                                 │  │   (svc-runner-8001)     │   │  (claude-cli-runner)    │    │
                                  │  │  ────────────────────   │   │  ────────────────────   │    │
                                  │  │                         │   │                         │    │
-                                 │  │  ┌───────────────────┐  │   │  User: claude (non-root)│    │
-                                 │  │  │ FastAPI :8001     │  │   │  Dir: /home/claude/app  │    │
-                                 │  │  │ (uvicorn)         │  │   │                         │    │
-                                 │  │  └─────────┬─────────┘  │   │  ┌───────────────────┐  │    │
-                                 │  │            │            │   │  │ Claude Code CLI   │  │    │
-                                 │  │  User: root             │   │  │ subprocess        │  │    │
-                                 │  │  Dir: /root/app         │   │  └─────────┬─────────┘  │    │
+                                 │  │  ┌───────────────────┐  │   │  ┌───────────────────┐  │    │
+                                 │  │  │ FastAPI :8001     │  │   │  │ FastAPI :8002     │  │    │
+                                 │  │  │ (uvicorn)         │  │   │  │ (uvicorn)         │  │    │
+                                 │  │  │ controller.py     │  │   │  │ cli_controller.py │  │    │
+                                 │  │  └─────────┬─────────┘  │   │  └─────────┬─────────┘  │    │
                                  │  │            │            │   │            │            │    │
-                                 │  │            ▼            │   │            │            │    │
-                                 │  │  ┌───────────────────┐  │   │            │            │    │
-                                 │  │  │ Claude Agent SDK  │  │   │            │            │    │
-                                 │  │  │ ┌─────┐ ┌───────┐ │  │   │            │            │    │
-                                 │  │  │ │ MCP │ │ Tools │ │  │   │            │            │    │
-                                 │  │  │ └─────┘ └───────┘ │  │   │            │            │    │
-                                 │  │  └───────────────────┘  │   │            │            │    │
+                                 │  │  User: root             │   │  User: claude (non-root)│    │
+                                 │  │  Dir: /root/app         │   │  Dir: /home/claude/app  │    │
                                  │  │            │            │   │            │            │    │
-                                 │  └────────────┼────────────┘   └────────────┼────────────┘    │
-                                 │               │                             │                  │
-                                 │               └──────────────┬──────────────┘                  │
-                                 │                              ▼                                 │
-                                 │               ┌──────────────────────────────┐                 │
-                                 │               │  Shared Resources            │                 │
-                                 │               │  • /data Volume (persistent) │                 │
-                                 │               │  • Modal Dicts (session/job) │                 │
-                                 │               └──────────────────────────────┘                 │
-                                 └────────────────────────────────────────────────────────────────┘
+                                 │  │            ▼            │   │            ▼            │    │
+                                 │  │  ┌───────────────────┐  │   │  ┌───────────────────┐  │    │
+                                 │  │  │ Claude Agent SDK  │  │   │  │ Claude Code CLI   │  │    │
+                                 │  │  │ ┌─────┐ ┌───────┐ │  │   │  │ (subprocess)      │  │    │
+                                 │  │  │ │ MCP │ │ Tools │ │  │   │  │ + Ralph loop      │  │    │
+                                 │  │  │ └─────┘ └───────┘ │  │   │  └───────────────────┘  │    │
+                                 │  │  └───────────────────┘  │   │                         │    │
+                                 │  │            │            │   │            │            │    │
+                                 │  │  ┌─────────┴─────────┐  │   │  ┌─────────┴─────────┐  │    │
+                                 │  │  │  /data volume     │  │   │  │ /data-cli volume  │  │    │
+                                 │  │  │  svc-runner-8001  │  │   │  │ claude-cli-runner │  │    │
+                                 │  │  │  -vol             │  │   │  │ -vol              │  │    │
+                                 │  │  └───────────────────┘  │   │  └───────────────────┘  │    │
+                                 │  └─────────────────────────┘   └─────────────────────────┘    │
+                                 │                                                               │
+                                 │               ┌──────────────────────────────┐                │
+                                 │               │  Shared Resources            │                │
+                                 │               │  • Modal Dicts (session/job) │                │
+                                 │               │  • Modal Queue (JOB_QUEUE)   │                │
+                                 │               └──────────────────────────────┘                │
+                                 └───────────────────────────────────────────────────────────────┘
 ```
 
 ### Understanding the Diagram
@@ -401,41 +417,56 @@ This project uses a **dual-image architecture** with separate containers for the
 | **Modal Cloud** | Fully managed infrastructure | You don't deploy or manage servers; Modal handles scaling, networking, and SSL |
 | **http_app (FastAPI Gateway)** | Lightweight HTTP entry point | Scales to zero when idle; handles routing without running the full agent |
 | **Proxy Auth** | API authentication | Secure production endpoints with `Modal-Key`/`Modal-Secret` token headers |
-| **Agent SDK Image** | Container for agent queries | Runs as root in `/root/app`; long-lived sandbox with FastAPI controller |
-| **Claude CLI Image** | Container for CLI requests | Runs as non-root `claude` user in `/home/claude/app`; short-lived function |
-| **run_claude_cli_remote** | Dedicated CLI function | Executes Claude Code CLI in isolated container with skip-permissions support |
+| **Agent SDK Sandbox (svc-runner-8001)** | Long-lived sandbox for agent queries | Runs as root; hosts Claude Agent SDK with MCP tools |
+| **CLI Sandbox (claude-cli-runner)** | Long-lived sandbox for CLI/Ralph | Runs as non-root `claude` user; required for `--dangerously-skip-permissions` |
+| **controller.py :8001** | Agent SDK controller | Handles `/query`, `/query_stream` for conversational AI |
+| **cli_controller.py :8002** | CLI controller | Handles `/execute` for CLI, `/ralph/execute` for autonomous loops |
 | **JOB_QUEUE (Modal Queue)** | Async job processing | Fire-and-forget workloads; long-running tasks processed by workers |
-| **Proxy connection** | Internal forwarding | Decouples the public API from the agent runtime; enables independent scaling |
-| **Long-lived Modal Sandbox** | Persistent agent environment | Stays warm for hours; eliminates cold-start delays on each request |
-| **FastAPI Controller** | Agent orchestration service | Manages Claude SDK client, tool permissions, and streaming responses |
+| **Proxy connections** | Internal forwarding | Decouples the public API from sandbox services; enables independent scaling |
 | **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
-| **/data vol (persist)** | Durable file storage | Files written here survive sandbox restarts; critical for stateful operations |
+| **Claude Code CLI + Ralph** | Code execution & autonomous loops | CLI subprocess for code tasks; Ralph for PRD-driven autonomous coding |
+| **/data volume** | Agent SDK storage | Files persist at `/data` for Agent SDK sandbox |
+| **/data-cli volume** | CLI/Ralph storage | Files persist at `/data-cli` for CLI sandbox; Ralph writes artifacts here |
 | **Modal Dicts (SESSION/JOB)** | Session & job state storage | Resume conversations; track async job status |
 
 ### How It Works
 
-1. **Background Service**: A long-lived `modal.Sandbox` runs a FastAPI microservice (`agent_sandbox.controllers.controller`) that handles agent queries
-2. **HTTP Endpoint**: `http_app` in `agent_sandbox.app` proxies requests to the background service
-3. **Volume Persistence**: Files written to `/data` are persisted across sandbox restarts
-4. **Low Latency**: The background service avoids cold-start delays while keeping the HTTP endpoint responsive
+1. **Dual Background Services**: Two long-lived `modal.Sandbox` instances run FastAPI microservices:
+   - **Agent SDK sandbox** (`controller.py` on :8001) handles conversational queries
+   - **CLI sandbox** (`cli_controller.py` on :8002) handles code execution and Ralph loops
+2. **HTTP Gateway**: `http_app` routes requests to the appropriate sandbox based on endpoint
+3. **Volume Persistence**: Each sandbox has its own persistent volume (`/data` and `/data-cli`)
+4. **Low Latency**: Both sandboxes stay warm, avoiding cold-start delays
 
 ### Key Modules
 
-- `agent_sandbox/app.py`: Defines the Modal `App`, persistent sandbox management, and HTTP endpoints
-- `agent_sandbox/controllers/controller.py`: FastAPI microservice running inside the sandbox with `/health_check`, `/query`, and `/query_stream` endpoints
+- `agent_sandbox/app.py`: Defines the Modal `App`, dual sandbox management, and HTTP gateway endpoints
+- `agent_sandbox/controllers/controller.py`: Agent SDK microservice (port 8001) with `/query`, `/query_stream`
+- `agent_sandbox/controllers/cli_controller.py`: CLI microservice (port 8002) with `/execute`, `/ralph/execute`
+- `agent_sandbox/ralph/`: Ralph autonomous coding loop module (PRD-driven task execution)
 - `agent_sandbox/agents/loop.py`: Standalone agent runner (used by `run_agent_remote` for one-off executions)
 - `agent_sandbox/config/settings.py`: Pydantic Settings for configuration and Modal secrets management
-- `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations (WebSearch, WebFetch, Read, Write). Obtained from [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python)
+- `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations
 - `agent_sandbox/prompts/prompts.py`: System prompt and default question
 
 ### Persistent Storage
 
-**Important**: Files must be written to `/data` to persist across sandbox restarts:
+Each sandbox has its own persistent volume:
+
+| Sandbox | Volume Mount | Use Case |
+|---------|--------------|----------|
+| Agent SDK | `/data` | Agent queries, MCP tool outputs |
+| CLI | `/data-cli` | Claude CLI jobs, Ralph workspaces |
+
+**Important**: Files must be written to the correct volume to persist:
 
 ```python
-# ✅ Persisted
+# Agent SDK sandbox - use /data
 with open("/data/myfile.py", "w") as f:
     f.write("code here")
+
+# CLI sandbox - use /data-cli
+# Ralph writes to /data-cli/jobs/{job_id}/
 
 # ❌ Not persisted (lost on restart)
 with open("/tmp/myfile.py", "w") as f:
@@ -446,13 +477,12 @@ The system prompt automatically instructs the agent to use `/data` for file oper
 
 ### Claude Code CLI: Running Code
 
-Claude Code CLI runs in a dedicated Modal function as a non-root user. To create files
-and execute code, use a job workspace and allow the required tools:
+Claude Code CLI runs in a dedicated long-lived sandbox (`claude-cli-runner`) as a non-root user. To create files and execute code:
 
-- **Pass `--job-id`** so files land under `/data/jobs/<job_id>/` and persist.
+- **Pass `job_id`** so files land under `/data-cli/jobs/<job_id>/` and persist.
 - **Allow tools**: `Write` to create files and `Bash` to execute them.
 - **Increase timeouts** for longer tasks (default CLI timeout is 120 seconds).
-- **Default skip-permissions**: `run_claude_cli_remote` defaults to `--dangerously-skip-permissions`.
+- **Non-root execution**: The CLI runs as the `claude` user, required for `--dangerously-skip-permissions`.
 - **CLI output capture**: `modal run` only writes return values when they are strings/bytes. Use `--return-stdout` with `--write-result` (JSON fallback is returned if stdout/stderr is empty).
 - **If output is empty**: Check the Modal run logs and confirm `anthropic-secret` is configured with `ANTHROPIC_API_KEY` so the Claude CLI can authenticate.
 
@@ -488,7 +518,7 @@ modal run -m agent_sandbox.app::run_claude_cli_remote \
 ```
 
 Without `--job-id`, files are written under `/home/claude/app` and are not persisted.
-The Claude CLI container mounts the shared `/data` Modal volume for persisted artifacts.
+The CLI sandbox mounts `claude-cli-runner-vol` at `/data-cli` for persisted artifacts.
 
 For long-running runs, use async submission and polling:
 
