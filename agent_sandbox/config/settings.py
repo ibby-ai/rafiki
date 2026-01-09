@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     )
     persist_vol_name: str = "svc-runner-8001-vol"
 
+    # Claude CLI sandbox + volume configuration
+    claude_cli_sandbox_name: str = "claude-cli-runner"
+    claude_cli_persist_vol_name: str = "claude-cli-runner-vol"
+    claude_cli_fs_root: str = Field(
+        default="/data-cli",
+        description=(
+            "Root directory for Claude CLI workspace files. "
+            "This is the Modal Volume mount point used by Claude CLI sandboxes. "
+            "Default: /data-cli."
+        ),
+    )
+
     # Custom domains for production deployments
     custom_domains: list[str] | None = Field(
         default=None,

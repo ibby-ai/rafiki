@@ -84,6 +84,9 @@ Override or remove `.env` values to return to Modal defaults.
 | `sandbox_name` | `"svc-runner-8001"` | Unique identifier for the sandbox instance |
 | `service_port` | `8001` | Internal port for the FastAPI controller |
 | `persist_vol_name` | `"svc-runner-8001-vol"` | Name of the Modal Volume for persistent storage |
+| `claude_cli_sandbox_name` | `"claude-cli-runner"` | Base name for Claude CLI sandboxes |
+| `claude_cli_persist_vol_name` | `"claude-cli-runner-vol"` | Name of the Modal Volume for Claude CLI workspaces |
+| `claude_cli_fs_root` | `"/data-cli"` | Mount path for the Claude CLI volume inside sandboxes |
 
 **When to change**: Only if running multiple independent sandbox instances. Keep defaults for single-instance deployments.
 

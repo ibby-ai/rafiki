@@ -30,10 +30,10 @@ import json
 import logging
 import mimetypes
 import re
-import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from urllib.parse import quote
 
@@ -63,14 +63,11 @@ from agent_sandbox.jobs import (
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.ralph.feedback import validate_feedback_commands
-from agent_sandbox.ralph.loop import run_ralph_loop
 from agent_sandbox.ralph.schemas import (
-    Prd,
     RalphLoopResult,
     RalphStartRequest,
     RalphStartResponse,
     RalphStatusResponse,
-    WorkspaceSource,
 )
 from agent_sandbox.ralph.status import read_status
 from agent_sandbox.schemas import (
@@ -91,7 +88,6 @@ from agent_sandbox.utils.cli import (
     CLAUDE_CLI_APP_ROOT,
     CLAUDE_CLI_USER,
     claude_cli_env,
-    demote_to_claude,
     maybe_chown_for_claude,
     require_claude_cli_auth,
 )
@@ -171,7 +167,8 @@ def _claude_cli_image() -> modal.Image:
         )
         .env(
             {
-                "AGENT_FS_ROOT": "/data",
+                "AGENT_FS_ROOT": _settings.claude_cli_fs_root,
+                "CLAUDE_CLI_FS_ROOT": _settings.claude_cli_fs_root,
                 "PATH": (
                     "/root/.local/bin:/root/.claude/bin:"
                     "/home/claude/.local/bin:/home/claude/.claude/bin:"
@@ -229,13 +226,18 @@ def _write_claude_cli_result(
     write_result_path: str | None,
     payload: dict,
     job_root: Path | None,
+    job_id: str | None = None,
 ) -> None:
     if not write_result_path:
         return
     path = Path(write_result_path)
     if not path.is_absolute():
-        base = job_root if job_root is not None else Path(_settings.agent_fs_root)
-        path = base / path
+        job_token = job_id or (job_root.name if job_root is not None else None)
+        if job_token and path.parts[:2] == ("jobs", job_token):
+            path = Path(_settings.claude_cli_fs_root) / path
+        else:
+            base = job_root if job_root is not None else Path(_settings.claude_cli_fs_root)
+            path = base / path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     maybe_chown_for_claude(path)
@@ -320,6 +322,60 @@ def _function_runtime_kwargs(
     return kwargs
 
 
+def _cli_sandbox_timeout(timeout_seconds: int | None) -> int:
+    """Return a sandbox timeout with a small buffer over CLI execution."""
+    if timeout_seconds is None:
+        return _settings.sandbox_timeout
+    return min(_settings.sandbox_timeout, timeout_seconds + 300)
+
+
+def _build_cli_sandbox_name(suffix: str | None) -> str:
+    base = _settings.claude_cli_sandbox_name
+    token = suffix or uuid.uuid4().hex[:8]
+    name = f"{base}-{token}"
+    return name[:63]
+
+
+def _create_claude_cli_sandbox(
+    *,
+    job_id: str | None = None,
+    timeout_seconds: int | None = None,
+) -> modal.Sandbox:
+    """Create a dedicated sandbox for Claude CLI execution."""
+    kwargs: dict[str, object] = {
+        "app": app,
+        "image": claude_cli_image,
+        "secrets": agent_sdk_secrets,
+        "workdir": str(CLAUDE_CLI_APP_ROOT),
+        "volumes": {_settings.claude_cli_fs_root: _get_claude_cli_volume()},
+        "timeout": _cli_sandbox_timeout(timeout_seconds),
+        "idle_timeout": _settings.sandbox_idle_timeout,
+        "verbose": True,
+    }
+    kwargs.update(_sandbox_resource_kwargs())
+
+    name = _build_cli_sandbox_name(job_id) if _settings.claude_cli_sandbox_name else None
+    if name:
+        kwargs["name"] = name
+
+    try:
+        sb = modal.Sandbox.create(**kwargs)
+    except modal_exc.AlreadyExistsError:
+        if "name" not in kwargs:
+            raise
+        kwargs["name"] = _build_cli_sandbox_name(uuid.uuid4().hex[:12])
+        sb = modal.Sandbox.create(**kwargs)
+
+    try:
+        tags = {"role": "claude-cli", "app": "test-sandbox"}
+        if job_id:
+            tags["job_id"] = job_id
+        sb.set_tags(tags)
+    except Exception:
+        _logger.debug("Failed to set Claude CLI sandbox tags", exc_info=True)
+    return sb
+
+
 def _maybe_concurrent():
     """Return a concurrency decorator when configured, otherwise no-op."""
     if _settings.concurrent_max_inputs is None and _settings.concurrent_target_inputs is None:
@@ -374,6 +430,14 @@ def _get_persist_volume() -> modal.Volume:
     return modal.Volume.from_name(_settings.persist_vol_name, **kwargs)
 
 
+def _get_claude_cli_volume() -> modal.Volume:
+    """Return the configured persistent volume handle for Claude CLI."""
+    kwargs: dict[str, object] = {"create_if_missing": True}
+    if _settings.persist_vol_version is not None:
+        kwargs["version"] = _settings.persist_vol_version
+    return modal.Volume.from_name(_settings.claude_cli_persist_vol_name, **kwargs)
+
+
 def _reload_persist_volume(max_retries: int = 3) -> None:
     """Reload the persistent volume to see latest committed writes.
 
@@ -412,6 +476,37 @@ def _commit_persist_volume() -> None:
         logging.getLogger(__name__).warning("Failed to commit persistent volume: %s", message)
     except Exception:
         logging.getLogger(__name__).warning("Failed to commit persistent volume", exc_info=True)
+
+
+def _reload_claude_cli_volume(max_retries: int = 3) -> None:
+    """Reload the Claude CLI volume to see latest committed writes."""
+    logger = logging.getLogger(__name__)
+    for attempt in range(max_retries):
+        try:
+            _get_claude_cli_volume().reload()
+            return
+        except Exception:
+            if attempt == max_retries - 1:
+                logger.warning(
+                    "Failed to reload Claude CLI volume after %d attempts",
+                    max_retries,
+                    exc_info=True,
+                )
+                return
+            time.sleep(0.5 * (attempt + 1))
+
+
+def _commit_claude_cli_volume() -> None:
+    """Commit pending writes to the Claude CLI volume."""
+    try:
+        _get_claude_cli_volume().commit()
+    except RuntimeError as exc:
+        message = str(exc)
+        if "commit() can only be called" in message:
+            return
+        logging.getLogger(__name__).warning("Failed to commit Claude CLI volume: %s", message)
+    except Exception:
+        logging.getLogger(__name__).warning("Failed to commit Claude CLI volume", exc_info=True)
 
 
 def _job_artifacts_root(job_id: str) -> Path:
@@ -947,10 +1042,18 @@ claude_cli_image = _claude_cli_image()
 agent_sdk_secrets = get_modal_secrets()
 
 
+def _http_app_volumes() -> dict[str, modal.Volume]:
+    """Mount agent and CLI volumes for HTTP endpoints that access artifacts."""
+    volumes: dict[str, modal.Volume] = {_settings.agent_fs_root: _get_persist_volume()}
+    if _settings.claude_cli_fs_root != _settings.agent_fs_root:
+        volumes[_settings.claude_cli_fs_root] = _get_claude_cli_volume()
+    return volumes
+
+
 @app.function(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
-    volumes={_settings.agent_fs_root: _get_persist_volume()},
+    volumes=_http_app_volumes(),
     **_function_runtime_kwargs(include_retries=False),
 )
 @_maybe_concurrent()
@@ -1303,8 +1406,8 @@ async def get_ralph_status(job_id: str, call_id: str) -> RalphStatusResponse:
     job_id = _normalize_job_id_or_400(job_id)
 
     # Try to read live status from workspace first
-    workspace = Path(f"/data/jobs/{job_id}")
-    _reload_persist_volume()
+    workspace = Path(_settings.claude_cli_fs_root) / "jobs" / job_id
+    _reload_claude_cli_volume()
     live_status = read_status(workspace)
 
     if live_status and live_status.get("status") == "running":
@@ -1805,7 +1908,6 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
 @app.function(
     image=claude_cli_image,
     secrets=agent_sdk_secrets,
-    volumes={"/data": _get_persist_volume()},
     timeout=60 * 60 * 24,
     **_function_runtime_kwargs(include_autoscale=False),
 )
@@ -1822,141 +1924,98 @@ def run_claude_cli_remote(
     probe: str | None = None,
     write_result_path: str | None = None,
 ) -> dict | str:
-    """Run Claude Code CLI in a dedicated image and return the response."""
+    """Run Claude Code CLI in a dedicated sandbox and return the response."""
     tools_list = None
     if allowed_tools:
         tools_list = [tool.strip() for tool in allowed_tools.split(",") if tool.strip()]
 
-    job_root = None
     normalized_job_id = normalize_job_id(job_id)
-    if normalized_job_id:
-        job_root = job_workspace_root(_settings.agent_fs_root, normalized_job_id)
-        job_root.mkdir(parents=True, exist_ok=True)
-        maybe_chown_for_claude(job_root)
-
-    cmd = ["claude", "-p", prompt, "--output-format", output_format]
-    if dangerously_skip_permissions:
-        cmd.append("--dangerously-skip-permissions")
-    if tools_list:
-        cmd.extend(["--allowedTools", ",".join(tools_list)])
-    if max_turns is not None:
-        cmd.extend(["--max-turns", str(max_turns)])
-
-    probe_cmd: list[str] | None = None
-    if probe:
-        probe_value = probe.strip().lower()
-        if probe_value == "version":
-            probe_cmd = ["claude", "--version"]
-        elif probe_value in {"help", "-h", "--help"}:
-            probe_cmd = ["claude", "--help"]
-        elif probe_value == "path":
-            probe_cmd = ["/bin/sh", "-lc", "command -v claude && ls -l $(command -v claude)"]
-        else:
-            raise ValueError("probe must be one of: version, help, path")
-
     env = claude_cli_env()
     require_claude_cli_auth(env)
 
-    cwd = str(job_root) if job_root is not None else str(CLAUDE_CLI_APP_ROOT)
+    runner_cmd = [
+        "python",
+        "-m",
+        "agent_sandbox.sandbox.cli_runner",
+        "--prompt",
+        prompt,
+        "--output-format",
+        output_format,
+        "--timeout-seconds",
+        str(timeout_seconds),
+    ]
+    if dangerously_skip_permissions:
+        runner_cmd.append("--dangerously-skip-permissions")
+    if tools_list:
+        runner_cmd.extend(["--allowed-tools", ",".join(tools_list)])
+    if max_turns is not None:
+        runner_cmd.extend(["--max-turns", str(max_turns)])
+    if normalized_job_id:
+        runner_cmd.extend(["--job-id", normalized_job_id])
+    if debug:
+        runner_cmd.append("--debug")
+    if probe:
+        runner_cmd.extend(["--probe", probe])
+    if write_result_path:
+        runner_cmd.extend(["--write-result-path", write_result_path])
+
     _logger.info(
         "claude_cli.invoke",
         extra={
-            "cmd": probe_cmd or cmd,
-            "cwd": cwd,
-            "path": env.get("PATH", ""),
-            "home": env.get("HOME", ""),
-            "user": env.get("USER", ""),
-            "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
+            "cmd": runner_cmd,
+            "job_id": normalized_job_id,
             "output_format": output_format,
-            "probe": probe_cmd is not None,
+            "probe": probe is not None,
         },
     )
 
+    sb = _create_claude_cli_sandbox(job_id=normalized_job_id, timeout_seconds=timeout_seconds)
     try:
-        result = subprocess.run(
-            probe_cmd or cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            preexec_fn=demote_to_claude(),
-        )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        _logger.info(
-            "claude_cli.complete",
-            extra={
-                "exit_code": result.returncode,
-                "stdout_len": len(result.stdout or ""),
-                "stderr_len": len(result.stderr or ""),
-                "probe": probe_cmd is not None,
-            },
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "Claude CLI failed with exit code "
-                f"{result.returncode}: {stderr or stdout or 'no output'}"
-            )
-        if probe_cmd is not None:
-            payload = {
-                "ok": True,
-                "result": None,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode,
-                "cmd": probe_cmd,
-                "cwd": cwd,
-                "path": env.get("PATH", ""),
-                "home": env.get("HOME", ""),
-                "user": env.get("USER", ""),
-                "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
-                "probe": True,
-            }
-            _write_claude_cli_result(write_result_path, payload, job_root)
-            if return_stdout:
-                return json.dumps(payload)
-            return payload
-
-        parsed = stdout
-        if output_format == "json":
-            try:
-                if stdout:
-                    parsed = json.loads(stdout)
-                elif stderr:
-                    parsed = json.loads(stderr)
-                else:
-                    parsed = None
-            except json.JSONDecodeError as exc:
-                raise RuntimeError("Failed to parse Claude CLI JSON output") from exc
-        payload = {
-            "ok": True,
-            "result": parsed,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.returncode,
-        }
-        if debug:
-            payload.update(
-                {
-                    "cmd": probe_cmd or cmd,
-                    "cwd": cwd,
-                    "path": env.get("PATH", ""),
-                    "home": env.get("HOME", ""),
-                    "user": env.get("USER", ""),
-                    "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
-                    "probe": probe_cmd is not None,
-                }
-            )
-        _write_claude_cli_result(write_result_path, payload, job_root)
-        if return_stdout:
-            if stdout or stderr:
-                return stdout or stderr
-            return json.dumps(payload)
-        return payload
+        exec_timeout = min(_cli_sandbox_timeout(timeout_seconds), timeout_seconds + 60)
+        proc = sb.exec(*runner_cmd, timeout=exec_timeout)
+        stdout_raw = proc.stdout.read()
+        stderr_raw = proc.stderr.read()
+        exit_code = proc.wait()
     finally:
-        _commit_persist_volume()
+        sb.terminate()
+        try:
+            sb.wait(raise_on_termination=False)
+        except Exception:
+            _logger.debug("Claude CLI sandbox wait failed", exc_info=True)
+
+    stdout_text = (
+        stdout_raw.decode("utf-8", errors="replace")
+        if isinstance(stdout_raw, bytes)
+        else (stdout_raw or "")
+    )
+    stderr_text = (
+        stderr_raw.decode("utf-8", errors="replace")
+        if isinstance(stderr_raw, bytes)
+        else (stderr_raw or "")
+    )
+    stdout_text = stdout_text.strip()
+    stderr_text = stderr_text.strip()
+
+    payload: dict = {}
+    if stdout_text:
+        try:
+            payload = json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Failed to parse Claude CLI sandbox output") from exc
+
+    if exit_code != 0 or (payload and payload.get("ok") is False):
+        error = payload.get("error") if payload else None
+        message = error or stderr_text or stdout_text or "Claude CLI sandbox run failed"
+        raise RuntimeError(message)
+
+    if return_stdout:
+        cli_stdout = (payload.get("stdout") or "").strip()
+        cli_stderr = (payload.get("stderr") or "").strip()
+        if cli_stdout or cli_stderr:
+            return cli_stdout or cli_stderr
+        return stdout_text or json.dumps(payload)
+
+    return payload
 
 
 # =============================================================================
@@ -1964,13 +2023,9 @@ def run_claude_cli_remote(
 # =============================================================================
 
 
-persist_volume = _get_persist_volume()
-
-
 @app.function(
     image=claude_cli_image,
-    secrets=[modal.Secret.from_name("anthropic-secret")],
-    volumes={"/data": persist_volume},
+    secrets=agent_sdk_secrets,
     timeout=86400,  # 24 hours
 )
 def run_ralph_remote(
@@ -1986,51 +2041,85 @@ def run_ralph_remote(
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
 ) -> dict:
-    """Run Ralph autonomous coding loop as Modal function.
+    """Run Ralph autonomous coding loop inside a dedicated Claude CLI sandbox."""
+    normalized_job_id = normalize_job_id(job_id)
+    if not normalized_job_id:
+        raise ValueError("job_id must be a valid UUID")
 
-    This function executes the Ralph loop inside a Modal container. It is designed
-    to be spawned asynchronously via run_ralph_remote.spawn() and polled for results.
+    env = claude_cli_env()
+    require_claude_cli_auth(env)
 
-    Args:
-        job_id: Unique job identifier for workspace and tracking.
-        prd_json: JSON-serialized PRD object.
-        workspace_source_json: JSON-serialized WorkspaceSource object.
-        prompt_template: Custom prompt template (uses default if None).
-        max_iterations: Maximum iterations before stopping.
-        timeout_per_iteration: CLI timeout per iteration in seconds.
-        allowed_tools: Comma-separated list of allowed CLI tools.
-        feedback_commands: Comma-separated list of feedback commands to run.
-        feedback_timeout: Timeout for feedback commands.
-        auto_commit: Whether to auto-commit after each successful iteration.
-        max_consecutive_failures: Stop after this many consecutive CLI failures.
+    tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()]
+    feedback_list = [c.strip() for c in feedback_commands.split(",") if c.strip()]
 
-    Returns:
-        Dict representation of RalphLoopResult.
-    """
-    workspace = Path(f"/data/jobs/{job_id}")
+    runner_cmd = [
+        "python",
+        "-m",
+        "agent_sandbox.ralph.runner",
+        "--job-id",
+        normalized_job_id,
+        "--prd-json",
+        prd_json,
+        "--workspace-source-json",
+        workspace_source_json,
+        "--max-iterations",
+        str(max_iterations),
+        "--timeout-per-iteration",
+        str(timeout_per_iteration),
+        "--feedback-timeout",
+        str(feedback_timeout),
+        "--max-consecutive-failures",
+        str(max_consecutive_failures),
+    ]
+    if prompt_template:
+        runner_cmd.extend(["--prompt-template", prompt_template])
+    if tools_list:
+        runner_cmd.extend(["--allowed-tools", ",".join(tools_list)])
+    if feedback_list:
+        runner_cmd.extend(["--feedback-commands", ",".join(feedback_list)])
+    if auto_commit:
+        runner_cmd.append("--auto-commit")
+    else:
+        runner_cmd.append("--no-auto-commit")
 
-    prd = Prd.model_validate_json(prd_json)
-    workspace_source = WorkspaceSource.model_validate_json(workspace_source_json)
-    tools = [t.strip() for t in allowed_tools.split(",") if t.strip()]
-    feedback = [c.strip() for c in feedback_commands.split(",") if c.strip()]
+    estimated_runtime = max_iterations * timeout_per_iteration
+    exec_timeout = min(_settings.sandbox_timeout, estimated_runtime + 300)
 
-    result = run_ralph_loop(
-        job_id=job_id,
-        prd=prd,
-        workspace=workspace,
-        workspace_source=workspace_source,
-        prompt_template=prompt_template,
-        max_iterations=max_iterations,
-        timeout_per_iteration=timeout_per_iteration,
-        allowed_tools=tools,
-        feedback_commands=feedback,
-        feedback_timeout=feedback_timeout,
-        auto_commit=auto_commit,
-        max_consecutive_failures=max_consecutive_failures,
+    sb = _create_claude_cli_sandbox(job_id=normalized_job_id, timeout_seconds=estimated_runtime)
+    try:
+        proc = sb.exec(*runner_cmd, timeout=exec_timeout)
+        stdout_raw = proc.stdout.read()
+        stderr_raw = proc.stderr.read()
+        exit_code = proc.wait()
+    finally:
+        sb.terminate()
+        try:
+            sb.wait(raise_on_termination=False)
+        except Exception:
+            _logger.debug("Ralph sandbox wait failed", exc_info=True)
+
+    stdout_text = (
+        stdout_raw.decode("utf-8", errors="replace")
+        if isinstance(stdout_raw, bytes)
+        else (stdout_raw or "")
     )
+    stderr_text = (
+        stderr_raw.decode("utf-8", errors="replace")
+        if isinstance(stderr_raw, bytes)
+        else (stderr_raw or "")
+    )
+    stdout_text = stdout_text.strip()
+    stderr_text = stderr_text.strip()
 
-    _commit_persist_volume()
-    return result.model_dump()
+    if exit_code != 0:
+        message = stderr_text or stdout_text or "Ralph sandbox run failed"
+        raise RuntimeError(message)
+
+    try:
+        payload = json.loads(stdout_text) if stdout_text else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse Ralph sandbox output") from exc
+    return payload
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)

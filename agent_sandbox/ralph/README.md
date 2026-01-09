@@ -86,7 +86,7 @@ prd = Prd(
 result = run_ralph_loop(
     job_id="job-12345",
     prd=prd,
-    workspace=Path("/data/jobs/job-12345"),
+    workspace=Path("/data-cli/jobs/job-12345"),
     workspace_source=WorkspaceSource(type="empty"),
     max_iterations=10,
     timeout_per_iteration=300,
