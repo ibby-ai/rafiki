@@ -293,6 +293,11 @@ The `/claude_cli` endpoint runs the Claude Code CLI via subprocess. Important co
 
 - **Non-root execution**: The CLI is executed as the `claude` user so `--dangerously-skip-permissions` can be used when requested. Use with care.
 - **Default skip-permissions**: `run_claude_cli_remote` defaults to `--dangerously-skip-permissions` to avoid non-interactive approval prompts. Use `--allowedTools` to scope access when possible.
+
+> **Security Note**: The `dangerously_skip_permissions=True` default is intentional for non-interactive
+> task execution. This bypasses tool approval prompts, allowing the CLI to execute tools autonomously.
+> Always scope tool access via `--allowedTools` when possible to limit what the CLI can do.
+> For example, use `--allowedTools "Read"` for read-only operations.
 - **Non-interactive mode**: The `-p` flag enables "print mode" which is non-interactive. Combined with `stdin=subprocess.DEVNULL`, this ensures the CLI won't hang waiting for user input.
 - **Volume operations**: `reload()` and `commit()` on Modal Volumes can only be called from within a Modal function context, not from a sandbox subprocess. The code handles these errors gracefully.
 - **Long-running CLI runs**: `run_claude_cli_remote` is configured with a 24-hour Modal function timeout. Set `--timeout-seconds` to control the CLI subprocess timeout.
@@ -312,6 +317,9 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/subm
 
 # Poll for completion
 curl -X GET 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/<call_id>'
+
+# Cancel a running job
+curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/<call_id>'
 ```
 
 Example polling loop:
@@ -332,6 +340,7 @@ Status polling behavior:
 
 - `202` + `{"status":"running"}` while the run is still executing
 - `200` + `{"status":"complete","result":{...}}` when finished
+- `200` + `{"status":"cancelled"}` if the run was cancelled via DELETE
 - `410` + `{"status":"expired"}` if the result TTL has passed
 - `500` + `{"status":"failed","error":"..."}` on execution errors
 

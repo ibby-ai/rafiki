@@ -22,11 +22,8 @@ Important:
 
 import json
 import logging
-import os
-import pwd
 import subprocess
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -56,16 +53,18 @@ from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import ClaudeCliRequest, QueryBody
 from agent_sandbox.schemas.responses import ClaudeCliResponse, ErrorResponse, QueryResponse
 from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+from agent_sandbox.utils.cli import (
+    CLAUDE_CLI_HOME,
+    claude_cli_env,
+    demote_to_claude,
+    maybe_chown_for_claude,
+    require_claude_cli_auth,
+)
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
 _settings = get_settings()
 _logger = logging.getLogger(__name__)
-
-# Claude CLI runs as a non-root user to allow --dangerously-skip-permissions.
-_CLAUDE_CLI_USER = "claude"
-_CLAUDE_CLI_HOME = Path("/home/claude")
-_CLAUDE_CLI_PATH = f"{_CLAUDE_CLI_HOME}/.local/bin:{_CLAUDE_CLI_HOME}/.claude/bin"
 
 # Tracks the last time we committed the persistent volume. Used to enforce
 # minimum intervals between commits to avoid excessive I/O overhead.
@@ -73,57 +72,6 @@ _CLAUDE_CLI_PATH = f"{_CLAUDE_CLI_HOME}/.local/bin:{_CLAUDE_CLI_HOME}/.claude/bi
 _LAST_VOLUME_COMMIT_TS: float | None = None
 SESSION_STORE = modal.Dict.from_name(_settings.session_store_name, create_if_missing=True)
 SESSION_CACHE: dict[str, str] = {}
-
-
-def _claude_cli_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["HOME"] = str(_CLAUDE_CLI_HOME)
-    env["USER"] = _CLAUDE_CLI_USER
-    env["PATH"] = f"{_CLAUDE_CLI_PATH}:{env.get('PATH', '')}"
-    return env
-
-
-def _require_claude_cli_auth(env: dict[str, str]) -> None:
-    """Ensure Claude CLI has credentials available."""
-    if env.get("ANTHROPIC_API_KEY"):
-        return
-    raise RuntimeError(
-        "ANTHROPIC_API_KEY is missing. Configure the 'anthropic-secret' "
-        "Modal secret so Claude CLI can authenticate."
-    )
-
-
-def _claude_cli_ids() -> tuple[int, int]:
-    try:
-        entry = pwd.getpwnam(_CLAUDE_CLI_USER)
-    except KeyError as exc:
-        raise RuntimeError("Claude CLI user not found; rebuild the image to create it.") from exc
-    return entry.pw_uid, entry.pw_gid
-
-
-def _demote_to_claude() -> Callable[[], None]:
-    uid, gid = _claude_cli_ids()
-
-    def _inner() -> None:
-        os.setgid(gid)
-        if hasattr(os, "setgroups"):
-            os.setgroups([gid])
-        os.setuid(uid)
-
-    return _inner
-
-
-def _maybe_chown_for_claude(path: Path) -> None:
-    try:
-        uid, gid = _claude_cli_ids()
-    except RuntimeError:
-        _logger.warning("Claude CLI user missing; skipping workspace chown")
-        return
-    try:
-        os.chown(path, uid, gid)
-        path.chmod(0o775)
-    except PermissionError:
-        _logger.warning("Unable to chown workspace for Claude CLI user", exc_info=True)
 
 
 def _require_connect_token(request: Request) -> None:
@@ -377,7 +325,7 @@ def _ensure_job_workspace(job_id: str | None) -> Path | None:
         return None
     root = _job_workspace(normalized)
     root.mkdir(parents=True, exist_ok=True)
-    _maybe_chown_for_claude(root)
+    maybe_chown_for_claude(root)
     return root
 
 
@@ -699,17 +647,17 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
         cmd.extend(["--max-turns", str(body.max_turns)])
 
     def _run():
-        env = _claude_cli_env()
-        _require_claude_cli_auth(env)
+        env = claude_cli_env()
+        require_claude_cli_auth(env)
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=body.timeout_seconds,
-            cwd=str(job_root) if job_root is not None else str(_CLAUDE_CLI_HOME),
+            cwd=str(job_root) if job_root is not None else str(CLAUDE_CLI_HOME),
             stdin=subprocess.DEVNULL,  # Prevent CLI from waiting on stdin
             env=env,
-            preexec_fn=_demote_to_claude(),
+            preexec_fn=demote_to_claude(),
         )
 
     try:

@@ -29,8 +29,6 @@ import inspect
 import json
 import logging
 import mimetypes
-import os
-import pwd
 import re
 import subprocess
 import time
@@ -66,6 +64,7 @@ from agent_sandbox.jobs import (
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.schemas import (
     ArtifactListResponse,
+    ClaudeCliCancelResponse,
     ClaudeCliPollResponse,
     ClaudeCliRequest,
     ClaudeCliResponse,
@@ -77,15 +76,18 @@ from agent_sandbox.schemas import (
 from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
 from agent_sandbox.schemas.responses import ClaudeCliSubmitResponse
 from agent_sandbox.services.webhooks import build_headers, build_webhook_payload, serialize_payload
+from agent_sandbox.utils.cli import (
+    CLAUDE_CLI_APP_ROOT,
+    CLAUDE_CLI_USER,
+    claude_cli_env,
+    demote_to_claude,
+    maybe_chown_for_claude,
+    require_claude_cli_auth,
+)
 
 app = modal.App("test-sandbox")
 _settings = Settings()
 _logger = logging.getLogger(__name__)
-
-_CLAUDE_CLI_USER = "claude"
-_CLAUDE_CLI_HOME = Path("/home/claude")
-_CLAUDE_CLI_PATH = f"{_CLAUDE_CLI_HOME}/.local/bin:{_CLAUDE_CLI_HOME}/.claude/bin"
-_CLAUDE_CLI_APP_ROOT = _CLAUDE_CLI_HOME / "app"
 
 web_app = FastAPI()
 
@@ -166,16 +168,16 @@ def _claude_cli_image() -> modal.Image:
                 ),
             }
         )
-        .workdir(str(_CLAUDE_CLI_APP_ROOT))
+        .workdir(str(CLAUDE_CLI_APP_ROOT))
         .add_local_dir(
             ".",
-            remote_path=str(_CLAUDE_CLI_APP_ROOT),
+            remote_path=str(CLAUDE_CLI_APP_ROOT),
             copy=True,
             ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
         )
         .run_commands(
-            f"chown -R {_CLAUDE_CLI_USER}:{_CLAUDE_CLI_USER} {_CLAUDE_CLI_APP_ROOT}",
-            f"cd {_CLAUDE_CLI_APP_ROOT} && uv pip install -e . --system --no-cache",
+            f"chown -R {CLAUDE_CLI_USER}:{CLAUDE_CLI_USER} {CLAUDE_CLI_APP_ROOT}",
+            f"cd {CLAUDE_CLI_APP_ROOT} && uv pip install -e . --system --no-cache",
         )
     )
 
@@ -203,14 +205,6 @@ def _autoscale_kwargs() -> dict[str, int]:
     return kwargs
 
 
-def _claude_cli_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["HOME"] = str(_CLAUDE_CLI_HOME)
-    env["USER"] = _CLAUDE_CLI_USER
-    env["PATH"] = f"{_CLAUDE_CLI_PATH}:{env.get('PATH', '')}"
-    return env
-
-
 def _function_call_id(call: object) -> str | None:
     """Return a stable call identifier for Modal function calls."""
     for attr in ("object_id", "call_id", "id"):
@@ -218,49 +212,6 @@ def _function_call_id(call: object) -> str | None:
         if value:
             return str(value)
     return None
-
-
-def _require_claude_cli_auth(env: dict[str, str]) -> None:
-    """Ensure Claude CLI has credentials available."""
-    if env.get("ANTHROPIC_API_KEY"):
-        return
-    raise RuntimeError(
-        "ANTHROPIC_API_KEY is missing. Configure the 'anthropic-secret' "
-        "Modal secret so Claude CLI can authenticate."
-    )
-
-
-def _claude_cli_ids() -> tuple[int, int]:
-    try:
-        entry = pwd.getpwnam(_CLAUDE_CLI_USER)
-    except KeyError as exc:
-        raise RuntimeError("Claude CLI user not found; rebuild the image to create it.") from exc
-    return entry.pw_uid, entry.pw_gid
-
-
-def _demote_to_claude():
-    uid, gid = _claude_cli_ids()
-
-    def _inner() -> None:
-        os.setgid(gid)
-        if hasattr(os, "setgroups"):
-            os.setgroups([gid])
-        os.setuid(uid)
-
-    return _inner
-
-
-def _maybe_chown_for_claude(path: Path) -> None:
-    try:
-        uid, gid = _claude_cli_ids()
-    except RuntimeError:
-        _logger.warning("Claude CLI user missing; skipping workspace chown")
-        return
-    try:
-        os.chown(path, uid, gid)
-        path.chmod(0o775)
-    except PermissionError:
-        _logger.warning("Unable to chown workspace for Claude CLI user", exc_info=True)
 
 
 def _write_claude_cli_result(
@@ -276,7 +227,7 @@ def _write_claude_cli_result(
         path = base / path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
-    _maybe_chown_for_claude(path)
+    maybe_chown_for_claude(path)
 
 
 def _function_resource_kwargs() -> dict[str, object]:
@@ -412,12 +363,31 @@ def _get_persist_volume() -> modal.Volume:
     return modal.Volume.from_name(_settings.persist_vol_name, **kwargs)
 
 
-def _reload_persist_volume() -> None:
-    """Reload the persistent volume to see latest committed writes."""
-    try:
-        _get_persist_volume().reload()
-    except Exception:
-        logging.getLogger(__name__).warning("Failed to reload persistent volume", exc_info=True)
+def _reload_persist_volume(max_retries: int = 3) -> None:
+    """Reload the persistent volume to see latest committed writes.
+
+    Modal volumes appear empty during an active reload operation. This function
+    retries with exponential backoff to handle transient reload failures,
+    especially for larger volumes.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+    """
+    logger = logging.getLogger(__name__)
+    for attempt in range(max_retries):
+        try:
+            _get_persist_volume().reload()
+            return
+        except Exception:
+            if attempt == max_retries - 1:
+                logger.warning(
+                    "Failed to reload persistent volume after %d attempts",
+                    max_retries,
+                    exc_info=True,
+                )
+                return
+            # Exponential backoff: 0.5s, 1.0s, 1.5s, ...
+            time.sleep(0.5 * (attempt + 1))
 
 
 def _commit_persist_volume() -> None:
@@ -1129,6 +1099,68 @@ async def claude_cli_result(call_id: str):
     return ClaudeCliPollResponse(ok=True, status="complete", result=result)
 
 
+@web_app.delete("/claude_cli/{call_id}", response_model=ClaudeCliCancelResponse)
+async def claude_cli_cancel(call_id: str):
+    """Cancel a running Claude CLI invocation.
+
+    This endpoint attempts to cancel a running function call. If the call
+    has already completed, it returns a status indicating the call is
+    already finished.
+    """
+    try:
+        call = modal.FunctionCall.from_id(call_id)
+    except Exception as exc:
+        _logger.warning("Cancel request for unknown call_id: %s", call_id, exc_info=exc)
+        return JSONResponse(
+            status_code=404,
+            content=ClaudeCliCancelResponse(
+                ok=False,
+                status="not_found",
+                message="Unknown call id",
+            ).model_dump(),
+        )
+
+    try:
+        # Check if already complete before cancelling
+        _result = call.get(timeout=0)  # noqa: F841
+        # If we get here, the call already completed
+        return ClaudeCliCancelResponse(
+            ok=True,
+            status="already_completed",
+            message="Call has already completed",
+        )
+    except modal_exc.TimeoutError:
+        # Call is still running, proceed to cancel
+        pass
+    except modal_exc.OutputExpiredError:
+        return ClaudeCliCancelResponse(
+            ok=True,
+            status="already_completed",
+            message="Call result has expired",
+        )
+    except Exception:
+        # Some other error, try to cancel anyway
+        pass
+
+    try:
+        await anyio.to_thread.run_sync(call.cancel)
+        return ClaudeCliCancelResponse(
+            ok=True,
+            status="cancelled",
+            message="Call cancellation requested",
+        )
+    except Exception as exc:
+        _logger.warning("Failed to cancel call %s: %s", call_id, exc)
+        return JSONResponse(
+            status_code=500,
+            content=ClaudeCliCancelResponse(
+                ok=False,
+                status="not_found",
+                message=f"Failed to cancel: {exc}",
+            ).model_dump(),
+        )
+
+
 @web_app.post("/submit", response_model=JobSubmitResponse)
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
@@ -1679,7 +1711,7 @@ def run_claude_cli_remote(
     if normalized_job_id:
         job_root = job_workspace_root(_settings.agent_fs_root, normalized_job_id)
         job_root.mkdir(parents=True, exist_ok=True)
-        _maybe_chown_for_claude(job_root)
+        maybe_chown_for_claude(job_root)
 
     cmd = ["claude", "-p", prompt, "--output-format", output_format]
     if dangerously_skip_permissions:
@@ -1701,10 +1733,10 @@ def run_claude_cli_remote(
         else:
             raise ValueError("probe must be one of: version, help, path")
 
-    env = _claude_cli_env()
-    _require_claude_cli_auth(env)
+    env = claude_cli_env()
+    require_claude_cli_auth(env)
 
-    cwd = str(job_root) if job_root is not None else str(_CLAUDE_CLI_APP_ROOT)
+    cwd = str(job_root) if job_root is not None else str(CLAUDE_CLI_APP_ROOT)
     _logger.info(
         "claude_cli.invoke",
         extra={
@@ -1728,7 +1760,7 @@ def run_claude_cli_remote(
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             env=env,
-            preexec_fn=_demote_to_claude(),
+            preexec_fn=demote_to_claude(),
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()

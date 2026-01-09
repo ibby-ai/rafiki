@@ -32,6 +32,10 @@ class QueryBody(BaseSchema):
         return _validate_job_id(value)
 
 
+# Maximum CLI timeout (23 hours, leaving 1 hour buffer from 24-hour function timeout)
+MAX_CLI_TIMEOUT_SECONDS = 60 * 60 * 23
+
+
 class ClaudeCliRequest(BaseSchema):
     """Request body for Claude Code CLI execution."""
 
@@ -50,3 +54,16 @@ class ClaudeCliRequest(BaseSchema):
     @classmethod
     def validate_job_id(cls, value: str | None) -> str | None:
         return _validate_job_id(value)
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def validate_timeout_seconds(cls, value: int) -> int:
+        """Validate timeout doesn't exceed Modal function timeout."""
+        if value <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if value > MAX_CLI_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds cannot exceed {MAX_CLI_TIMEOUT_SECONDS} "
+                f"({MAX_CLI_TIMEOUT_SECONDS // 3600} hours)"
+            )
+        return value

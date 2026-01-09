@@ -94,6 +94,14 @@ class ClaudeCliPollResponse(BaseSchema):
     """Schema for polling Claude Code CLI runs."""
 
     ok: bool
-    status: Literal["running", "complete", "failed", "expired"]
+    status: Literal["running", "complete", "failed", "expired", "cancelled"]
     result: Any | None = None
     error: str | None = None
+
+
+class ClaudeCliCancelResponse(BaseSchema):
+    """Schema for cancelling Claude Code CLI runs."""
+
+    ok: bool
+    status: Literal["cancelled", "not_found", "already_completed"]
+    message: str | None = None
