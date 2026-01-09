@@ -2,6 +2,45 @@
 
 Handles setting up the workspace from various sources: empty, git clone,
 or template.
+
+Workspace Source Types
+----------------------
+
+**Type: "empty" (default)**
+
+    {"workspace_source": {"type": "empty"}}
+
+- Does nothing beyond creating the directory
+- Claude starts with a blank slate
+
+**Type: "git_clone"**
+
+    {
+        "workspace_source": {
+            "type": "git_clone",
+            "git_url": "https://github.com/org/repo.git",
+            "git_branch": "main"
+        }
+    }
+
+- Clones the repo into the workspace directory
+- Optionally checks out a specific branch (git_branch is optional)
+- Claude works on existing code
+
+**Type: "template"**
+
+    {
+        "workspace_source": {
+            "type": "template",
+            "template_path": "fastapi-starter"
+        }
+    }
+
+- Copies from /data/templates/{template_path}/ into the workspace
+- Requires pre-populated templates in the Agent SDK volume
+- Useful for boilerplate projects
+
+TODO: Try the git_clone approach to test Ralph on an existing codebase.
 """
 
 import shutil
