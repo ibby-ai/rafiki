@@ -7,7 +7,9 @@ from agent_sandbox.schemas.jobs import (
     JobSubmitResponse,
 )
 from agent_sandbox.schemas.responses import (
+    ClaudeCliPollResponse,
     ClaudeCliResponse,
+    ClaudeCliSubmitResponse,
     ErrorResponse,
     QueryResponse,
     SummarySchema,
@@ -21,6 +23,8 @@ __all__ = [
     "SummarySchema",
     "ClaudeCliRequest",
     "ClaudeCliResponse",
+    "ClaudeCliSubmitResponse",
+    "ClaudeCliPollResponse",
     "JobSubmitRequest",
     "JobSubmitResponse",
     "JobStatusResponse",

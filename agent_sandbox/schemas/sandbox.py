@@ -37,11 +37,14 @@ class ClaudeCliRequest(BaseSchema):
 
     prompt: str
     allowed_tools: list[str] | None = None
-    dangerously_skip_permissions: bool = False
+    dangerously_skip_permissions: bool = True
     output_format: Literal["json", "text"] = "json"
     timeout_seconds: int = 120
     max_turns: int | None = None
     job_id: str | None = None
+    debug: bool = False
+    probe: Literal["version", "help", "path"] | None = None
+    write_result_path: str | None = None
 
     @field_validator("job_id")
     @classmethod

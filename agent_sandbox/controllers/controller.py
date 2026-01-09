@@ -83,6 +83,16 @@ def _claude_cli_env() -> dict[str, str]:
     return env
 
 
+def _require_claude_cli_auth(env: dict[str, str]) -> None:
+    """Ensure Claude CLI has credentials available."""
+    if env.get("ANTHROPIC_API_KEY"):
+        return
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY is missing. Configure the 'anthropic-secret' "
+        "Modal secret so Claude CLI can authenticate."
+    )
+
+
 def _claude_cli_ids() -> tuple[int, int]:
     try:
         entry = pwd.getpwnam(_CLAUDE_CLI_USER)
@@ -689,6 +699,8 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
         cmd.extend(["--max-turns", str(body.max_turns)])
 
     def _run():
+        env = _claude_cli_env()
+        _require_claude_cli_auth(env)
         return subprocess.run(
             cmd,
             capture_output=True,
@@ -696,7 +708,7 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
             timeout=body.timeout_seconds,
             cwd=str(job_root) if job_root is not None else str(_CLAUDE_CLI_HOME),
             stdin=subprocess.DEVNULL,  # Prevent CLI from waiting on stdin
-            env=_claude_cli_env(),
+            env=env,
             preexec_fn=_demote_to_claude(),
         )
 
@@ -712,7 +724,12 @@ async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliRespo
         parsed = stdout
         if body.output_format == "json":
             try:
-                parsed = json.loads(stdout) if stdout else None
+                if stdout:
+                    parsed = json.loads(stdout)
+                elif stderr:
+                    parsed = json.loads(stderr)
+                else:
+                    parsed = None
             except json.JSONDecodeError as exc:
                 raise RuntimeError("Failed to parse Claude CLI JSON output") from exc
         _logger.info(

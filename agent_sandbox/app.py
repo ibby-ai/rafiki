@@ -44,7 +44,7 @@ import httpx
 import modal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
@@ -66,13 +66,16 @@ from agent_sandbox.jobs import (
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.schemas import (
     ArtifactListResponse,
+    ClaudeCliPollResponse,
     ClaudeCliRequest,
+    ClaudeCliResponse,
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
     QueryBody,
 )
 from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
+from agent_sandbox.schemas.responses import ClaudeCliSubmitResponse
 from agent_sandbox.services.webhooks import build_headers, build_webhook_payload, serialize_payload
 
 app = modal.App("test-sandbox")
@@ -208,6 +211,25 @@ def _claude_cli_env() -> dict[str, str]:
     return env
 
 
+def _function_call_id(call: object) -> str | None:
+    """Return a stable call identifier for Modal function calls."""
+    for attr in ("object_id", "call_id", "id"):
+        value = getattr(call, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _require_claude_cli_auth(env: dict[str, str]) -> None:
+    """Ensure Claude CLI has credentials available."""
+    if env.get("ANTHROPIC_API_KEY"):
+        return
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY is missing. Configure the 'anthropic-secret' "
+        "Modal secret so Claude CLI can authenticate."
+    )
+
+
 def _claude_cli_ids() -> tuple[int, int]:
     try:
         entry = pwd.getpwnam(_CLAUDE_CLI_USER)
@@ -239,6 +261,22 @@ def _maybe_chown_for_claude(path: Path) -> None:
         path.chmod(0o775)
     except PermissionError:
         _logger.warning("Unable to chown workspace for Claude CLI user", exc_info=True)
+
+
+def _write_claude_cli_result(
+    write_result_path: str | None,
+    payload: dict,
+    job_root: Path | None,
+) -> None:
+    if not write_result_path:
+        return
+    path = Path(write_result_path)
+    if not path.is_absolute():
+        base = job_root if job_root is not None else Path(_settings.agent_fs_root)
+        path = base / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _maybe_chown_for_claude(path)
 
 
 def _function_resource_kwargs() -> dict[str, object]:
@@ -1008,7 +1046,7 @@ async def query_stream(request: Request, body: QueryBody):
     )
 
 
-@web_app.post("/claude_cli")
+@web_app.post("/claude_cli", response_model=ClaudeCliResponse)
 async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
     """Run Claude Code CLI in the dedicated CLI environment."""
     allowed_tools = None
@@ -1024,9 +1062,71 @@ async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
             timeout_seconds=body.timeout_seconds,
             max_turns=body.max_turns,
             job_id=body.job_id,
+            debug=body.debug,
+            probe=body.probe,
+            write_result_path=body.write_result_path,
         )
 
     return await anyio.to_thread.run_sync(_run)
+
+
+@web_app.post("/claude_cli/submit", response_model=ClaudeCliSubmitResponse)
+async def claude_cli_submit(body: ClaudeCliRequest) -> ClaudeCliSubmitResponse:
+    """Start a Claude CLI run asynchronously and return a call id for polling."""
+    allowed_tools = None
+    if body.allowed_tools:
+        allowed_tools = ",".join(body.allowed_tools)
+
+    def _spawn():
+        return run_claude_cli_remote.spawn(
+            prompt=body.prompt,
+            allowed_tools=allowed_tools,
+            dangerously_skip_permissions=body.dangerously_skip_permissions,
+            output_format=body.output_format,
+            timeout_seconds=body.timeout_seconds,
+            max_turns=body.max_turns,
+            job_id=body.job_id,
+            debug=body.debug,
+            probe=body.probe,
+            write_result_path=body.write_result_path,
+        )
+
+    call = await anyio.to_thread.run_sync(_spawn)
+    call_id = _function_call_id(call)
+    if not call_id:
+        raise HTTPException(status_code=500, detail="Unable to determine call id")
+    return ClaudeCliSubmitResponse(ok=True, call_id=call_id)
+
+
+@web_app.get("/claude_cli/result/{call_id}", response_model=ClaudeCliPollResponse)
+async def claude_cli_result(call_id: str):
+    """Poll a Claude CLI run by call id."""
+    try:
+        call = modal.FunctionCall.from_id(call_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Unknown call id") from exc
+
+    try:
+        result = await anyio.to_thread.run_sync(lambda: call.get(timeout=0))
+    except modal_exc.TimeoutError:
+        return JSONResponse(
+            status_code=202,
+            content=ClaudeCliPollResponse(ok=True, status="running").model_dump(),
+        )
+    except modal_exc.OutputExpiredError:
+        return JSONResponse(
+            status_code=410,
+            content=ClaudeCliPollResponse(
+                ok=False, status="expired", error="Result expired"
+            ).model_dump(),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content=ClaudeCliPollResponse(ok=False, status="failed", error=str(exc)).model_dump(),
+        )
+
+    return ClaudeCliPollResponse(ok=True, status="complete", result=result)
 
 
 @web_app.post("/submit", response_model=JobSubmitResponse)
@@ -1553,17 +1653,22 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
     image=claude_cli_image,
     secrets=agent_sdk_secrets,
     volumes={"/data": _get_persist_volume()},
+    timeout=60 * 60 * 24,
     **_function_runtime_kwargs(include_autoscale=False),
 )
 def run_claude_cli_remote(
     prompt: str = DEFAULT_QUESTION,
     allowed_tools: str | None = None,
-    dangerously_skip_permissions: bool = False,
+    dangerously_skip_permissions: bool = True,
     output_format: str = "json",
     timeout_seconds: int = 120,
     max_turns: int | None = None,
     job_id: str | None = None,
-) -> dict:
+    return_stdout: bool = False,
+    debug: bool = False,
+    probe: str | None = None,
+    write_result_path: str | None = None,
+) -> dict | str:
     """Run Claude Code CLI in a dedicated image and return the response."""
     tools_list = None
     if allowed_tools:
@@ -1584,37 +1689,119 @@ def run_claude_cli_remote(
     if max_turns is not None:
         cmd.extend(["--max-turns", str(max_turns)])
 
+    probe_cmd: list[str] | None = None
+    if probe:
+        probe_value = probe.strip().lower()
+        if probe_value == "version":
+            probe_cmd = ["claude", "--version"]
+        elif probe_value in {"help", "-h", "--help"}:
+            probe_cmd = ["claude", "--help"]
+        elif probe_value == "path":
+            probe_cmd = ["/bin/sh", "-lc", "command -v claude && ls -l $(command -v claude)"]
+        else:
+            raise ValueError("probe must be one of: version, help, path")
+
+    env = _claude_cli_env()
+    _require_claude_cli_auth(env)
+
+    cwd = str(job_root) if job_root is not None else str(_CLAUDE_CLI_APP_ROOT)
+    _logger.info(
+        "claude_cli.invoke",
+        extra={
+            "cmd": probe_cmd or cmd,
+            "cwd": cwd,
+            "path": env.get("PATH", ""),
+            "home": env.get("HOME", ""),
+            "user": env.get("USER", ""),
+            "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
+            "output_format": output_format,
+            "probe": probe_cmd is not None,
+        },
+    )
+
     try:
         result = subprocess.run(
-            cmd,
+            probe_cmd or cmd,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            cwd=str(job_root) if job_root is not None else str(_CLAUDE_CLI_APP_ROOT),
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
-            env=_claude_cli_env(),
+            env=env,
             preexec_fn=_demote_to_claude(),
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
+        _logger.info(
+            "claude_cli.complete",
+            extra={
+                "exit_code": result.returncode,
+                "stdout_len": len(result.stdout or ""),
+                "stderr_len": len(result.stderr or ""),
+                "probe": probe_cmd is not None,
+            },
+        )
         if result.returncode != 0:
             raise RuntimeError(
                 "Claude CLI failed with exit code "
                 f"{result.returncode}: {stderr or stdout or 'no output'}"
             )
+        if probe_cmd is not None:
+            payload = {
+                "ok": True,
+                "result": None,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+                "cmd": probe_cmd,
+                "cwd": cwd,
+                "path": env.get("PATH", ""),
+                "home": env.get("HOME", ""),
+                "user": env.get("USER", ""),
+                "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
+                "probe": True,
+            }
+            _write_claude_cli_result(write_result_path, payload, job_root)
+            if return_stdout:
+                return json.dumps(payload)
+            return payload
+
         parsed = stdout
         if output_format == "json":
             try:
-                parsed = json.loads(stdout) if stdout else None
+                if stdout:
+                    parsed = json.loads(stdout)
+                elif stderr:
+                    parsed = json.loads(stderr)
+                else:
+                    parsed = None
             except json.JSONDecodeError as exc:
                 raise RuntimeError("Failed to parse Claude CLI JSON output") from exc
-        return {
+        payload = {
             "ok": True,
             "result": parsed,
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.returncode,
         }
+        if debug:
+            payload.update(
+                {
+                    "cmd": probe_cmd or cmd,
+                    "cwd": cwd,
+                    "path": env.get("PATH", ""),
+                    "home": env.get("HOME", ""),
+                    "user": env.get("USER", ""),
+                    "has_anthropic_api_key": bool(env.get("ANTHROPIC_API_KEY")),
+                    "probe": probe_cmd is not None,
+                }
+            )
+        _write_claude_cli_result(write_result_path, payload, job_root)
+        if return_stdout:
+            if stdout or stderr:
+                return stdout or stderr
+            return json.dumps(payload)
+        return payload
     finally:
         _commit_persist_volume()
 
@@ -1656,6 +1843,20 @@ def load_test(num_queries: int = 10, question: str = DEFAULT_QUESTION) -> dict:
         "duration_seconds": round(duration, 2),
         "throughput_per_second": round(num_queries / duration, 3),
     }
+
+
+@app.function(
+    image=agent_sdk_image,
+    volumes={"/data": _get_persist_volume()},
+    timeout=60,
+)
+def read_job_artifact(job_id: str, artifact_path: str) -> str:
+    """Read a job artifact from the persistent volume."""
+    _reload_persist_volume()
+    resolved = resolve_job_artifact(_settings.agent_fs_root, job_id, artifact_path)
+    if resolved is None:
+        raise FileNotFoundError(f"Artifact not found: {artifact_path}")
+    return Path(resolved).read_text(encoding="utf-8")
 
 
 @app.function(

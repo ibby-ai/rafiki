@@ -81,3 +81,19 @@ class ClaudeCliResponse(BaseSchema):
     stdout: str | None = None
     stderr: str | None = None
     exit_code: int | None = None
+
+
+class ClaudeCliSubmitResponse(BaseSchema):
+    """Schema for async Claude Code CLI submissions."""
+
+    ok: bool
+    call_id: str
+
+
+class ClaudeCliPollResponse(BaseSchema):
+    """Schema for polling Claude Code CLI runs."""
+
+    ok: bool
+    status: Literal["running", "complete", "failed", "expired"]
+    result: Any | None = None
+    error: str | None = None
