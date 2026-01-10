@@ -183,3 +183,25 @@ Always run after changes:
 uv run ruff check --fix .
 uv run ruff format .
 ```
+
+## Git Clone Workspace Source
+
+The `git_clone` workspace source type has been verified working. Key implementation details:
+
+### Ownership Consistency
+Both `workspace.py` and `git.py` use `_git_subprocess_kwargs()` to run git commands as the `claude` user in Modal sandboxes. This ensures consistent file ownership and prevents "dubious ownership" errors.
+
+### Verified With
+- Repository: `https://github.com/snarktank/ralph`
+- See `docs/ralph-git-clone-verification.md` for full test results
+
+### Example Usage
+```python
+workspace_source = WorkspaceSource(
+    type="git_clone",
+    git_url="https://github.com/snarktank/ralph.git",
+    git_branch="main"
+)
+```
+
+The cloned repository's `.git` directory is preserved, and `init_git()` skips re-initialization when it detects an existing git repo.

@@ -40,14 +40,35 @@ Workspace Source Types
 - Requires pre-populated templates in the Agent SDK volume
 - Useful for boilerplate projects
 
-TODO: Try the git_clone approach to test Ralph on an existing codebase.
+Note: git_clone was verified working with https://github.com/snarktank/ralph
+See docs/ralph-git-clone-verification.md for details.
 """
 
 import shutil
 import subprocess
 from pathlib import Path
 
+from agent_sandbox.utils.cli import claude_cli_env, demote_to_claude
+
 from .schemas import WorkspaceSource
+
+
+def _git_subprocess_kwargs() -> dict[str, object]:
+    """Return subprocess kwargs to run git as the claude user when possible.
+
+    This mirrors the pattern in git.py to ensure consistent git ownership.
+    """
+    import os
+
+    if os.getuid() != 0:
+        return {}
+    try:
+        return {
+            "env": claude_cli_env(),
+            "preexec_fn": demote_to_claude(),
+        }
+    except RuntimeError:
+        return {}
 
 
 def initialize_workspace(workspace: Path, source: WorkspaceSource) -> None:
@@ -70,6 +91,7 @@ def initialize_workspace(workspace: Path, source: WorkspaceSource) -> None:
             cwd=workspace,
             check=True,
             capture_output=True,
+            **_git_subprocess_kwargs(),
         )
     elif source.type == "template" and source.template_path:
         template = Path(f"/data/templates/{source.template_path}")

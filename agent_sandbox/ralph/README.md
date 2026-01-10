@@ -168,6 +168,37 @@ During execution, Ralph creates and manages these files in the workspace:
 - **git_clone**: Clone from a git repository (`git_url`, `git_branch`)
 - **template**: Copy from a template directory (`template_path`)
 
+#### Git Clone Example
+
+Clone an existing repository and work on it:
+
+```bash
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/ralph/start' \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prd": {
+      "name": "existing-repo-tasks",
+      "userStories": [{
+        "id": "task-1",
+        "category": "technical",
+        "description": "List files and create summary",
+        "steps": ["Run ls -la", "Verify output file exists"],
+        "priority": 1,
+        "passes": false
+      }]
+    },
+    "workspace_source": {
+      "type": "git_clone",
+      "git_url": "https://github.com/snarktank/ralph.git",
+      "git_branch": "main"
+    },
+    "max_iterations": 3,
+    "first_iteration_timeout": 600
+  }'
+```
+
+The repository is cloned into the workspace, preserving git history. Ralph can then work on the existing codebase.
+
 ## Result Statuses
 
 ### RalphLoopStatus
