@@ -8,10 +8,10 @@ version = "0.2.0"
 description = "Modal-based agent sandbox with HTTP endpoints and tool integrations"
 requires-python = ">=3.11"
 dependencies = [
-    "claude-agent-sdk>=0.1.18",
+    "claude-agent-sdk>=0.1.19",
     "fastapi>=0.119.1",
     "llm-auto-context",
-    "modal>=1.2.1",
+    "modal>=1.2.5",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
 ]
