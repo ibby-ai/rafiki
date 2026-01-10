@@ -5,6 +5,7 @@ This service exposes endpoints:
 - `GET /health_check` used by the controller to know when the service is ready.
 - `POST /query` which returns a response from the Claude Agent SDK.
 - `POST /query_stream` which streams a response from the Claude Agent SDK.
+- `POST /claude_cli` which runs Claude Code CLI in the sandbox.
 
 This file is started inside the sandbox via `uvicorn agent_sandbox.controllers.controller:app`
 (see `agent_sandbox.app.get_or_start_background_sandbox`). The sandbox is created with an
@@ -21,10 +22,12 @@ Important:
 
 import json
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import modal
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -47,9 +50,16 @@ from agent_sandbox.controllers.serialization import (
 )
 from agent_sandbox.jobs import job_workspace_root, normalize_job_id
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
-from agent_sandbox.schemas import QueryBody
-from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
+from agent_sandbox.schemas import ClaudeCliRequest, QueryBody
+from agent_sandbox.schemas.responses import ClaudeCliResponse, ErrorResponse, QueryResponse
 from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+from agent_sandbox.utils.cli import (
+    CLAUDE_CLI_HOME,
+    claude_cli_env,
+    demote_to_claude,
+    maybe_chown_for_claude,
+    require_claude_cli_auth,
+)
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
@@ -112,6 +122,11 @@ def _maybe_reload_volume() -> None:
         return
     try:
         _get_persist_volume().reload()
+    except RuntimeError as exc:
+        message = str(exc)
+        if "reload() can only be called from within a running function" in message:
+            return
+        _logger.warning("Failed to reload persistent volume: %s", message)
     except Exception:
         _logger.warning("Failed to reload persistent volume", exc_info=True)
 
@@ -144,6 +159,12 @@ def _maybe_commit_volume(*, force: bool = False) -> None:
         try:
             _get_persist_volume().commit()
             _LAST_VOLUME_COMMIT_TS = now
+        except RuntimeError as exc:
+            message = str(exc)
+            # In sandbox context, commit() can only be called on a mounted volume
+            if "commit() can only be called" in message:
+                return
+            _logger.warning("Failed to commit persistent volume: %s", message)
         except Exception:
             _logger.warning("Failed to commit persistent volume", exc_info=True)
 
@@ -304,6 +325,7 @@ def _ensure_job_workspace(job_id: str | None) -> Path | None:
         return None
     root = _job_workspace(normalized)
     root.mkdir(parents=True, exist_ok=True)
+    maybe_chown_for_claude(root)
     return root
 
 
@@ -583,3 +605,95 @@ async def query_agent_stream(body: QueryBody, request: Request):
             _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
+
+
+@app.post(
+    "/claude_cli",
+    response_model=ClaudeCliResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def claude_cli(body: ClaudeCliRequest, request: Request) -> ClaudeCliResponse:
+    """Run Claude Code CLI and return the parsed response.
+
+    Note: The primary HTTP path now proxies to a dedicated CLI image via
+    agent_sandbox.app.run_claude_cli_remote. This endpoint is kept for
+    legacy/background-sandbox use.
+    """
+    _require_connect_token(request)
+
+    _maybe_reload_volume()
+    job_root = _ensure_job_workspace(body.job_id)
+    request_id = getattr(request.state, "request_id", None)
+    _logger.info(
+        "claude_cli.start",
+        extra={"job_id": body.job_id, "request_id": request_id},
+    )
+
+    # Build Claude CLI command for non-interactive execution.
+    #
+    # IMPORTANT: Claude CLI runs as a non-root user so
+    # --dangerously-skip-permissions can be used when requested.
+    # Prefer --allowedTools when possible to scope approvals to specific tools.
+    #
+    # The -p flag enables "print mode" which is inherently non-interactive.
+    # Combined with stdin=DEVNULL, this ensures the CLI won't hang waiting
+    # for user input.
+    cmd = ["claude", "-p", body.prompt, "--output-format", body.output_format]
+    if body.dangerously_skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
+    if body.allowed_tools:
+        cmd.extend(["--allowedTools", ",".join(body.allowed_tools)])
+    if body.max_turns is not None:
+        cmd.extend(["--max-turns", str(body.max_turns)])
+
+    def _run():
+        env = claude_cli_env()
+        require_claude_cli_auth(env)
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=body.timeout_seconds,
+            cwd=str(job_root) if job_root is not None else str(CLAUDE_CLI_HOME),
+            stdin=subprocess.DEVNULL,  # Prevent CLI from waiting on stdin
+            env=env,
+            preexec_fn=demote_to_claude(),
+        )
+
+    try:
+        result = await anyio.to_thread.run_sync(_run)
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Claude CLI failed with exit code "
+                f"{result.returncode}: {stderr or stdout or 'no output'}"
+            )
+        parsed = stdout
+        if body.output_format == "json":
+            try:
+                if stdout:
+                    parsed = json.loads(stdout)
+                elif stderr:
+                    parsed = json.loads(stderr)
+                else:
+                    parsed = None
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Failed to parse Claude CLI JSON output") from exc
+        _logger.info(
+            "claude_cli.complete",
+            extra={
+                "job_id": body.job_id,
+                "request_id": request_id,
+                "exit_code": result.returncode,
+            },
+        )
+        return ClaudeCliResponse(
+            ok=True,
+            result=parsed,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.returncode,
+        )
+    finally:
+        _maybe_commit_volume(force=job_root is not None)

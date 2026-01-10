@@ -84,6 +84,13 @@ Override or remove `.env` values to return to Modal defaults.
 | `sandbox_name` | `"svc-runner-8001"` | Unique identifier for the sandbox instance |
 | `service_port` | `8001` | Internal port for the FastAPI controller |
 | `persist_vol_name` | `"svc-runner-8001-vol"` | Name of the Modal Volume for persistent storage |
+| `claude_cli_sandbox_name` | `"claude-cli-runner"` | Base name for Claude CLI sandboxes |
+| `claude_cli_persist_vol_name` | `"claude-cli-runner-vol"` | Name of the Modal Volume for Claude CLI workspaces |
+| `claude_cli_fs_root` | `"/data-cli"` | Mount path for the Claude CLI volume inside sandboxes |
+| `claude_cli_service_port` | `8002` | Internal port for the Claude CLI controller service |
+| `claude_cli_service_ports` | `[8002]` | Encrypted ports exposed for the Claude CLI sandbox |
+| `claude_cli_sandbox_timeout` | `86400` | Max Claude CLI sandbox lifetime (seconds) |
+| `claude_cli_sandbox_idle_timeout` | `1800` | Idle shutdown for Claude CLI sandbox (seconds) |
 
 **When to change**: Only if running multiple independent sandbox instances. Keep defaults for single-instance deployments.
 
@@ -93,6 +100,8 @@ Override or remove `.env` values to return to Modal defaults.
 |---------|---------|------------------|------------------|
 | `sandbox_cpu` | `1.0` | Agent does heavy computation (complex tools, data processing) | Tight budget; simple query-response workloads |
 | `sandbox_memory` | `2048` MB | Large context windows; many tool results; file processing | Simple agents with minimal tool use |
+| `claude_cli_sandbox_cpu` | `1.0` | Claude CLI workloads need more CPU | Keep minimal for lightweight CLI runs |
+| `claude_cli_sandbox_memory` | `2048` MB | Claude CLI runs need more memory | Lightweight CLI runs |
 
 **Resource guidance**:
 - **0.5 CPU / 1024 MB**: Suitable for simple Q&A agents with basic tools
@@ -106,6 +115,9 @@ Override or remove `.env` values to return to Modal defaults.
 | `sandbox_cpu_limit` | `null` | Hard CPU limit when set (tuple with `sandbox_cpu`) |
 | `sandbox_memory_limit` | `null` | Hard memory limit in MB (tuple with `sandbox_memory`) |
 | `sandbox_ephemeral_disk` | `null` | Ephemeral disk in MiB for function-based workloads |
+| `claude_cli_sandbox_cpu_limit` | `null` | Hard CPU limit for Claude CLI sandboxes |
+| `claude_cli_sandbox_memory_limit` | `null` | Hard memory limit for Claude CLI sandboxes |
+| `claude_cli_sandbox_ephemeral_disk` | `null` | Ephemeral disk in MiB for Claude CLI sandboxes |
 
 **Notes**:
 - CPU/memory limits apply to Modal functions and sandboxes where configured.

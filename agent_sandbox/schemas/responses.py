@@ -71,3 +71,37 @@ class ErrorResponse(BaseSchema):
     error: str
     error_type: str
     request_id: str | None = None
+
+
+class ClaudeCliResponse(BaseSchema):
+    """Schema for Claude Code CLI responses."""
+
+    ok: bool
+    result: Any | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
+
+
+class ClaudeCliSubmitResponse(BaseSchema):
+    """Schema for async Claude Code CLI submissions."""
+
+    ok: bool
+    call_id: str
+
+
+class ClaudeCliPollResponse(BaseSchema):
+    """Schema for polling Claude Code CLI runs."""
+
+    ok: bool
+    status: Literal["running", "complete", "failed", "expired", "cancelled"]
+    result: Any | None = None
+    error: str | None = None
+
+
+class ClaudeCliCancelResponse(BaseSchema):
+    """Schema for cancelling Claude Code CLI runs."""
+
+    ok: bool
+    status: Literal["cancelled", "not_found", "already_completed"]
+    message: str | None = None
