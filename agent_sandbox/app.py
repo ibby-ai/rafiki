@@ -54,11 +54,15 @@ from agent_sandbox.jobs import (
     enqueue_job,
     get_job_record,
     get_job_status,
+    get_session_snapshot,
+    get_stats,
     is_job_due,
     job_workspace_root,
     normalize_job_id,
     resolve_job_artifact,
     should_skip_job,
+    should_snapshot_session,
+    store_session_snapshot,
     update_job,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
@@ -1127,12 +1131,17 @@ async def health():
 @web_app.post("/query")
 async def query_proxy(request: Request, body: QueryBody):
     """Proxy query requests to the background sandbox service."""
-    # Use async getter to avoid blocking event loop
-    sb, url = await get_or_start_background_sandbox_aio()
+    settings = Settings()
+
+    # Resolve session_id for snapshot restoration (if resuming a session)
+    resolved_session_id = body.session_id
+    # Note: We could also look up session_key -> session_id here if needed
+
+    # Use async getter with session_id for potential snapshot restoration
+    sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     # Optional: per-request connect token (verified in sandbox service)
     headers = {}
-    settings = Settings()
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
@@ -1147,30 +1156,93 @@ async def query_proxy(request: Request, body: QueryBody):
             timeout=httpx.Timeout(120.0, connect=30.0),
         )
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+
+    # Trigger session snapshot asynchronously after successful query
+    # This captures filesystem state for session restoration on resume
+    if settings.enable_session_snapshots:
+        result_session_id = result.get("session_id")
+        if result_session_id and should_snapshot_session(
+            result_session_id, settings.snapshot_min_interval_seconds
+        ):
+            try:
+                # Fire-and-forget: spawn snapshot in background
+                snapshot_session_state.spawn(result_session_id)
+                _logger.debug(
+                    "Spawned session snapshot",
+                    extra={"session_id": result_session_id},
+                )
+            except Exception:
+                _logger.warning(
+                    "Failed to spawn session snapshot",
+                    exc_info=True,
+                    extra={"session_id": result_session_id},
+                )
+
+    return result
 
 
 @web_app.post("/query_stream")
 async def query_stream(request: Request, body: QueryBody):
     """Stream query responses from the background sandbox service."""
-    sb, url = await get_or_start_background_sandbox_aio()
+    settings = Settings()
+
+    # Resolve session_id for snapshot restoration (if resuming a session)
+    resolved_session_id = body.session_id
+
+    # Use async getter with session_id for potential snapshot restoration
+    sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     headers = {}
-    settings = Settings()
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
         )
         headers = {"Authorization": f"Bearer {creds.token}"}
 
+    # Track session_id from stream for post-completion snapshot
+    captured_session_id: str | None = None
+
     async def sse_proxy():
+        nonlocal captured_session_id
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST", f"{url.rstrip('/')}/query_stream", json=body.model_dump(), headers=headers
             ) as response:
                 response.raise_for_status()
+                buffer = ""
                 async for chunk in response.aiter_bytes():
                     yield chunk
+                    # Parse SSE to capture session_id from "done" event
+                    # Format: "event: done\ndata: {...}\n\n"
+                    try:
+                        buffer += chunk.decode("utf-8", errors="ignore")
+                        if "event: done" in buffer:
+                            # Extract session_id from the done event data
+                            for line in buffer.split("\n"):
+                                if line.startswith("data:") and "session_id" in line:
+                                    data_str = line[5:].strip()
+                                    data = json.loads(data_str)
+                                    captured_session_id = data.get("session_id")
+                                    break
+                    except Exception:
+                        pass  # Best effort parsing, don't fail stream
+
+        # Trigger snapshot after stream completes
+        if settings.enable_session_snapshots and captured_session_id:
+            if should_snapshot_session(captured_session_id, settings.snapshot_min_interval_seconds):
+                try:
+                    snapshot_session_state.spawn(captured_session_id)
+                    _logger.debug(
+                        "Spawned session snapshot after stream",
+                        extra={"session_id": captured_session_id},
+                    )
+                except Exception:
+                    _logger.warning(
+                        "Failed to spawn session snapshot after stream",
+                        exc_info=True,
+                        extra={"session_id": captured_session_id},
+                    )
 
     return StreamingResponse(
         sse_proxy(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
@@ -1512,6 +1584,32 @@ async def service_info():
     return {"url": url, "sandbox_id": sb.object_id}
 
 
+@web_app.get("/stats")
+async def stats_endpoint(
+    period_hours: int = 24,
+    include_time_series: bool = False,
+):
+    """Get aggregated statistics for agent sessions.
+
+    Provides visibility into agent effectiveness and usage patterns across
+    both Agent SDK and CLI sandboxes.
+
+    Query Parameters:
+        period_hours: Hours to include (default 24, max 720)
+        include_time_series: Include hourly breakdown (default false)
+
+    Returns:
+        StatsResponse with aggregate statistics by sandbox type.
+
+    Example:
+        ```
+        curl 'https://<org>--test-sandbox-http-app-dev.modal.run/stats?period_hours=48'
+        ```
+    """
+    period_hours = min(max(period_hours, 1), 720)  # Clamp to valid range
+    return get_stats(period_hours=period_hours, include_time_series=include_time_series)
+
+
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
@@ -1635,15 +1733,31 @@ def cleanup_sessions():
         logging.getLogger(__name__).exception("Unexpected error cleaning up Claude CLI sessions")
 
 
-def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
+def get_or_start_background_sandbox(
+    session_id: str | None = None,
+) -> tuple[modal.Sandbox, str]:
     """Return a running background sandbox and its encrypted service URL.
 
     Starts a daemonized sandbox running `uvicorn agent_sandbox.controllers.controller:app` if one is
     not already available, then discovers its encrypted tunnel URL on port
     8001. The function blocks until the `/health_check` endpoint responds.
 
+    Args:
+        session_id: Optional session ID for snapshot restoration. When provided
+            and a snapshot exists for this session, creates the sandbox from
+            the snapshot image to restore filesystem state from a previous session.
+
     Returns:
         A pair of `(sandbox, service_url)`.
+
+    Session Snapshot Restoration:
+        When resuming a session after sandbox timeout, pass the session_id to
+        check for stored snapshots. If a snapshot exists:
+        1. The snapshot image is used instead of the base agent_sdk_image
+        2. This restores installed packages, downloaded files, and other
+           filesystem changes from the previous session
+        3. The Claude Agent SDK session is resumed via its resume= parameter
+           (handled in the controller)
     """
     global SANDBOX, SERVICE_URL
 
@@ -1670,7 +1784,39 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
         pass  # Sandbox doesn't exist or isn't accessible; we'll create a new one
 
     # -------------------------------------------------------------------------
-    # STEP 3: Create a NEW sandbox
+    # STEP 3: Determine image for new sandbox (snapshot restoration)
+    # -------------------------------------------------------------------------
+    # Check if we have a stored snapshot for this session. If so, use the
+    # snapshot image to restore filesystem state from the previous session.
+    # This enables "leave and come back" workflows where agent-installed tools
+    # and downloaded files are preserved across sandbox restarts.
+    # -------------------------------------------------------------------------
+    sandbox_image = agent_sdk_image
+    restored_from_snapshot = False
+    if session_id and _settings.enable_session_snapshots:
+        snapshot = get_session_snapshot(session_id)
+        if snapshot and snapshot.get("image_id"):
+            try:
+                snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                sandbox_image = snapshot_image
+                restored_from_snapshot = True
+                _logger.info(
+                    "Restoring sandbox from session snapshot",
+                    extra={
+                        "session_id": session_id,
+                        "snapshot_image_id": snapshot["image_id"],
+                        "snapshot_created_at": snapshot.get("created_at"),
+                    },
+                )
+            except Exception:
+                _logger.warning(
+                    "Failed to restore from snapshot, using base image",
+                    exc_info=True,
+                    extra={"session_id": session_id, "snapshot": snapshot},
+                )
+
+    # -------------------------------------------------------------------------
+    # STEP 4: Create a NEW sandbox
     # -------------------------------------------------------------------------
     # If no existing sandbox was found, create one. This runs uvicorn inside
     # an isolated container with its own filesystem, network, and resources.
@@ -1687,7 +1833,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             str(SERVICE_PORT),
             # MODAL-SPECIFIC PARAMETERS EXPLAINED:
             app=app,  # Associates sandbox with this Modal App
-            image=agent_sdk_image,  # Container image with all dependencies
+            image=sandbox_image,  # Container image (base or snapshot for restoration)
             secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
             workdir="/root/app",  # Working directory inside container
             name=SANDBOX_NAME,  # Named sandbox enables discovery via from_name()
@@ -1741,7 +1887,7 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
 
     _wait_for_service(SERVICE_URL)
     try:
-        SESSIONS[SANDBOX_NAME] = {
+        session_metadata: dict = {
             "id": SANDBOX.object_id,
             "url": SERVICE_URL,
             "volume": PERSIST_VOL_NAME,
@@ -1749,6 +1895,11 @@ def get_or_start_background_sandbox() -> tuple[modal.Sandbox, str]:
             "tags": {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
             "status": "running",
         }
+        # Track snapshot restoration for observability
+        if restored_from_snapshot and session_id:
+            session_metadata["restored_from_session"] = session_id
+            session_metadata["restored_from_snapshot"] = True
+        SESSIONS[SANDBOX_NAME] = session_metadata
     except modal_exc.Error as e:
         logging.getLogger(__name__).warning(
             "Failed to persist session metadata to Modal Dict: %s", e
@@ -1784,8 +1935,13 @@ async def _wait_for_service_aio(url: str, timeout: int = 60, path: str = "/healt
     raise TimeoutError(f"Service {check_url} did not become available within {timeout} seconds")
 
 
-async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
+async def get_or_start_background_sandbox_aio(
+    session_id: str | None = None,
+) -> tuple[modal.Sandbox, str]:
     """Async version of get_or_start_background_sandbox.
+
+    Args:
+        session_id: Optional session ID for snapshot restoration.
 
     Returns:
         A pair of `(sandbox, service_url)`.
@@ -1814,6 +1970,31 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
     except Exception:
         pass
 
+    # Determine image for new sandbox (snapshot restoration)
+    sandbox_image = agent_sdk_image
+    restored_from_snapshot = False
+    if session_id and _settings.enable_session_snapshots:
+        snapshot = get_session_snapshot(session_id)
+        if snapshot and snapshot.get("image_id"):
+            try:
+                snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                sandbox_image = snapshot_image
+                restored_from_snapshot = True
+                _logger.info(
+                    "Restoring sandbox from session snapshot (async)",
+                    extra={
+                        "session_id": session_id,
+                        "snapshot_image_id": snapshot["image_id"],
+                        "snapshot_created_at": snapshot.get("created_at"),
+                    },
+                )
+            except Exception:
+                _logger.warning(
+                    "Failed to restore from snapshot, using base image",
+                    exc_info=True,
+                    extra={"session_id": session_id, "snapshot": snapshot},
+                )
+
     # Create with persistent volume
     svc_vol = _get_persist_volume()
     try:
@@ -1825,7 +2006,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
             "--port",
             str(SERVICE_PORT),
             app=app,
-            image=agent_sdk_image,
+            image=sandbox_image,  # Use snapshot image if available
             secrets=agent_sdk_secrets,
             workdir="/root/app",
             name=SANDBOX_NAME,
@@ -1867,7 +2048,7 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
 
     # Persist session metadata
     try:
-        SESSIONS[SANDBOX_NAME] = {
+        session_metadata: dict = {
             "id": SANDBOX.object_id,
             "url": SERVICE_URL,
             "volume": PERSIST_VOL_NAME,
@@ -1875,6 +2056,11 @@ async def get_or_start_background_sandbox_aio() -> tuple[modal.Sandbox, str]:
             "tags": {"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)},
             "status": "running",
         }
+        # Track snapshot restoration for observability
+        if restored_from_snapshot and session_id:
+            session_metadata["restored_from_session"] = session_id
+            session_metadata["restored_from_snapshot"] = True
+        SESSIONS[SANDBOX_NAME] = session_metadata
     except Exception:
         pass
 
@@ -2794,6 +2980,86 @@ def snapshot_service() -> dict:
     except Exception:
         logging.getLogger(__name__).exception("Unexpected error persisting snapshot metadata")
     return info
+
+
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
+def snapshot_session_state(session_id: str) -> dict:
+    """Capture sandbox filesystem state for a specific agent session.
+
+    Creates a snapshot tied to a session_id, enabling session restoration when
+    the user resumes a session after the sandbox has timed out. This enables
+    "leave and come back" workflows where the agent's installed tools, downloaded
+    files, and other filesystem state are preserved.
+
+    Unlike snapshot_service() which creates a global snapshot, this function
+    stores the snapshot reference keyed by session_id in SESSION_SNAPSHOTS,
+    allowing per-session restoration.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to associate with this snapshot.
+
+    Returns:
+        Dict with snapshot info:
+        - ok: True if snapshot succeeded
+        - session_id: The session ID this snapshot is associated with
+        - image_id: Modal Image object_id for restoration
+        - sandbox_name: Name of the sandbox that was snapshotted
+        - created_at: Unix timestamp
+
+    Usage:
+        Called after agent query completes when session snapshots are enabled:
+        ```python
+        if should_snapshot_session(session_id, min_interval_seconds=60):
+            result = snapshot_session_state.remote(session_id)
+        ```
+
+    Restoration:
+        When resuming a session after sandbox timeout, use get_session_snapshot()
+        to retrieve the image_id and create a new sandbox from it.
+
+    See: https://modal.com/docs/guide/sandbox#filesystem-snapshots
+    """
+    if not session_id:
+        return {"ok": False, "error": "session_id is required"}
+
+    # Check if we should skip snapshotting (throttling)
+    if not should_snapshot_session(session_id, _settings.snapshot_min_interval_seconds):
+        existing = get_session_snapshot(session_id)
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "Recent snapshot exists",
+            "session_id": session_id,
+            "existing_snapshot": existing,
+        }
+
+    try:
+        sb, _ = get_or_start_background_sandbox()
+        img = sb.snapshot_filesystem()
+        snapshot_info = store_session_snapshot(
+            session_id=session_id,
+            image_id=img.object_id,
+            sandbox_name=SANDBOX_NAME,
+        )
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "image_id": img.object_id,
+            "sandbox_name": SANDBOX_NAME,
+            "created_at": snapshot_info["created_at"],
+        }
+    except modal_exc.SandboxTerminatedError:
+        return {
+            "ok": False,
+            "error": "Sandbox terminated, cannot snapshot",
+            "type": "SandboxTerminatedError",
+        }
+    except modal_exc.Error as e:
+        _logger.warning("Failed to snapshot session %s: %s", session_id, e)
+        return {"ok": False, "error": str(e), "type": e.__class__.__name__}
+    except Exception:
+        _logger.exception("Unexpected error snapshotting session %s", session_id)
+        return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 
 # For 'modal run' command
