@@ -48,7 +48,12 @@ from agent_sandbox.controllers.serialization import (
     iter_text_blocks,
     serialize_message,
 )
-from agent_sandbox.jobs import job_workspace_root, normalize_job_id
+from agent_sandbox.jobs import (
+    job_workspace_root,
+    normalize_job_id,
+    record_session_end,
+    record_session_start,
+)
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import ClaudeCliRequest, QueryBody
 from agent_sandbox.schemas.responses import ClaudeCliResponse, ErrorResponse, QueryResponse
@@ -482,6 +487,12 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         "agent.query.start",
         extra={"job_id": body.job_id, "request_id": request_id, "session_id": resolved_session_id},
     )
+
+    # Record session start for statistics tracking
+    record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
+    start_time = time.time()
+    final_status = "failed"
+
     try:
         messages: list[Message] = []
         result_message: ResultMessage | None = None
@@ -518,6 +529,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                 "num_turns": summary.get("num_turns"),
             },
         )
+        final_status = "complete"
         return {
             "ok": True,
             "messages": [serialize_message(message) for message in messages],
@@ -525,6 +537,13 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             "session_id": session_id,
         }
     finally:
+        # Record session end for statistics tracking
+        duration_ms = int((time.time() - start_time) * 1000)
+        record_session_end(
+            sandbox_type="agent_sdk",
+            status=final_status,
+            duration_ms=duration_ms,
+        )
         _maybe_commit_volume(force=job_root is not None)
 
 
@@ -565,6 +584,12 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 "session_id": resolved_session_id,
             },
         )
+
+        # Record session start for statistics tracking
+        record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
+        start_time = time.time()
+        final_status = "failed"
+
         try:
             async with ClaudeSDKClient(
                 options=_options(
@@ -600,8 +625,16 @@ async def query_agent_stream(body: QueryBody, request: Request):
                     "num_turns": summary.get("num_turns"),
                 },
             )
+            final_status = "complete"
             yield _format_sse("done", summary)
         finally:
+            # Record session end for statistics tracking
+            duration_ms = int((time.time() - start_time) * 1000)
+            record_session_end(
+                sandbox_type="agent_sdk",
+                status=final_status,
+                duration_ms=duration_ms,
+            )
             _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
