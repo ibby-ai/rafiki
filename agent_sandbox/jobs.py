@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -36,6 +37,16 @@ JOB_QUEUE = modal.Queue.from_name(_settings.job_queue_name, create_if_missing=Tr
 # Distributed dictionary storing job metadata keyed by job_id. Each entry contains
 # status, timestamps, result/error, and attempt count. Persists across workers.
 JOB_RESULTS = modal.Dict.from_name(_settings.job_results_dict, create_if_missing=True)
+
+# Distributed dictionary for storing session filesystem snapshots.
+# Keys are session_id values, values are dicts with:
+#   - image_id: Modal Image object_id for the snapshot
+#   - created_at: Unix timestamp when snapshot was taken
+#   - sandbox_name: Name of sandbox that was snapshotted
+# Used to restore filesystem state when resuming a session after sandbox timeout.
+SESSION_SNAPSHOTS = modal.Dict.from_name(
+    _settings.session_snapshot_store_name, create_if_missing=True
+)
 
 
 def normalize_job_id(job_id: str | None) -> str | None:
@@ -650,3 +661,458 @@ def bump_attempts(job_id: str) -> int:
     attempts = int(record.get("attempts", 0)) + 1
     update_job(job_id, {"attempts": attempts})
     return attempts
+
+
+# =============================================================================
+# STATISTICS AND METRICS
+# =============================================================================
+# Distributed dictionary for storing aggregate statistics.
+# Keys are time-bucketed (e.g., "stats:hourly:2024-01-15T14", "stats:daily:2024-01-15")
+# Values are dicts with counts and aggregates for that time bucket.
+
+STATS_STORE = modal.Dict.from_name(_settings.stats_store_name, create_if_missing=True)
+
+
+def _get_time_bucket_keys() -> tuple[str, str]:
+    """Get current hourly and daily bucket keys for statistics.
+
+    Returns:
+        Tuple of (hourly_key, daily_key) for current time bucket.
+    """
+    from datetime import datetime
+
+    now = datetime.now(UTC)
+    hourly_key = f"stats:hourly:{now.strftime('%Y-%m-%dT%H')}"
+    daily_key = f"stats:daily:{now.strftime('%Y-%m-%d')}"
+    return hourly_key, daily_key
+
+
+def record_session_start(
+    sandbox_type: str = "agent_sdk",
+    *,
+    job_id: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Record that a new session has started.
+
+    Args:
+        sandbox_type: Type of sandbox ("agent_sdk", "cli", "ralph")
+        job_id: Optional job ID for correlation
+        user_id: Optional user ID for unique user tracking
+    """
+    now = int(time.time())
+    hourly_key, daily_key = _get_time_bucket_keys()
+
+    for key in [hourly_key, daily_key]:
+        bucket = STATS_STORE.get(key) or {
+            "timestamp": now,
+            "agent_sdk": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "cli": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "ralph": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "users": set(),
+            "durations": [],
+            "queue_latencies": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
+
+        # Increment started count
+        if sandbox_type in bucket:
+            bucket[sandbox_type]["started"] = bucket[sandbox_type].get("started", 0) + 1
+
+        # Track unique users (convert set to list for JSON serialization)
+        if user_id:
+            users = set(bucket.get("users", []))
+            users.add(user_id)
+            bucket["users"] = list(users)
+
+        bucket["updated_at"] = now
+        STATS_STORE[key] = bucket
+
+
+def record_session_end(
+    sandbox_type: str = "agent_sdk",
+    status: str = "complete",
+    *,
+    duration_ms: int | None = None,
+    queue_latency_ms: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_usd: float | None = None,
+) -> None:
+    """Record that a session has ended.
+
+    Args:
+        sandbox_type: Type of sandbox ("agent_sdk", "cli", "ralph")
+        status: Final status ("complete", "failed", "canceled")
+        duration_ms: Session duration in milliseconds
+        queue_latency_ms: Time from enqueue to start in milliseconds
+        input_tokens: Input tokens consumed
+        output_tokens: Output tokens generated
+        cost_usd: Cost in USD
+    """
+    now = int(time.time())
+    hourly_key, daily_key = _get_time_bucket_keys()
+
+    for key in [hourly_key, daily_key]:
+        bucket = STATS_STORE.get(key) or {
+            "timestamp": now,
+            "agent_sdk": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "cli": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "ralph": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
+            "users": [],
+            "durations": [],
+            "queue_latencies": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
+
+        # Increment status count
+        if sandbox_type in bucket:
+            status_key = status if status in ["completed", "failed", "canceled"] else "completed"
+            # Normalize "complete" to "completed" for storage
+            if status == "complete":
+                status_key = "completed"
+            bucket[sandbox_type][status_key] = bucket[sandbox_type].get(status_key, 0) + 1
+
+        # Track durations (keep last 1000 for averaging)
+        if duration_ms is not None:
+            durations = bucket.get("durations", [])
+            durations.append(duration_ms)
+            bucket["durations"] = durations[-1000:]
+
+        # Track queue latencies
+        if queue_latency_ms is not None:
+            latencies = bucket.get("queue_latencies", [])
+            latencies.append(queue_latency_ms)
+            bucket["queue_latencies"] = latencies[-1000:]
+
+        # Accumulate token usage
+        if input_tokens is not None:
+            bucket["input_tokens"] = bucket.get("input_tokens", 0) + input_tokens
+        if output_tokens is not None:
+            bucket["output_tokens"] = bucket.get("output_tokens", 0) + output_tokens
+        if cost_usd is not None:
+            bucket["cost_usd"] = bucket.get("cost_usd", 0.0) + cost_usd
+
+        bucket["updated_at"] = now
+        STATS_STORE[key] = bucket
+
+
+def get_stats(period_hours: int = 24, include_time_series: bool = False) -> dict[str, Any]:
+    """Retrieve aggregated statistics for a time period.
+
+    Args:
+        period_hours: Number of hours to include (default 24, max 720)
+        include_time_series: Include hourly/daily breakdown
+
+    Returns:
+        Dictionary with aggregated statistics matching StatsResponse schema.
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.now(UTC)
+    period_start = now - timedelta(hours=period_hours)
+
+    # Initialize result structure
+    result: dict[str, Any] = {
+        "ok": True,
+        "period_start": int(period_start.timestamp()),
+        "period_end": int(now.timestamp()),
+        "agent_sdk": {
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "canceled_sessions": 0,
+        },
+        "cli": {
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "canceled_sessions": 0,
+        },
+        "ralph": {
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "canceled_sessions": 0,
+        },
+        "totals": {
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "canceled_sessions": 0,
+        },
+        "active_sandboxes": 0,
+        "users_active_last_5min": 0,
+    }
+
+    all_durations: list[int] = []
+    all_latencies: list[int] = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+    recent_users: set[str] = set()
+    hourly_stats: list[dict[str, Any]] = []
+
+    # Iterate through hourly buckets in the period
+    current = period_start
+    while current <= now:
+        hourly_key = f"stats:hourly:{current.strftime('%Y-%m-%dT%H')}"
+        bucket = STATS_STORE.get(hourly_key)
+
+        if bucket:
+            # Aggregate by sandbox type
+            for sandbox_type in ["agent_sdk", "cli", "ralph"]:
+                if sandbox_type in bucket:
+                    type_stats = bucket[sandbox_type]
+                    result[sandbox_type]["total_sessions"] += type_stats.get("started", 0)
+                    result[sandbox_type]["completed_sessions"] += type_stats.get("completed", 0)
+                    result[sandbox_type]["failed_sessions"] += type_stats.get("failed", 0)
+                    result[sandbox_type]["canceled_sessions"] += type_stats.get("canceled", 0)
+
+            # Aggregate durations and latencies
+            all_durations.extend(bucket.get("durations", []))
+            all_latencies.extend(bucket.get("queue_latencies", []))
+
+            # Aggregate token usage
+            total_input_tokens += bucket.get("input_tokens", 0)
+            total_output_tokens += bucket.get("output_tokens", 0)
+            total_cost += bucket.get("cost_usd", 0.0)
+
+            # Track recent users (last 5 minutes)
+            bucket_time = bucket.get("updated_at", 0)
+            if bucket_time and int(now.timestamp()) - bucket_time < 300:
+                recent_users.update(bucket.get("users", []))
+
+            # Add to time series if requested
+            if include_time_series:
+                hourly_stats.append(
+                    {
+                        "hour": current.strftime("%Y-%m-%dT%H"),
+                        "started": sum(
+                            bucket.get(st, {}).get("started", 0)
+                            for st in ["agent_sdk", "cli", "ralph"]
+                        ),
+                        "completed": sum(
+                            bucket.get(st, {}).get("completed", 0)
+                            for st in ["agent_sdk", "cli", "ralph"]
+                        ),
+                        "failed": sum(
+                            bucket.get(st, {}).get("failed", 0)
+                            for st in ["agent_sdk", "cli", "ralph"]
+                        ),
+                    }
+                )
+
+        current += timedelta(hours=1)
+
+    # Calculate totals
+    for sandbox_type in ["agent_sdk", "cli", "ralph"]:
+        result["totals"]["total_sessions"] += result[sandbox_type]["total_sessions"]
+        result["totals"]["completed_sessions"] += result[sandbox_type]["completed_sessions"]
+        result["totals"]["failed_sessions"] += result[sandbox_type]["failed_sessions"]
+        result["totals"]["canceled_sessions"] += result[sandbox_type]["canceled_sessions"]
+
+    # Calculate averages and rates
+    for sandbox_type in ["agent_sdk", "cli", "ralph", "totals"]:
+        stats = result[sandbox_type]
+        finished = stats["completed_sessions"] + stats["failed_sessions"]
+        if finished > 0:
+            stats["success_rate"] = round(stats["completed_sessions"] / finished, 3)
+
+    if all_durations:
+        result["totals"]["avg_duration_ms"] = round(sum(all_durations) / len(all_durations), 1)
+    if all_latencies:
+        result["totals"]["avg_queue_latency_ms"] = round(sum(all_latencies) / len(all_latencies), 1)
+
+    # Add token usage to totals
+    if total_input_tokens > 0:
+        result["totals"]["total_input_tokens"] = total_input_tokens
+    if total_output_tokens > 0:
+        result["totals"]["total_output_tokens"] = total_output_tokens
+    if total_cost > 0:
+        result["totals"]["total_cost_usd"] = round(total_cost, 4)
+
+    result["users_active_last_5min"] = len(recent_users)
+
+    if include_time_series:
+        result["hourly_stats"] = hourly_stats
+
+    return result
+
+
+# =============================================================================
+# SESSION SNAPSHOT MANAGEMENT
+# =============================================================================
+# Functions for storing and retrieving session filesystem snapshots.
+# Snapshots capture the sandbox filesystem state after agent work completes,
+# enabling session restoration when resuming after sandbox timeout.
+
+
+def store_session_snapshot(
+    session_id: str,
+    image_id: str,
+    sandbox_name: str,
+) -> dict[str, Any]:
+    """Store a filesystem snapshot reference for a session.
+
+    Records the Modal Image ID from a sandbox.snapshot_filesystem() call,
+    allowing the session's filesystem state to be restored when the session
+    resumes in a new sandbox.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to associate with this snapshot.
+        image_id: Modal Image object_id from sandbox.snapshot_filesystem().
+        sandbox_name: Name of the sandbox that was snapshotted (e.g., "svc-runner-8001").
+
+    Returns:
+        Dict with snapshot metadata including session_id, image_id, sandbox_name,
+        and created_at timestamp.
+
+    Storage Structure:
+        SESSION_SNAPSHOTS[session_id] = {
+            "session_id": "sess_abc123",
+            "image_id": "im-xxx",
+            "sandbox_name": "svc-runner-8001",
+            "created_at": 1704067200,
+        }
+
+    Usage:
+        Called after agent query completes to capture filesystem state:
+        ```python
+        # After agent work completes
+        image = sandbox.snapshot_filesystem()
+        store_session_snapshot(
+            session_id=result.session_id,
+            image_id=image.object_id,
+            sandbox_name="svc-runner-8001",
+        )
+        ```
+
+    Note:
+        - Only stores the latest snapshot per session (overwrites previous)
+        - image_id can be used to create a new sandbox from the snapshot:
+          `modal.Sandbox.create(image=modal.Image.from_id(image_id), ...)`
+        - Snapshots persist in Modal Dict across sandbox restarts
+
+    See Also:
+        - get_session_snapshot(): Retrieve snapshot for session restoration
+        - should_snapshot_session(): Check if snapshot is needed
+    """
+    now = int(time.time())
+    snapshot_info = {
+        "session_id": session_id,
+        "image_id": image_id,
+        "sandbox_name": sandbox_name,
+        "created_at": now,
+    }
+    SESSION_SNAPSHOTS[session_id] = snapshot_info
+    return snapshot_info
+
+
+def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
+    """Retrieve the stored filesystem snapshot for a session.
+
+    Looks up the most recent snapshot for the given session ID, which can be
+    used to restore filesystem state when creating a new sandbox.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to look up.
+
+    Returns:
+        Snapshot metadata dict if found, containing:
+        - session_id: The session identifier
+        - image_id: Modal Image object_id for sandbox.create(image=...)
+        - sandbox_name: Original sandbox name
+        - created_at: Unix timestamp of snapshot
+
+        None if no snapshot exists for this session.
+
+    Usage:
+        Called when resuming a session to check for restorable state:
+        ```python
+        snapshot = get_session_snapshot(session_id)
+        if snapshot:
+            # Create sandbox from snapshot
+            image = modal.Image.from_id(snapshot["image_id"])
+            sandbox = modal.Sandbox.create(image=image, ...)
+        ```
+
+    See Also:
+        - store_session_snapshot(): Store new snapshot
+        - should_snapshot_session(): Check if new snapshot needed
+    """
+    return SESSION_SNAPSHOTS.get(session_id)
+
+
+def should_snapshot_session(
+    session_id: str,
+    min_interval_seconds: int = 60,
+) -> bool:
+    """Check if a new snapshot should be taken for a session.
+
+    Prevents excessive snapshot creation by enforcing a minimum interval
+    between snapshots for the same session. Snapshots are expensive I/O
+    operations, so throttling is important for high-frequency queries.
+
+    Args:
+        session_id: The session to check.
+        min_interval_seconds: Minimum seconds since last snapshot before
+            allowing a new one. Default 60 seconds.
+
+    Returns:
+        True if no snapshot exists for this session, or if the last snapshot
+        was taken more than min_interval_seconds ago.
+        False if a recent snapshot exists (within the interval).
+
+    Usage:
+        ```python
+        if should_snapshot_session(session_id, min_interval_seconds=60):
+            image = sandbox.snapshot_filesystem()
+            store_session_snapshot(session_id, image.object_id, sandbox_name)
+        ```
+
+    Throttling Behavior:
+        - First query for a session: Always snapshots (no existing snapshot)
+        - Rapid follow-ups (<60s): Skip snapshot to reduce I/O
+        - After interval: Snapshot to capture recent changes
+
+    See Also:
+        - store_session_snapshot(): Store new snapshot
+        - get_session_snapshot(): Retrieve existing snapshot
+    """
+    snapshot = SESSION_SNAPSHOTS.get(session_id)
+    if not snapshot:
+        return True
+    created_at = snapshot.get("created_at", 0)
+    now = int(time.time())
+    return (now - created_at) >= min_interval_seconds
+
+
+def delete_session_snapshot(session_id: str) -> bool:
+    """Delete the stored snapshot for a session.
+
+    Removes the snapshot reference from storage. The underlying Modal Image
+    may still exist in Modal's infrastructure but will no longer be associated
+    with this session.
+
+    Args:
+        session_id: The session whose snapshot should be deleted.
+
+    Returns:
+        True if a snapshot was deleted, False if no snapshot existed.
+
+    Usage:
+        Called when a session is explicitly terminated or cleaned up:
+        ```python
+        delete_session_snapshot(session_id)
+        ```
+    """
+    try:
+        del SESSION_SNAPSHOTS[session_id]
+        return True
+    except KeyError:
+        return False
