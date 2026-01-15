@@ -188,6 +188,29 @@ class Settings(BaseSettings):
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
     session_store_name: str = "agent-session-store"
+    stats_store_name: str = Field(
+        default="agent-stats-store",
+        description="Modal Dict name for storing aggregate statistics",
+    )
+    session_snapshot_store_name: str = Field(
+        default="agent-session-snapshots",
+        description="Modal Dict name for storing session filesystem snapshots",
+    )
+    enable_session_snapshots: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic filesystem snapshots for session persistence. "
+            "When enabled, snapshots are taken after agent queries complete, "
+            "allowing session state to be restored when resuming after sandbox timeout."
+        ),
+    )
+    snapshot_min_interval_seconds: int = Field(
+        default=60,
+        description=(
+            "Minimum seconds between snapshots for the same session. "
+            "Prevents excessive snapshot creation for rapid-fire queries."
+        ),
+    )
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
