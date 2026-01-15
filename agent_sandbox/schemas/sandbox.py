@@ -25,6 +25,7 @@ class QueryBody(BaseSchema):
     session_key: str | None = None
     fork_session: bool = False
     job_id: str | None = None
+    user_id: str | None = None  # For statistics tracking
 
     @field_validator("job_id")
     @classmethod
