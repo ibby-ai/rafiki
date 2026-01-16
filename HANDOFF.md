@@ -8,14 +8,15 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 11: CLI Warm Pool**:
+The following commits were created for **Priority 3: Pre-warm API**:
 
 ```
-1340824 feat: add CLI warm pool for reduced cold-start latency
+d160cf4 feat: add pre-warm API for speculative sandbox warming
 ```
 
 **Previous session commits:**
 ```
+1340824 feat: add CLI warm pool for reduced cold-start latency
 22eb84b feat: add Agent SDK warm pool for reduced cold-start latency
 11be2ff docs: add commit history to handoff for next agent
 b2590ad docs: update handoff with CLI snapshot implementation
@@ -349,6 +350,103 @@ if snapshot:
     sandbox = modal.Sandbox.create(image=sandbox_image, ...)
 ```
 
+### Priority 3: Pre-warm API ✅ COMPLETE
+
+**Problem**: Users wait for sandbox to be ready after submitting prompt.
+
+**Solution**: Add `POST /warm` endpoint that clients call when user starts typing to speculatively prepare a sandbox before the actual query arrives.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `prewarm_store_name` setting (default: "agent-prewarm-store")
+   - Added `enable_prewarm` setting (default: True)
+   - Added `prewarm_timeout_seconds` setting (default: 60) for pre-warm expiry
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `PREWARM_STORE` Modal Dict for tracking pre-warm requests
+   - Added `generate_warm_id()` function to create unique correlation IDs
+   - Added `register_prewarm()` function to register pre-warm requests
+   - Added `update_prewarm_ready()` function to mark pre-warm as ready
+   - Added `get_prewarm()` function to retrieve pre-warm entry
+   - Added `claim_prewarm()` function to claim a ready pre-warm
+   - Added `expire_prewarm()` function to remove expired entries
+   - Added `get_prewarm_status()` function for monitoring
+   - Added `cleanup_expired_prewarms()` function for maintenance
+
+3. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+   - Added `warm_id` field to `QueryBody` for correlation
+   - Added `warm_id` field to `ClaudeCliRequest` for correlation
+   - Added `WarmRequest` schema for `POST /warm` requests
+   - Added `WarmResponse` schema for `POST /warm` responses
+   - Added `WarmStatusResponse` schema for `/warm/status` endpoint
+
+4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for `WarmRequest`, `WarmResponse`, `WarmStatusResponse`
+
+5. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for pre-warm functions and schemas
+   - Added `POST /warm` endpoint to initiate sandbox pre-warming
+   - Added `GET /warm/{warm_id}` endpoint to check pre-warm status
+   - Added `GET /warm/status` endpoint for overall pre-warm statistics
+   - Added `prewarm_agent_sdk_sandbox()` Modal function for background warming
+   - Added `prewarm_cli_sandbox()` Modal function for background CLI warming
+   - Modified `query_proxy()` to claim pre-warm when warm_id provided
+   - Modified `query_stream()` to claim pre-warm when warm_id provided
+   - Modified `run_claude_cli_remote()` to accept and claim warm_id
+   - Modified `claude_cli_proxy()` to pass warm_id
+   - Modified `claude_cli_submit()` to pass warm_id
+
+**How it works:**
+
+1. Client calls `POST /warm` when user starts typing (e.g., focus on input field)
+2. Server generates a `warm_id` and registers the pre-warm request in `PREWARM_STORE`
+3. Server spawns background task to prepare sandbox (claims from pool or creates new)
+4. Background task updates pre-warm entry with sandbox_id and URL when ready
+5. When actual query arrives with `warm_id`:
+   - Server claims the pre-warm (marks as claimed, for metrics)
+   - Uses the pre-warmed sandbox (already available in worker globals)
+6. Pre-warm entries expire after `prewarm_timeout_seconds` (default: 60s)
+
+**Pre-warm Entry Structure:**
+
+```python
+PREWARM_STORE[warm_id] = {
+    "warm_id": "abc-123",           # Unique correlation ID
+    "sandbox_type": "agent_sdk",    # "agent_sdk" or "cli"
+    "sandbox_id": "sb-xxx",         # Modal sandbox object_id (when ready)
+    "sandbox_url": "https://...",   # Tunnel URL (when ready)
+    "status": "warming",            # "warming" | "ready" | "claimed" | "expired"
+    "created_at": 1704067200,       # Unix timestamp
+    "expires_at": 1704067260,       # Unix timestamp (created_at + timeout)
+    "claimed_by": None,             # session_id/job_id (when claimed)
+    "session_id": "sess_123",       # Optional session_id for Agent SDK
+    "job_id": None,                 # Optional job_id for CLI
+}
+```
+
+**HTTP Endpoints:**
+
+- `POST /warm` - Initiate sandbox pre-warming, returns warm_id
+- `GET /warm/{warm_id}` - Check status of a specific pre-warm request
+- `GET /warm/status` - Get overall pre-warm statistics
+
+**Example Usage:**
+
+```bash
+# Client calls when user focuses on input
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/warm' \
+  -H 'Content-Type: application/json' \
+  -d '{"sandbox_type": "agent_sdk", "session_id": "sess_123"}'
+
+# Response: {"warm_id": "abc-123", "status": "warming", "expires_at": 1704067260, ...}
+
+# Then pass warm_id with the actual query
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What is 2+2?", "warm_id": "abc-123", "session_id": "sess_123"}'
+```
+
 ## Outstanding Tasks (In Order)
 
 ### Phase B: Performance
@@ -457,8 +555,8 @@ modal deploy -m agent_sandbox.deploy
 3. ✅ CLI Sandbox Snapshots (Priority 10) - COMPLETE
 4. ✅ Agent SDK Warm Pool (Priority 2) - COMPLETE
 5. ✅ CLI Warm Pool (Priority 11) - COMPLETE
-6. 🔄 Pre-warm API (Priority 3) - NEXT
-7. ⏳ Stop/Cancel Mid-Execution (Priority 8)
+6. ✅ Pre-warm API (Priority 3) - COMPLETE
+7. 🔄 Stop/Cancel Mid-Execution (Priority 8) - NEXT
 8. ⏳ Follow-up Prompt Queue (Priority 7)
 9. ⏳ Multiplayer Session Support (Priority 6)
 10. ⏳ Ralph Loop Improvements (Priority 12)
@@ -468,12 +566,13 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 3: Pre-warm API**
-   - Add `POST /warm` endpoint that triggers sandbox pre-warming
-   - Client calls when user starts typing (speculative warmup)
-   - Use request correlation to match warm request to query
-   - Reduces perceived latency for interactive use cases
+1. Continue with **Priority 8: Stop/Cancel Mid-Execution**
+   - Add `POST /session/{id}/stop` endpoint
+   - Set cancellation flag in session state
+   - Check flag in agent's `can_use_tool` handler
+   - Reject further tool calls when cancelled
+   - Provides graceful termination for runaway agents
 
-2. After completing Priority 3, move to Priority 8: Stop/Cancel Mid-Execution
+2. After completing Priority 8, move to Priority 7: Follow-up Prompt Queue
 
 3. Follow the phased implementation order in the plan file

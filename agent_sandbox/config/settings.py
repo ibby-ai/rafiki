@@ -323,6 +323,29 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Pre-warm API settings (speculative warming on user typing)
+    prewarm_store_name: str = Field(
+        default="agent-prewarm-store",
+        description="Modal Dict name for storing pre-warm request tracking",
+    )
+    enable_prewarm: bool = Field(
+        default=True,
+        description=(
+            "Enable the pre-warm API for speculative sandbox preparation. "
+            "When enabled, clients can call POST /warm when users start typing "
+            "to begin sandbox preparation before the actual query arrives."
+        ),
+    )
+    prewarm_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "How long (seconds) a pre-warmed sandbox reservation remains valid. "
+            "If no query arrives within this time, the pre-warm is expired "
+            "and the sandbox returns to the pool (if from pool) or continues warming. "
+            "Default: 60 seconds."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

@@ -52,18 +52,22 @@ from agent_sandbox.jobs import (
     bump_attempts,
     cancel_job,
     claim_cli_warm_sandbox,
+    claim_prewarm,
     claim_warm_sandbox,
     cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
     enqueue_job,
     generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
+    generate_warm_id,
     get_cli_job_snapshot,
     get_cli_warm_pool_status,
     get_expired_cli_pool_entries,
     get_expired_pool_entries,
     get_job_record,
     get_job_status,
+    get_prewarm,
+    get_prewarm_status,
     get_session_snapshot,
     get_stats,
     get_warm_pool_status,
@@ -71,6 +75,7 @@ from agent_sandbox.jobs import (
     job_workspace_root,
     normalize_job_id,
     register_cli_warm_sandbox,
+    register_prewarm,
     register_warm_sandbox,
     remove_from_cli_pool,
     remove_from_pool,
@@ -81,6 +86,7 @@ from agent_sandbox.jobs import (
     store_cli_job_snapshot,
     store_session_snapshot,
     update_job,
+    update_prewarm_ready,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.ralph.feedback import validate_feedback_commands
@@ -102,6 +108,9 @@ from agent_sandbox.schemas import (
     JobSubmitRequest,
     JobSubmitResponse,
     QueryBody,
+    WarmRequest,
+    WarmResponse,
+    WarmStatusResponse,
 )
 from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
 from agent_sandbox.schemas.responses import ClaudeCliSubmitResponse
@@ -1154,7 +1163,22 @@ async def query_proxy(request: Request, body: QueryBody):
     resolved_session_id = body.session_id
     # Note: We could also look up session_key -> session_id here if needed
 
+    # Check for pre-warmed sandbox (from POST /warm)
+    prewarm_claimed = None
+    if body.warm_id and settings.enable_prewarm:
+        prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
+        if prewarm_claimed:
+            _logger.info(
+                "Query using pre-warmed sandbox",
+                extra={
+                    "warm_id": body.warm_id,
+                    "sandbox_id": prewarm_claimed.get("sandbox_id"),
+                    "prewarm_status": prewarm_claimed.get("status"),
+                },
+            )
+
     # Use async getter with session_id for potential snapshot restoration
+    # If pre-warm was claimed, the sandbox should already be ready in globals
     sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     # Optional: per-request connect token (verified in sandbox service)
@@ -1207,7 +1231,22 @@ async def query_stream(request: Request, body: QueryBody):
     # Resolve session_id for snapshot restoration (if resuming a session)
     resolved_session_id = body.session_id
 
+    # Check for pre-warmed sandbox (from POST /warm)
+    prewarm_claimed = None
+    if body.warm_id and settings.enable_prewarm:
+        prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
+        if prewarm_claimed:
+            _logger.info(
+                "Query stream using pre-warmed sandbox",
+                extra={
+                    "warm_id": body.warm_id,
+                    "sandbox_id": prewarm_claimed.get("sandbox_id"),
+                    "prewarm_status": prewarm_claimed.get("status"),
+                },
+            )
+
     # Use async getter with session_id for potential snapshot restoration
+    # If pre-warm was claimed, the sandbox should already be ready in globals
     sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     headers = {}
@@ -1285,6 +1324,7 @@ async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
             debug=body.debug,
             probe=body.probe,
             write_result_path=body.write_result_path,
+            warm_id=body.warm_id,
         )
 
     return await anyio.to_thread.run_sync(_run)
@@ -1309,6 +1349,7 @@ async def claude_cli_submit(body: ClaudeCliRequest) -> ClaudeCliSubmitResponse:
             debug=body.debug,
             probe=body.probe,
             write_result_path=body.write_result_path,
+            warm_id=body.warm_id,
         )
 
     call = await anyio.to_thread.run_sync(_spawn)
@@ -1695,6 +1736,217 @@ async def cli_pool_status_endpoint():
         "sandbox_max_age_seconds": _settings.cli_warm_pool_sandbox_max_age,
         **pool_status,
     }
+
+
+# =============================================================================
+# Pre-warm API Endpoints
+# =============================================================================
+# These endpoints support speculative sandbox pre-warming for reduced latency.
+# Clients call POST /warm when users start typing to begin sandbox preparation
+# before the actual query arrives. The returned warm_id is passed with the
+# subsequent query for correlation.
+# =============================================================================
+
+
+@web_app.post("/warm", response_model=WarmResponse)
+async def prewarm_sandbox(body: WarmRequest) -> WarmResponse:
+    """Pre-warm a sandbox for reduced latency on subsequent queries.
+
+    Call this endpoint when users start typing to speculatively prepare
+    a sandbox before the actual query arrives. Returns a warm_id that
+    should be passed with the subsequent /query or /claude_cli request.
+
+    Args:
+        body: Pre-warm request with sandbox_type and optional session/job IDs.
+
+    Returns:
+        WarmResponse with warm_id for correlation.
+
+    Example:
+        ```bash
+        # Client calls when user focuses on input
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/warm' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"sandbox_type": "agent_sdk", "session_id": "sess_123"}'
+
+        # Response: {"warm_id": "abc-123", "status": "warming", ...}
+
+        # Then pass warm_id with the actual query
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/query' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"question": "...", "warm_id": "abc-123", "session_id": "sess_123"}'
+        ```
+    """
+    if not _settings.enable_prewarm:
+        return WarmResponse(
+            warm_id="",
+            status="error",
+            sandbox_type=body.sandbox_type,
+            expires_at=0,
+            message="Pre-warm API is disabled",
+        )
+
+    # Generate correlation ID
+    warm_id = generate_warm_id()
+
+    # Register the pre-warm request
+    entry = register_prewarm(
+        warm_id=warm_id,
+        sandbox_type=body.sandbox_type,
+        session_id=body.session_id,
+        job_id=body.job_id,
+    )
+
+    # Spawn background task to warm the sandbox
+    # This runs async and updates the pre-warm entry when ready
+    if body.sandbox_type == "agent_sdk":
+        prewarm_agent_sdk_sandbox.spawn(warm_id, body.session_id)
+    else:
+        prewarm_cli_sandbox.spawn(warm_id, body.job_id)
+
+    _logger.info(
+        "Pre-warm request registered",
+        extra={
+            "warm_id": warm_id,
+            "sandbox_type": body.sandbox_type,
+            "session_id": body.session_id,
+            "job_id": body.job_id,
+        },
+    )
+
+    return WarmResponse(
+        warm_id=warm_id,
+        status="warming",
+        sandbox_type=body.sandbox_type,
+        expires_at=entry["expires_at"],
+        message="Sandbox warming started",
+    )
+
+
+@web_app.get("/warm/{warm_id}")
+async def get_prewarm_status_by_id(warm_id: str):
+    """Get status of a specific pre-warm request.
+
+    Args:
+        warm_id: The pre-warm correlation ID from POST /warm.
+
+    Returns:
+        Pre-warm entry details or 404 if not found/expired.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/warm/abc-123'
+        ```
+    """
+    entry = get_prewarm(warm_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Pre-warm not found or expired")
+    return {"ok": True, **entry}
+
+
+@web_app.get("/warm/status", response_model=WarmStatusResponse)
+async def prewarm_status_endpoint() -> WarmStatusResponse:
+    """Get current status of the pre-warm store.
+
+    Returns statistics about pre-warm requests including counts of
+    warming, ready, claimed, and expired entries.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/warm/status'
+        ```
+    """
+    if not _settings.enable_prewarm:
+        return WarmStatusResponse(
+            enabled=False,
+            total=0,
+            warming=0,
+            ready=0,
+            claimed=0,
+            expired=0,
+            timeout_seconds=_settings.prewarm_timeout_seconds,
+        )
+
+    status = get_prewarm_status()
+    return WarmStatusResponse(
+        enabled=True,
+        total=status["total"],
+        warming=status["warming"],
+        ready=status["ready"],
+        claimed=status["claimed"],
+        expired=status["expired"],
+        timeout_seconds=_settings.prewarm_timeout_seconds,
+    )
+
+
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=120)
+def prewarm_agent_sdk_sandbox(warm_id: str, session_id: str | None = None):
+    """Background task to pre-warm an Agent SDK sandbox.
+
+    Creates or claims a sandbox and updates the pre-warm entry when ready.
+    This runs in the background after POST /warm returns.
+    """
+    try:
+        # Get or create sandbox (will claim from pool if available)
+        sb, url = get_or_start_background_sandbox(session_id=session_id)
+
+        # Update pre-warm entry with sandbox details
+        updated = update_prewarm_ready(warm_id, sb.object_id, url)
+        if updated:
+            _logger.info(
+                "Pre-warm ready (agent_sdk)",
+                extra={
+                    "warm_id": warm_id,
+                    "sandbox_id": sb.object_id,
+                    "url": url,
+                },
+            )
+        else:
+            _logger.warning(
+                "Pre-warm expired before sandbox ready",
+                extra={"warm_id": warm_id},
+            )
+    except Exception as exc:
+        _logger.error(
+            "Pre-warm failed (agent_sdk)",
+            exc_info=True,
+            extra={"warm_id": warm_id, "error": str(exc)},
+        )
+
+
+@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=120)
+def prewarm_cli_sandbox(warm_id: str, job_id: str | None = None):
+    """Background task to pre-warm a CLI sandbox.
+
+    Creates or claims a sandbox and updates the pre-warm entry when ready.
+    This runs in the background after POST /warm returns.
+    """
+    try:
+        # Get or create CLI sandbox (will claim from pool if available)
+        sb, url = get_or_start_cli_sandbox(job_id=job_id)
+
+        # Update pre-warm entry with sandbox details
+        updated = update_prewarm_ready(warm_id, sb.object_id, url)
+        if updated:
+            _logger.info(
+                "Pre-warm ready (cli)",
+                extra={
+                    "warm_id": warm_id,
+                    "sandbox_id": sb.object_id,
+                    "url": url,
+                },
+            )
+        else:
+            _logger.warning(
+                "Pre-warm expired before sandbox ready",
+                extra={"warm_id": warm_id},
+            )
+    except Exception as exc:
+        _logger.error(
+            "Pre-warm failed (cli)",
+            exc_info=True,
+            extra={"warm_id": warm_id, "error": str(exc)},
+        )
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
@@ -3228,6 +3480,7 @@ def run_claude_cli_remote(
     debug: bool = False,
     probe: str | None = None,
     write_result_path: str | None = None,
+    warm_id: str | None = None,
 ) -> dict | str:
     """Run Claude Code CLI in a dedicated sandbox and return the response."""
     tools_list = None
@@ -3257,10 +3510,26 @@ def run_claude_cli_remote(
             "job_id": normalized_job_id,
             "output_format": output_format,
             "probe": probe is not None,
+            "warm_id": warm_id,
         },
     )
 
+    # Check for pre-warmed sandbox (from POST /warm)
+    settings = Settings()
+    if warm_id and settings.enable_prewarm:
+        prewarm_claimed = claim_prewarm(warm_id, normalized_job_id or "anonymous")
+        if prewarm_claimed:
+            _logger.info(
+                "CLI using pre-warmed sandbox",
+                extra={
+                    "warm_id": warm_id,
+                    "sandbox_id": prewarm_claimed.get("sandbox_id"),
+                    "prewarm_status": prewarm_claimed.get("status"),
+                },
+            )
+
     # Pass job_id for potential snapshot restoration
+    # If pre-warm was claimed, the sandbox should already be ready in globals
     sb, url = get_or_start_cli_sandbox(job_id=normalized_job_id)
     headers: dict[str, str] = {}
     settings = Settings()

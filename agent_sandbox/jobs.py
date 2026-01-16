@@ -1942,3 +1942,323 @@ def cleanup_stale_cli_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
             if remove_from_cli_pool(sandbox_id):
                 removed += 1
     return removed
+
+
+# =============================================================================
+# Pre-warm API Tracking
+# =============================================================================
+# These functions manage speculative sandbox pre-warming. When a client calls
+# POST /warm (e.g., when user starts typing), we begin sandbox preparation
+# and track the request with a warm_id. When the actual query arrives with
+# the same warm_id, we can return the pre-warmed sandbox immediately.
+#
+# Pre-warm Entry Structure:
+# {
+#     "warm_id": str,              # Unique correlation ID
+#     "sandbox_type": str,         # "agent_sdk" or "cli"
+#     "sandbox_id": str | None,    # Modal sandbox object_id (once prepared)
+#     "sandbox_url": str | None,   # Tunnel URL (once prepared)
+#     "status": str,               # "warming" | "ready" | "claimed" | "expired"
+#     "created_at": int,           # Unix timestamp
+#     "expires_at": int,           # Unix timestamp (created_at + timeout)
+#     "claimed_by": str | None,    # session_id/job_id (when claimed)
+#     "session_id": str | None,    # Optional session_id for Agent SDK
+#     "job_id": str | None,        # Optional job_id for CLI
+# }
+# =============================================================================
+
+PREWARM_STORE = modal.Dict.from_name(_settings.prewarm_store_name, create_if_missing=True)
+
+
+def generate_warm_id() -> str:
+    """Generate a unique warm_id for pre-warm request correlation.
+
+    Returns:
+        A UUID string for tracking pre-warm requests.
+
+    Usage:
+        ```python
+        warm_id = generate_warm_id()
+        # Return to client, they pass it back with their query
+        ```
+    """
+    return str(uuid.uuid4())
+
+
+def register_prewarm(
+    warm_id: str,
+    sandbox_type: str,
+    session_id: str | None = None,
+    job_id: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Register a new pre-warm request.
+
+    Called when POST /warm is received. Creates a tracking entry for the
+    pre-warm request that will be updated as the sandbox warms up.
+
+    Args:
+        warm_id: Unique ID for correlation with future queries.
+        sandbox_type: "agent_sdk" or "cli".
+        session_id: Optional session_id for Agent SDK pre-warms.
+        job_id: Optional job_id for CLI pre-warms.
+        timeout_seconds: Custom timeout (defaults to settings.prewarm_timeout_seconds).
+
+    Returns:
+        The created pre-warm entry dict.
+
+    Usage:
+        ```python
+        warm_id = generate_warm_id()
+        entry = register_prewarm(warm_id, "agent_sdk", session_id="sess_123")
+        # Start sandbox warming in background
+        # Update entry when ready via update_prewarm_ready()
+        ```
+    """
+    now = int(time.time())
+    timeout = timeout_seconds or _settings.prewarm_timeout_seconds
+
+    entry = {
+        "warm_id": warm_id,
+        "sandbox_type": sandbox_type,
+        "sandbox_id": None,
+        "sandbox_url": None,
+        "status": "warming",
+        "created_at": now,
+        "expires_at": now + timeout,
+        "claimed_by": None,
+        "session_id": session_id,
+        "job_id": job_id,
+    }
+    PREWARM_STORE[warm_id] = entry
+    return entry
+
+
+def update_prewarm_ready(
+    warm_id: str,
+    sandbox_id: str,
+    sandbox_url: str,
+) -> dict[str, Any] | None:
+    """Update a pre-warm entry to ready status with sandbox details.
+
+    Called when sandbox preparation completes successfully.
+
+    Args:
+        warm_id: The pre-warm request ID.
+        sandbox_id: Modal sandbox object_id.
+        sandbox_url: Tunnel URL for the sandbox service.
+
+    Returns:
+        Updated entry dict, or None if not found or expired.
+
+    Usage:
+        ```python
+        # After sandbox is ready
+        update_prewarm_ready(warm_id, sb.object_id, tunnel_url)
+        ```
+    """
+    entry = PREWARM_STORE.get(warm_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired - clean up
+        try:
+            del PREWARM_STORE[warm_id]
+        except KeyError:
+            pass
+        return None
+
+    updated = {
+        **entry,
+        "status": "ready",
+        "sandbox_id": sandbox_id,
+        "sandbox_url": sandbox_url,
+    }
+    PREWARM_STORE[warm_id] = updated
+    return updated
+
+
+def get_prewarm(warm_id: str) -> dict[str, Any] | None:
+    """Get a pre-warm entry by warm_id.
+
+    Args:
+        warm_id: The pre-warm request ID.
+
+    Returns:
+        Pre-warm entry dict if found and not expired, None otherwise.
+
+    Usage:
+        ```python
+        entry = get_prewarm(warm_id)
+        if entry and entry["status"] == "ready":
+            # Use pre-warmed sandbox
+        ```
+    """
+    entry = PREWARM_STORE.get(warm_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired - clean up
+        try:
+            del PREWARM_STORE[warm_id]
+        except KeyError:
+            pass
+        return None
+
+    return entry
+
+
+def claim_prewarm(
+    warm_id: str,
+    claimed_by: str,
+) -> dict[str, Any] | None:
+    """Claim a pre-warmed sandbox for use.
+
+    Called when a query arrives with a warm_id. If the pre-warm is ready,
+    marks it as claimed and returns the sandbox details.
+
+    Args:
+        warm_id: The pre-warm request ID from the query.
+        claimed_by: session_id or job_id claiming the pre-warm.
+
+    Returns:
+        Claimed entry dict with sandbox details if successful, None otherwise.
+        Returns None if:
+        - Pre-warm not found
+        - Pre-warm expired
+        - Pre-warm not ready (still warming)
+        - Pre-warm already claimed
+
+    Usage:
+        ```python
+        # In query handler
+        if warm_id:
+            claimed = claim_prewarm(warm_id, session_id)
+            if claimed:
+                # Use claimed["sandbox_id"] and claimed["sandbox_url"]
+        ```
+    """
+    entry = get_prewarm(warm_id)
+    if not entry:
+        return None
+
+    # Can only claim ready pre-warms
+    if entry.get("status") != "ready":
+        return None
+
+    now = int(time.time())
+    updated = {
+        **entry,
+        "status": "claimed",
+        "claimed_by": claimed_by,
+        "claimed_at": now,
+    }
+    PREWARM_STORE[warm_id] = updated
+    return updated
+
+
+def expire_prewarm(warm_id: str) -> bool:
+    """Mark a pre-warm entry as expired and remove it.
+
+    Called when a pre-warm times out without being claimed.
+
+    Args:
+        warm_id: The pre-warm request ID to expire.
+
+    Returns:
+        True if entry was found and removed, False otherwise.
+
+    Usage:
+        ```python
+        # In cleanup task
+        expire_prewarm(warm_id)
+        ```
+    """
+    try:
+        del PREWARM_STORE[warm_id]
+        return True
+    except KeyError:
+        return False
+
+
+def get_prewarm_status() -> dict[str, Any]:
+    """Get current status of the pre-warm store.
+
+    Returns:
+        Dict with pre-warm statistics:
+        - total: Total pre-warm entries
+        - warming: Pre-warms still in progress
+        - ready: Pre-warms ready for use
+        - claimed: Pre-warms that have been claimed
+        - expired: Pre-warms past their expiry time
+
+    Usage:
+        ```python
+        status = get_prewarm_status()
+        print(f"Ready pre-warms: {status['ready']}")
+        ```
+    """
+    now = int(time.time())
+    entries = []
+    try:
+        entries = [entry for _, entry in PREWARM_STORE.items()]
+    except Exception:
+        pass
+
+    warming = 0
+    ready = 0
+    claimed = 0
+    expired = 0
+
+    for entry in entries:
+        if now > entry.get("expires_at", 0):
+            expired += 1
+        elif entry.get("status") == "warming":
+            warming += 1
+        elif entry.get("status") == "ready":
+            ready += 1
+        elif entry.get("status") == "claimed":
+            claimed += 1
+
+    return {
+        "total": len(entries),
+        "warming": warming,
+        "ready": ready,
+        "claimed": claimed,
+        "expired": expired,
+        "entries": entries,
+    }
+
+
+def cleanup_expired_prewarms() -> int:
+    """Remove expired pre-warm entries from the store.
+
+    Called periodically to clean up pre-warms that weren't claimed
+    within their timeout window.
+
+    Returns:
+        Number of expired entries removed.
+
+    Usage:
+        ```python
+        # In scheduled maintenance
+        removed = cleanup_expired_prewarms()
+        ```
+    """
+    now = int(time.time())
+    removed = 0
+    try:
+        for warm_id, entry in list(PREWARM_STORE.items()):
+            if now > entry.get("expires_at", 0):
+                try:
+                    del PREWARM_STORE[warm_id]
+                    removed += 1
+                except KeyError:
+                    pass
+    except Exception:
+        pass
+    return removed

@@ -15,7 +15,13 @@ from agent_sandbox.schemas.responses import (
     QueryResponse,
     SummarySchema,
 )
-from agent_sandbox.schemas.sandbox import ClaudeCliRequest, QueryBody
+from agent_sandbox.schemas.sandbox import (
+    ClaudeCliRequest,
+    QueryBody,
+    WarmRequest,
+    WarmResponse,
+    WarmStatusResponse,
+)
 
 __all__ = [
     "QueryBody",
@@ -31,4 +37,7 @@ __all__ = [
     "JobSubmitResponse",
     "JobStatusResponse",
     "ArtifactListResponse",
+    "WarmRequest",
+    "WarmResponse",
+    "WarmStatusResponse",
 ]

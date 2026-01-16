@@ -26,6 +26,7 @@ class QueryBody(BaseSchema):
     fork_session: bool = False
     job_id: str | None = None
     user_id: str | None = None  # For statistics tracking
+    warm_id: str | None = None  # Pre-warm correlation ID from POST /warm
 
     @field_validator("job_id")
     @classmethod
@@ -50,6 +51,7 @@ class ClaudeCliRequest(BaseSchema):
     debug: bool = False
     probe: Literal["version", "help", "path"] | None = None
     write_result_path: str | None = None
+    warm_id: str | None = None  # Pre-warm correlation ID from POST /warm
 
     @field_validator("job_id")
     @classmethod
@@ -68,3 +70,56 @@ class ClaudeCliRequest(BaseSchema):
                 f"({MAX_CLI_TIMEOUT_SECONDS // 3600} hours)"
             )
         return value
+
+
+# =============================================================================
+# Pre-warm API Schemas
+# =============================================================================
+# These schemas support the speculative sandbox pre-warming feature.
+# Clients call POST /warm when users start typing to begin sandbox preparation.
+# =============================================================================
+
+
+class WarmRequest(BaseSchema):
+    """Request body for sandbox pre-warming.
+
+    Use this endpoint when users start typing to begin sandbox preparation
+    before the actual query arrives.
+    """
+
+    sandbox_type: Literal["agent_sdk", "cli"] = "agent_sdk"
+    session_id: str | None = None  # For Agent SDK: enable session restoration
+    job_id: str | None = None  # For CLI: enable job workspace setup
+
+    @field_validator("job_id")
+    @classmethod
+    def validate_job_id(cls, value: str | None) -> str | None:
+        return _validate_job_id(value)
+
+
+class WarmResponse(BaseSchema):
+    """Response from sandbox pre-warming request.
+
+    Contains the warm_id to pass with the subsequent query for correlation.
+    """
+
+    warm_id: str
+    status: Literal["warming", "ready", "error"]
+    sandbox_type: str
+    expires_at: int  # Unix timestamp when pre-warm expires
+    message: str | None = None  # Human-readable status message
+
+
+class WarmStatusResponse(BaseSchema):
+    """Response for pre-warm status endpoint.
+
+    Shows current state of pre-warm requests.
+    """
+
+    enabled: bool
+    total: int
+    warming: int
+    ready: int
+    claimed: int
+    expired: int
+    timeout_seconds: int  # Configured pre-warm timeout
