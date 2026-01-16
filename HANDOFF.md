@@ -101,17 +101,62 @@ if snapshot:
     sandbox = modal.Sandbox.create(image=sandbox_image, ...)
 ```
 
+### Priority 10: CLI Sandbox Snapshots ✅ COMPLETE
+
+**Problem**: CLI jobs lose state when sandbox exits; can't resume long-running coding tasks.
+
+**Solution**: Use Modal's `snapshot_filesystem()` to save/restore CLI sandbox state per job_id.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `cli_job_snapshot_store_name` setting (default: "cli-job-snapshots")
+   - Added `enable_cli_job_snapshots` setting (default: True)
+   - Added `cli_snapshot_min_interval_seconds` setting (default: 60) for throttling
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `CLI_JOB_SNAPSHOTS` Modal Dict for storing per-job snapshot references
+   - Added `store_cli_job_snapshot()` function to save snapshot image reference
+   - Added `get_cli_job_snapshot()` function to retrieve snapshot for a job
+   - Added `should_snapshot_cli_job()` function for throttling (min interval between snapshots)
+   - Added `delete_cli_job_snapshot()` function for cleanup
+
+3. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for `get_cli_job_snapshot`, `should_snapshot_cli_job`, `store_cli_job_snapshot`
+   - Added `snapshot_cli_job_state()` Modal function to capture CLI sandbox filesystem state
+   - Modified `get_or_start_cli_sandbox()` to accept optional `job_id` parameter
+     - When job_id is provided and a snapshot exists, creates sandbox from snapshot image
+     - Tracks `restored_from_snapshot` in session metadata
+   - Modified `get_or_start_cli_sandbox_aio()` with same changes
+   - Modified `run_claude_cli_remote()` to:
+     - Pass job_id to sandbox getter for snapshot restoration
+     - Spawn `snapshot_cli_job_state` after successful execution (fire-and-forget)
+   - Modified `run_ralph_remote()` to:
+     - Pass job_id to sandbox getter for snapshot restoration
+     - Spawn `snapshot_cli_job_state` after execution completes
+
+**How it works:**
+1. After each CLI job completes successfully, the function spawns a background task to snapshot the CLI sandbox filesystem
+2. The snapshot is stored with the job_id in `CLI_JOB_SNAPSHOTS` Modal Dict
+3. Snapshots are throttled (default: 1 per minute per job) to avoid excessive I/O
+4. When a job resumes (by passing job_id) and the CLI sandbox needs to be created (e.g., after idle timeout):
+   - The system checks for an existing snapshot for that job
+   - If found, creates the new CLI sandbox from the snapshot image, preserving filesystem state
+
+**Key Modal API used:**
+```python
+# After CLI job completes
+image = sandbox.snapshot_filesystem()
+store_cli_job_snapshot(job_id, image.object_id, sandbox_name)
+
+# On job resume (when creating new CLI sandbox)
+snapshot = get_cli_job_snapshot(job_id)
+if snapshot:
+    sandbox_image = modal.Image.from_id(snapshot["image_id"])
+    sandbox = modal.Sandbox.create(image=sandbox_image, ...)
+```
+
 ## Outstanding Tasks (In Order)
-
-### Phase A: Foundation (Continue Here)
-
-#### Priority 10: CLI Sandbox Snapshots
-Same pattern as Priority 1 but for CLI sandbox (`claude-cli-runner`).
-
-**Implementation needed:**
-- Add snapshot logic to `get_or_start_cli_sandbox()` and async variant
-- Trigger snapshots after `/execute` and `/ralph/execute` complete
-- Store snapshots with job_id (since CLI uses job-based model vs session-based)
 
 ### Phase B: Performance
 
@@ -212,8 +257,8 @@ modal deploy -m agent_sandbox.deploy
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
 2. ✅ Agent SDK Sandbox Snapshots (Priority 1) - COMPLETE
-3. 🔄 CLI Sandbox Snapshots (Priority 10) - NEXT
-4. ⏳ Agent SDK Warm Pool (Priority 2)
+3. ✅ CLI Sandbox Snapshots (Priority 10) - COMPLETE
+4. 🔄 Agent SDK Warm Pool (Priority 2) - NEXT
 5. ⏳ CLI Warm Pool (Priority 11)
 6. ⏳ Pre-warm API (Priority 3)
 7. ⏳ Stop/Cancel Mid-Execution (Priority 8)
@@ -226,11 +271,12 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 10: CLI Sandbox Snapshots**
-   - Apply the same pattern from Priority 1 to the CLI sandbox
-   - Key difference: CLI uses job_id instead of session_id
-   - Files to modify: `app.py` (get_or_start_cli_sandbox), `cli_controller.py`
+1. Continue with **Priority 2: Agent SDK Warm Pool**
+   - Add settings: `warm_pool_size`, `warm_pool_refresh_interval`
+   - Create background task to maintain pool of warm sandboxes
+   - Use `Sandbox.list()` with tags to track pool membership
+   - Grab from pool on request, replenish asynchronously
 
-2. After completing Priority 10, move to Phase B: Performance (warm pools)
+2. After completing Priority 2, move to Priority 11: CLI Warm Pool
 
 3. Follow the phased implementation order in the plan file
