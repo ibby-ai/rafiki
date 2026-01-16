@@ -11,7 +11,7 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 The following commits were created for **Priority 2: Agent SDK Warm Pool**:
 
 ```
-(pending commit) feat: add Agent SDK warm sandbox pool for reduced cold starts
+22eb84b feat: add Agent SDK warm pool for reduced cold-start latency
 ```
 
 **Previous session commits:**
