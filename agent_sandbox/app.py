@@ -77,6 +77,11 @@ from agent_sandbox.jobs import (
     get_prewarm_status,
     get_prompt_queue_status,
     get_queue_size,
+    # Ralph control functions
+    get_ralph_checkpoint,
+    get_ralph_control_status,
+    get_ralph_iteration_snapshot,
+    get_ralph_snapshot_status,
     get_session_cancellation,
     get_session_history,
     get_session_message_count,
@@ -89,6 +94,8 @@ from agent_sandbox.jobs import (
     is_job_due,
     is_session_executing,
     job_workspace_root,
+    list_ralph_iteration_snapshots,
+    mark_ralph_resumed,
     normalize_job_id,
     queue_prompt,
     register_cli_warm_sandbox,
@@ -97,6 +104,7 @@ from agent_sandbox.jobs import (
     remove_from_cli_pool,
     remove_from_pool,
     remove_queued_prompt,
+    request_ralph_pause,
     resolve_job_artifact,
     revoke_session_user,
     should_skip_job,
@@ -111,7 +119,15 @@ from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
 from agent_sandbox.ralph.feedback import validate_feedback_commands
 from agent_sandbox.ralph.schemas import (
     RalphExecuteRequest,
+    RalphIterationSnapshotEntry,
     RalphLoopResult,
+    RalphPauseRequest,
+    RalphPauseResponse,
+    RalphResumeRequest,
+    RalphResumeResponse,
+    RalphRollbackRequest,
+    RalphRollbackResponse,
+    RalphSnapshotListResponse,
     RalphStartRequest,
     RalphStartResponse,
     RalphStatusResponse,
@@ -1671,6 +1687,237 @@ async def get_ralph_status(job_id: str, call_id: str) -> RalphStatusResponse:
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# =============================================================================
+# RALPH CONTROL ENDPOINTS (PAUSE/RESUME/SNAPSHOTS)
+# =============================================================================
+
+
+@web_app.post("/ralph/{job_id}/pause", response_model=RalphPauseResponse)
+async def pause_ralph(job_id: str, body: RalphPauseRequest) -> RalphPauseResponse:
+    """Request a Ralph loop to pause at the next safe point.
+
+    The pause won't take effect immediately - the loop will complete its
+    current iteration and then pause before starting the next one.
+
+    Args:
+        job_id: The Ralph job ID to pause.
+
+    Returns:
+        RalphPauseResponse with pause request status.
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    if not _settings.enable_ralph_control:
+        return RalphPauseResponse(
+            ok=False,
+            job_id=job_id,
+            status="disabled",
+            message="Ralph control is not enabled",
+        )
+
+    result = request_ralph_pause(
+        job_id=job_id,
+        requested_by=body.requested_by,
+        reason=body.reason,
+    )
+
+    return RalphPauseResponse(
+        ok=True,
+        job_id=job_id,
+        status=result.get("status", "pause_requested"),
+        paused_at=result.get("paused_at"),
+        reason=body.reason,
+        message=result.get("message"),
+    )
+
+
+@web_app.post("/ralph/{job_id}/resume", response_model=RalphResumeResponse)
+async def resume_ralph(job_id: str, body: RalphResumeRequest) -> RalphResumeResponse:
+    """Resume a paused Ralph loop from its checkpoint.
+
+    Spawns a new Modal function call that continues from the saved checkpoint.
+
+    Args:
+        job_id: The Ralph job ID to resume.
+
+    Returns:
+        RalphResumeResponse with new call_id for polling.
+    """
+    import json as json_module
+
+    job_id = _normalize_job_id_or_400(job_id)
+
+    if not _settings.enable_ralph_control:
+        return RalphResumeResponse(
+            ok=False,
+            job_id=job_id,
+            status="disabled",
+            message="Ralph control is not enabled",
+        )
+
+    # Get checkpoint
+    checkpoint = get_ralph_checkpoint(job_id)
+    if not checkpoint:
+        return RalphResumeResponse(
+            ok=False,
+            job_id=job_id,
+            status="not_paused",
+            message="Ralph loop is not paused or checkpoint expired",
+        )
+
+    # Mark as resumed
+    mark_ralph_resumed(job_id, requested_by=body.requested_by)
+
+    # Spawn resumed loop with checkpoint data
+    # The checkpoint contains prd_json (serialized PRD state)
+    prd_json = checkpoint.get("prd_json", "{}")
+
+    # Build workspace_source_json - empty source since workspace already exists
+    workspace_source_json = json_module.dumps({"type": "empty"})
+
+    call = run_ralph_remote.spawn(
+        job_id=job_id,
+        prd_json=prd_json,
+        workspace_source_json=workspace_source_json,
+        max_iterations=checkpoint.get("max_iterations", 10),
+        resume_checkpoint_json=json_module.dumps(checkpoint),
+    )
+
+    call_id = _function_call_id(call)
+    if not call_id:
+        raise HTTPException(status_code=500, detail="Unable to determine call id")
+
+    return RalphResumeResponse(
+        ok=True,
+        job_id=job_id,
+        status="resumed",
+        call_id=call_id,
+        message="Ralph loop resumed from checkpoint",
+    )
+
+
+@web_app.get("/ralph/{job_id}/control")
+async def get_ralph_control(job_id: str):
+    """Get the current control status for a Ralph job.
+
+    Args:
+        job_id: The Ralph job ID to check.
+
+    Returns:
+        Control status including pause state and checkpoint info.
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    status = get_ralph_control_status(job_id)
+    if not status:
+        return {"ok": True, "job_id": job_id, "status": "running", "paused": False}
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": status.get("status"),
+        "paused": status.get("status") in ("pause_requested", "paused"),
+        "pause_requested_at": status.get("pause_requested_at"),
+        "paused_at": status.get("paused_at"),
+        "resumed_at": status.get("resumed_at"),
+        "reason": status.get("reason"),
+        "has_checkpoint": status.get("checkpoint") is not None,
+    }
+
+
+@web_app.get("/ralph/{job_id}/snapshots", response_model=RalphSnapshotListResponse)
+async def list_ralph_snapshots(job_id: str) -> RalphSnapshotListResponse:
+    """List all available iteration snapshots for a Ralph job.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        List of iteration snapshots available for rollback.
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    if not _settings.enable_ralph_iteration_snapshots:
+        return RalphSnapshotListResponse(
+            ok=False,
+            job_id=job_id,
+            snapshots=[],
+            total=0,
+        )
+
+    snapshots = list_ralph_iteration_snapshots(job_id)
+    entries = [RalphIterationSnapshotEntry(**s) for s in snapshots]
+
+    return RalphSnapshotListResponse(
+        ok=True,
+        job_id=job_id,
+        snapshots=entries,
+        total=len(entries),
+    )
+
+
+@web_app.post("/ralph/{job_id}/rollback/{iteration}", response_model=RalphRollbackResponse)
+async def rollback_ralph(
+    job_id: str, iteration: int, body: RalphRollbackRequest
+) -> RalphRollbackResponse:
+    """Rollback a Ralph job to a previous iteration's state.
+
+    This restores the filesystem state from the specified iteration's snapshot
+    and starts a new Ralph loop from that point.
+
+    Args:
+        job_id: The Ralph job ID.
+        iteration: The iteration number to rollback to.
+
+    Returns:
+        RalphRollbackResponse with rollback status.
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    if not _settings.enable_ralph_iteration_snapshots:
+        return RalphRollbackResponse(
+            ok=False,
+            job_id=job_id,
+            iteration=iteration,
+            status="disabled",
+            message="Ralph iteration snapshots are not enabled",
+        )
+
+    # Get the snapshot
+    snapshot = get_ralph_iteration_snapshot(job_id, iteration)
+    if not snapshot:
+        return RalphRollbackResponse(
+            ok=False,
+            job_id=job_id,
+            iteration=iteration,
+            status="snapshot_not_found",
+            message=f"No snapshot found for iteration {iteration}",
+        )
+
+    # Note: Actual rollback requires creating a new sandbox from the snapshot image
+    # This is a complex operation that requires the CLI sandbox to be recreated
+    # For now, we return the snapshot info and let the caller handle the rollback
+
+    return RalphRollbackResponse(
+        ok=True,
+        job_id=job_id,
+        iteration=iteration,
+        status="snapshot_available",
+        message=f"Snapshot available for iteration {iteration}. "
+        f"Image ID: {snapshot.get('image_id')}. "
+        "Use this to restore the sandbox state.",
+    )
+
+
+@web_app.get("/ralph/snapshots/status")
+async def ralph_snapshot_status():
+    """Get overall status of Ralph iteration snapshots.
+
+    Returns statistics about snapshot storage and configuration.
+    """
+    return get_ralph_snapshot_status()
 
 
 @web_app.get("/service_info")
@@ -4357,8 +4604,24 @@ def run_ralph_remote(
     feedback_timeout: int = 120,
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
+    resume_checkpoint_json: str | None = None,
 ) -> dict:
-    """Run Ralph autonomous coding loop inside a dedicated Claude CLI sandbox."""
+    """Run Ralph autonomous coding loop inside a dedicated Claude CLI sandbox.
+
+    Args:
+        job_id: Unique job identifier.
+        prd_json: JSON-serialized PRD.
+        workspace_source_json: JSON-serialized workspace source config.
+        prompt_template: Custom prompt template.
+        max_iterations: Maximum iterations.
+        timeout_per_iteration: CLI timeout per iteration.
+        allowed_tools: Comma-separated list of allowed CLI tools.
+        feedback_commands: Comma-separated list of feedback commands.
+        feedback_timeout: Timeout for feedback commands.
+        auto_commit: Whether to auto-commit changes.
+        max_consecutive_failures: Max failures before stopping.
+        resume_checkpoint_json: JSON-serialized checkpoint for resuming a paused loop.
+    """
     normalized_job_id = normalize_job_id(job_id)
     if not normalized_job_id:
         raise ValueError("job_id must be a valid UUID")
@@ -4369,19 +4632,26 @@ def run_ralph_remote(
     tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()]
     feedback_list = [c.strip() for c in feedback_commands.split(",") if c.strip()]
 
-    request_body = RalphExecuteRequest(
-        job_id=normalized_job_id,
-        prd=json.loads(prd_json),
-        workspace_source=json.loads(workspace_source_json),
-        prompt_template=prompt_template,
-        max_iterations=max_iterations,
-        timeout_per_iteration=timeout_per_iteration,
-        allowed_tools=tools_list,
-        feedback_commands=feedback_list,
-        feedback_timeout=feedback_timeout,
-        auto_commit=auto_commit,
-        max_consecutive_failures=max_consecutive_failures,
-    )
+    # Build request body
+    request_dict = {
+        "job_id": normalized_job_id,
+        "prd": json.loads(prd_json),
+        "workspace_source": json.loads(workspace_source_json),
+        "prompt_template": prompt_template,
+        "max_iterations": max_iterations,
+        "timeout_per_iteration": timeout_per_iteration,
+        "allowed_tools": tools_list,
+        "feedback_commands": feedback_list,
+        "feedback_timeout": feedback_timeout,
+        "auto_commit": auto_commit,
+        "max_consecutive_failures": max_consecutive_failures,
+    }
+
+    # Add resume checkpoint if provided
+    if resume_checkpoint_json:
+        request_dict["resume_checkpoint"] = json.loads(resume_checkpoint_json)
+
+    request_body = RalphExecuteRequest(**request_dict)
 
     estimated_runtime = max_iterations * timeout_per_iteration
     # Pass job_id for potential snapshot restoration

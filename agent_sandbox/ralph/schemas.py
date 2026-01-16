@@ -67,6 +67,7 @@ class RalphLoopStatus(str, Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     STOPPED = "stopped"
+    PAUSED = "paused"
     MAX_ITERATIONS = "max_iterations"
 
 
@@ -121,6 +122,11 @@ class RalphExecuteRequest(BaseModel):
     feedback_timeout: int = Field(default=120, ge=10, le=600)
     auto_commit: bool = True
     max_consecutive_failures: int = Field(default=3, ge=1, le=10)
+    # Optional checkpoint for resuming a paused loop
+    resume_checkpoint: dict | None = Field(
+        default=None,
+        description="Checkpoint data from a paused loop for resuming execution",
+    )
 
 
 class RalphStartResponse(BaseModel):
@@ -142,3 +148,123 @@ class RalphStatusResponse(BaseModel):
     tasks_total: int
     current_task: str | None = None
     result: RalphLoopResult | None = None
+
+
+# =============================================================================
+# RALPH CONTROL SCHEMAS (PAUSE/RESUME)
+# =============================================================================
+
+
+class RalphPauseRequest(BaseModel):
+    """Request to pause a running Ralph loop."""
+
+    requested_by: str | None = None
+    reason: str | None = None
+
+
+class RalphPauseResponse(BaseModel):
+    """Response from pausing a Ralph loop."""
+
+    ok: bool
+    job_id: str
+    status: str  # "paused" or "already_paused" or "not_running"
+    paused_at: int | None = None
+    reason: str | None = None
+    message: str | None = None
+
+
+class RalphResumeRequest(BaseModel):
+    """Request to resume a paused Ralph loop."""
+
+    requested_by: str | None = None
+
+
+class RalphResumeResponse(BaseModel):
+    """Response from resuming a Ralph loop."""
+
+    ok: bool
+    job_id: str
+    status: str  # "resumed" or "not_paused"
+    call_id: str | None = None  # New Modal call ID for resumed loop
+    message: str | None = None
+
+
+class RalphCheckpoint(BaseModel):
+    """Checkpoint state for pausing/resuming Ralph loops."""
+
+    job_id: str
+    iteration: int
+    max_iterations: int
+    tasks_completed: int
+    tasks_total: int
+    current_task_id: str | None = None
+    iteration_results: list[IterationResult] = Field(default_factory=list)
+    prd_json: str  # Serialized PRD state
+    created_at: int
+    reason: str | None = None
+    requested_by: str | None = None
+
+
+# =============================================================================
+# RALPH ITERATION SNAPSHOT SCHEMAS (ROLLBACK)
+# =============================================================================
+
+
+class RalphIterationSnapshotEntry(BaseModel):
+    """Entry for an iteration snapshot."""
+
+    job_id: str
+    iteration: int
+    task_id: str | None = None
+    task_description: str | None = None
+    image_id: str  # Modal Image object_id
+    commit_sha: str | None = None
+    created_at: int
+    feedback_passed: bool = False
+
+
+class RalphSnapshotListResponse(BaseModel):
+    """Response listing iteration snapshots for a job."""
+
+    ok: bool
+    job_id: str
+    snapshots: list[RalphIterationSnapshotEntry] = Field(default_factory=list)
+    total: int = 0
+
+
+class RalphRollbackRequest(BaseModel):
+    """Request to rollback to a specific iteration."""
+
+    iteration: int
+    requested_by: str | None = None
+
+
+class RalphRollbackResponse(BaseModel):
+    """Response from rolling back to an iteration."""
+
+    ok: bool
+    job_id: str
+    iteration: int
+    status: str  # "rolled_back" or "snapshot_not_found" or "error"
+    message: str | None = None
+
+
+# =============================================================================
+# RALPH STREAMING SCHEMAS (SSE)
+# =============================================================================
+
+
+class RalphStreamEvent(BaseModel):
+    """Event sent during Ralph SSE streaming."""
+
+    event_type: str  # "iteration_start", "iteration_complete", "iteration_failed", "done", "error"
+    job_id: str
+    iteration: int | None = None
+    task_id: str | None = None
+    task_description: str | None = None
+    status: str | None = None
+    cli_exit_code: int | None = None
+    feedback_passed: bool | None = None
+    commit_sha: str | None = None
+    error: str | None = None
+    result: RalphLoopResult | None = None  # Final result on "done" event

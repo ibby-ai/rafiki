@@ -3502,3 +3502,479 @@ def get_multiplayer_status() -> dict[str, Any]:
         "total_messages": total_messages,
         "max_history_per_session": _settings.max_message_history_per_session,
     }
+
+
+# =============================================================================
+# Ralph Control API (Pause/Resume)
+# =============================================================================
+# Functions for pausing, resuming, and managing Ralph loop execution.
+#
+# Control Entry Structure:
+#   RALPH_CONTROL[job_id] = {
+#       "job_id": str,              # Ralph job identifier
+#       "status": str,              # "running" | "pause_requested" | "paused" | "resumed"
+#       "pause_requested_at": int,  # Unix timestamp when pause was requested
+#       "paused_at": int | None,    # Unix timestamp when loop actually paused
+#       "resumed_at": int | None,   # Unix timestamp when loop resumed
+#       "requested_by": str | None, # Who requested pause/resume
+#       "reason": str | None,       # Why paused
+#       "checkpoint": dict | None,  # Checkpoint data for resume
+#       "expires_at": int,          # When this entry expires
+#   }
+#
+# Lifecycle:
+#   1. Client calls POST /ralph/{job_id}/pause
+#   2. Server sets status="pause_requested" in RALPH_CONTROL
+#   3. Ralph loop checks is_ralph_paused() before each iteration
+#   4. When paused, loop saves checkpoint and returns with status=PAUSED
+#   5. Client calls POST /ralph/{job_id}/resume
+#   6. Server spawns new Ralph function with checkpoint data
+#   7. Loop continues from saved checkpoint
+
+RALPH_CONTROL = modal.Dict.from_name(_settings.ralph_control_store_name, create_if_missing=True)
+
+
+def request_ralph_pause(
+    job_id: str,
+    requested_by: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Request a Ralph loop to pause at the next safe point.
+
+    The pause won't take effect immediately - the loop will complete its
+    current iteration and then pause before starting the next one.
+
+    Args:
+        job_id: The Ralph job ID to pause.
+        requested_by: Optional identifier of who requested the pause.
+        reason: Optional reason for pausing.
+
+    Returns:
+        Dict with pause request status.
+
+    Usage:
+        ```python
+        result = request_ralph_pause(job_id, reason="Need to review progress")
+        # result["status"] == "pause_requested"
+        ```
+    """
+    now = int(time.time())
+    expiry = now + _settings.ralph_control_expiry_seconds
+
+    existing = RALPH_CONTROL.get(job_id)
+    if existing and existing.get("status") in ("pause_requested", "paused"):
+        return {
+            "job_id": job_id,
+            "status": "already_paused",
+            "paused_at": existing.get("paused_at"),
+            "message": "Ralph loop is already paused or pause is pending",
+        }
+
+    entry = {
+        "job_id": job_id,
+        "status": "pause_requested",
+        "pause_requested_at": now,
+        "paused_at": None,
+        "resumed_at": None,
+        "requested_by": requested_by,
+        "reason": reason,
+        "checkpoint": None,
+        "expires_at": expiry,
+    }
+    RALPH_CONTROL[job_id] = entry
+
+    return {
+        "job_id": job_id,
+        "status": "pause_requested",
+        "pause_requested_at": now,
+        "reason": reason,
+        "message": "Pause requested - loop will pause after current iteration",
+    }
+
+
+def is_ralph_paused(job_id: str) -> bool:
+    """Check if a Ralph loop has a pending pause request.
+
+    Called by the Ralph loop before each iteration to check if it should pause.
+
+    Args:
+        job_id: The Ralph job ID to check.
+
+    Returns:
+        True if pause is requested or loop is paused, False otherwise.
+
+    Usage:
+        ```python
+        # In Ralph loop
+        for iteration in range(1, max_iterations + 1):
+            if is_ralph_paused(job_id):
+                save_checkpoint(...)
+                return {"status": "paused", ...}
+            # Continue with iteration
+        ```
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry:
+        return False
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired - clean up
+        try:
+            del RALPH_CONTROL[job_id]
+        except KeyError:
+            pass
+        return False
+
+    return entry.get("status") in ("pause_requested", "paused")
+
+
+def mark_ralph_paused(
+    job_id: str, checkpoint: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Mark a Ralph loop as paused with optional checkpoint data.
+
+    Called by the Ralph loop when it pauses to store checkpoint for resume.
+
+    Args:
+        job_id: The Ralph job ID.
+        checkpoint: Optional checkpoint data for resuming later.
+
+    Returns:
+        Updated control entry, or None if no pause was requested.
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry or entry.get("status") != "pause_requested":
+        return None
+
+    now = int(time.time())
+    entry.update(
+        {
+            "status": "paused",
+            "paused_at": now,
+            "checkpoint": checkpoint,
+        }
+    )
+    RALPH_CONTROL[job_id] = entry
+    return entry
+
+
+def get_ralph_checkpoint(job_id: str) -> dict[str, Any] | None:
+    """Get the checkpoint data for a paused Ralph loop.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        Checkpoint data if loop is paused with checkpoint, None otherwise.
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry or entry.get("status") != "paused":
+        return None
+    return entry.get("checkpoint")
+
+
+def mark_ralph_resumed(job_id: str, requested_by: str | None = None) -> dict[str, Any] | None:
+    """Mark a Ralph loop as resumed and clear the pause state.
+
+    Called when resuming a paused loop.
+
+    Args:
+        job_id: The Ralph job ID.
+        requested_by: Who is resuming the loop.
+
+    Returns:
+        Updated control entry, or None if loop wasn't paused.
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry or entry.get("status") != "paused":
+        return None
+
+    now = int(time.time())
+    entry.update(
+        {
+            "status": "resumed",
+            "resumed_at": now,
+            "requested_by": requested_by,
+        }
+    )
+    RALPH_CONTROL[job_id] = entry
+    return entry
+
+
+def clear_ralph_control(job_id: str) -> bool:
+    """Clear control state for a Ralph job.
+
+    Called after loop completes or when cleaning up.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        True if entry was found and cleared, False otherwise.
+    """
+    try:
+        del RALPH_CONTROL[job_id]
+        return True
+    except KeyError:
+        return False
+
+
+def get_ralph_control_status(job_id: str) -> dict[str, Any] | None:
+    """Get the current control status for a Ralph job.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        Control entry if found, None otherwise.
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired
+        try:
+            del RALPH_CONTROL[job_id]
+        except KeyError:
+            pass
+        return None
+
+    return entry
+
+
+# =============================================================================
+# Ralph Iteration Snapshots (Rollback Support)
+# =============================================================================
+# Functions for managing filesystem snapshots after each Ralph iteration.
+#
+# Snapshot Entry Structure:
+#   RALPH_ITERATION_SNAPSHOTS[job_id] = {
+#       "job_id": str,
+#       "snapshots": [
+#           {
+#               "iteration": int,
+#               "task_id": str | None,
+#               "task_description": str | None,
+#               "image_id": str,           # Modal Image object_id
+#               "commit_sha": str | None,
+#               "created_at": int,
+#               "feedback_passed": bool,
+#           }
+#       ],
+#       "updated_at": int,
+#   }
+#
+# Usage:
+#   - After each successful iteration, store_ralph_iteration_snapshot() is called
+#   - Snapshots are stored per-job with all iterations
+#   - Old snapshots are pruned when max_snapshots_per_job is reached
+#   - Rollback restores sandbox from the specified iteration's snapshot
+
+RALPH_ITERATION_SNAPSHOTS = modal.Dict.from_name(
+    _settings.ralph_iteration_snapshot_store_name, create_if_missing=True
+)
+
+
+def store_ralph_iteration_snapshot(
+    job_id: str,
+    iteration: int,
+    image_id: str,
+    task_id: str | None = None,
+    task_description: str | None = None,
+    commit_sha: str | None = None,
+    feedback_passed: bool = False,
+) -> dict[str, Any]:
+    """Store a filesystem snapshot for a Ralph iteration.
+
+    Called after each successful iteration to enable rollback.
+
+    Args:
+        job_id: The Ralph job ID.
+        iteration: The iteration number that was just completed.
+        image_id: Modal Image object_id from sandbox.snapshot_filesystem().
+        task_id: The task ID that was worked on.
+        task_description: Description of the task.
+        commit_sha: Git commit SHA if auto-commit was enabled.
+        feedback_passed: Whether feedback commands passed.
+
+    Returns:
+        The created snapshot entry.
+
+    Usage:
+        ```python
+        # After iteration completes successfully
+        image = sandbox.snapshot_filesystem()
+        store_ralph_iteration_snapshot(
+            job_id=job_id,
+            iteration=5,
+            image_id=image.object_id,
+            task_id="task_1",
+            commit_sha="abc123",
+            feedback_passed=True,
+        )
+        ```
+    """
+    now = int(time.time())
+
+    # Get or create snapshot list for this job
+    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id) or {
+        "job_id": job_id,
+        "snapshots": [],
+        "updated_at": now,
+    }
+
+    # Create snapshot entry
+    snapshot = {
+        "iteration": iteration,
+        "task_id": task_id,
+        "task_description": task_description,
+        "image_id": image_id,
+        "commit_sha": commit_sha,
+        "created_at": now,
+        "feedback_passed": feedback_passed,
+    }
+
+    # Add to list
+    entry["snapshots"].append(snapshot)
+
+    # Prune old snapshots if over limit
+    max_snapshots = _settings.ralph_max_snapshots_per_job
+    if len(entry["snapshots"]) > max_snapshots:
+        # Keep most recent snapshots
+        entry["snapshots"] = entry["snapshots"][-max_snapshots:]
+
+    entry["updated_at"] = now
+    RALPH_ITERATION_SNAPSHOTS[job_id] = entry
+
+    return snapshot
+
+
+def get_ralph_iteration_snapshot(job_id: str, iteration: int) -> dict[str, Any] | None:
+    """Get the snapshot for a specific iteration.
+
+    Args:
+        job_id: The Ralph job ID.
+        iteration: The iteration number to get snapshot for.
+
+    Returns:
+        Snapshot entry if found, None otherwise.
+
+    Usage:
+        ```python
+        snapshot = get_ralph_iteration_snapshot(job_id, iteration=3)
+        if snapshot:
+            image = modal.Image.from_id(snapshot["image_id"])
+            sandbox = modal.Sandbox.create(image=image, ...)
+        ```
+    """
+    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
+    if not entry:
+        return None
+
+    for snapshot in entry.get("snapshots", []):
+        if snapshot.get("iteration") == iteration:
+            return snapshot
+
+    return None
+
+
+def list_ralph_iteration_snapshots(job_id: str) -> list[dict[str, Any]]:
+    """List all available iteration snapshots for a job.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        List of snapshot entries, sorted by iteration (ascending).
+
+    Usage:
+        ```python
+        snapshots = list_ralph_iteration_snapshots(job_id)
+        for snap in snapshots:
+            print(f"Iteration {snap['iteration']}: {snap['task_id']}")
+        ```
+    """
+    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
+    if not entry:
+        return []
+
+    snapshots = entry.get("snapshots", [])
+    return sorted(snapshots, key=lambda s: s.get("iteration", 0))
+
+
+def delete_ralph_iteration_snapshot(job_id: str, iteration: int) -> bool:
+    """Delete a specific iteration snapshot.
+
+    Args:
+        job_id: The Ralph job ID.
+        iteration: The iteration number to delete snapshot for.
+
+    Returns:
+        True if snapshot was found and deleted, False otherwise.
+    """
+    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
+    if not entry:
+        return False
+
+    original_len = len(entry.get("snapshots", []))
+    entry["snapshots"] = [s for s in entry.get("snapshots", []) if s.get("iteration") != iteration]
+
+    if len(entry["snapshots"]) < original_len:
+        entry["updated_at"] = int(time.time())
+        RALPH_ITERATION_SNAPSHOTS[job_id] = entry
+        return True
+
+    return False
+
+
+def clear_ralph_iteration_snapshots(job_id: str) -> int:
+    """Delete all iteration snapshots for a job.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        Number of snapshots that were deleted.
+    """
+    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
+    if not entry:
+        return 0
+
+    count = len(entry.get("snapshots", []))
+    try:
+        del RALPH_ITERATION_SNAPSHOTS[job_id]
+    except KeyError:
+        pass
+
+    return count
+
+
+def get_ralph_snapshot_status() -> dict[str, Any]:
+    """Get overall status of Ralph iteration snapshots.
+
+    Returns:
+        Dict with statistics:
+        - total_jobs: Jobs with snapshots
+        - total_snapshots: Total snapshots stored
+        - max_per_job: Configured limit per job
+        - enabled: Whether snapshots are enabled
+    """
+    total_jobs = 0
+    total_snapshots = 0
+
+    try:
+        for _, entry in RALPH_ITERATION_SNAPSHOTS.items():
+            total_jobs += 1
+            total_snapshots += len(entry.get("snapshots", []))
+    except Exception:
+        pass
+
+    return {
+        "enabled": _settings.enable_ralph_iteration_snapshots,
+        "total_jobs": total_jobs,
+        "total_snapshots": total_snapshots,
+        "max_per_job": _settings.ralph_max_snapshots_per_job,
+    }

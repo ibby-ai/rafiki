@@ -25,12 +25,13 @@ import modal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from modal import exception as modal_exc
+from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.controllers.middleware import RequestIdMiddleware
 from agent_sandbox.jobs import job_workspace_root, normalize_job_id
-from agent_sandbox.ralph.loop import run_ralph_loop
-from agent_sandbox.ralph.schemas import RalphExecuteRequest
+from agent_sandbox.ralph.loop import resume_ralph_loop, run_ralph_loop, run_ralph_loop_streaming
+from agent_sandbox.ralph.schemas import RalphCheckpoint, RalphExecuteRequest, RalphStreamEvent
 from agent_sandbox.schemas import ClaudeCliRequest
 from agent_sandbox.utils.cli import (
     CLAUDE_CLI_APP_ROOT,
@@ -283,7 +284,11 @@ async def execute_claude_cli(body: ClaudeCliRequest, request: Request) -> JSONRe
 
 @app.post("/ralph/execute")
 async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResponse:
-    """Execute the Ralph loop inside the CLI sandbox."""
+    """Execute the Ralph loop inside the CLI sandbox.
+
+    If resume_checkpoint is provided, resumes from the checkpoint instead of
+    starting fresh.
+    """
     _require_connect_token(request)
     _maybe_reload_cli_volume()
 
@@ -299,21 +304,39 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
     require_claude_cli_auth(env)
 
     def _run():
-        return run_ralph_loop(
-            job_id=normalized_job_id,
-            prd=body.prd,
-            workspace=workspace,
-            workspace_source=body.workspace_source,
-            prompt_template=body.prompt_template,
-            max_iterations=body.max_iterations,
-            timeout_per_iteration=body.timeout_per_iteration,
-            first_iteration_timeout=body.first_iteration_timeout,
-            allowed_tools=body.allowed_tools or None,
-            feedback_commands=body.feedback_commands or None,
-            feedback_timeout=body.feedback_timeout,
-            auto_commit=body.auto_commit,
-            max_consecutive_failures=body.max_consecutive_failures,
-        )
+        # Check if resuming from checkpoint
+        if body.resume_checkpoint:
+            checkpoint = RalphCheckpoint(**body.resume_checkpoint)
+            return resume_ralph_loop(
+                job_id=normalized_job_id,
+                workspace=workspace,
+                checkpoint=checkpoint,
+                workspace_source=body.workspace_source,
+                prompt_template=body.prompt_template,
+                timeout_per_iteration=body.timeout_per_iteration,
+                first_iteration_timeout=body.first_iteration_timeout,
+                allowed_tools=body.allowed_tools or None,
+                feedback_commands=body.feedback_commands or None,
+                feedback_timeout=body.feedback_timeout,
+                auto_commit=body.auto_commit,
+                max_consecutive_failures=body.max_consecutive_failures,
+            )
+        else:
+            return run_ralph_loop(
+                job_id=normalized_job_id,
+                prd=body.prd,
+                workspace=workspace,
+                workspace_source=body.workspace_source,
+                prompt_template=body.prompt_template,
+                max_iterations=body.max_iterations,
+                timeout_per_iteration=body.timeout_per_iteration,
+                first_iteration_timeout=body.first_iteration_timeout,
+                allowed_tools=body.allowed_tools or None,
+                feedback_commands=body.feedback_commands or None,
+                feedback_timeout=body.feedback_timeout,
+                auto_commit=body.auto_commit,
+                max_consecutive_failures=body.max_consecutive_failures,
+            )
 
     try:
         result = await anyio.to_thread.run_sync(_run)
@@ -326,3 +349,77 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
         _commit_cli_volume()
 
     return JSONResponse(status_code=status_code, content=payload)
+
+
+@app.post("/ralph/execute_stream")
+async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
+    """Execute the Ralph loop with SSE streaming of iteration events.
+
+    Returns a Server-Sent Events stream with events for each iteration.
+    Event types:
+    - iteration_start: Beginning of an iteration
+    - iteration_complete: Successful iteration completion
+    - iteration_failed: Failed iteration
+    - paused: Loop was paused by user request
+    - done: Loop completed (includes final result)
+    """
+    _require_connect_token(request)
+    _maybe_reload_cli_volume()
+
+    normalized_job_id = normalize_job_id(body.job_id)
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job_id must be a valid UUID")
+
+    workspace = job_workspace_root(_settings.claude_cli_fs_root, normalized_job_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    maybe_chown_for_claude(workspace)
+
+    env = claude_cli_env()
+    require_claude_cli_auth(env)
+
+    def _format_sse(event: RalphStreamEvent) -> str:
+        """Format a Server-Sent Event message."""
+        return f"event: {event.event_type}\ndata: {event.model_dump_json()}\n\n"
+
+    def _run_streaming():
+        """Generator that runs Ralph loop and yields SSE-formatted events."""
+        try:
+            gen = run_ralph_loop_streaming(
+                job_id=normalized_job_id,
+                prd=body.prd,
+                workspace=workspace,
+                workspace_source=body.workspace_source,
+                prompt_template=body.prompt_template,
+                max_iterations=body.max_iterations,
+                timeout_per_iteration=body.timeout_per_iteration,
+                first_iteration_timeout=body.first_iteration_timeout,
+                allowed_tools=body.allowed_tools or None,
+                feedback_commands=body.feedback_commands or None,
+                feedback_timeout=body.feedback_timeout,
+                auto_commit=body.auto_commit,
+                max_consecutive_failures=body.max_consecutive_failures,
+            )
+
+            # Iterate through all events
+            for event in gen:
+                yield _format_sse(event)
+
+        except Exception as exc:
+            # Yield error event
+            error_event = RalphStreamEvent(
+                event_type="error",
+                job_id=normalized_job_id,
+                error=str(exc),
+            )
+            yield _format_sse(error_event)
+        finally:
+            _commit_cli_volume()
+
+    async def sse_generator():
+        """Async wrapper for the streaming generator."""
+        # Run the synchronous generator in a thread
+        gen = await anyio.to_thread.run_sync(lambda: list(_run_streaming()))
+        for item in gen:
+            yield item
+
+    return StreamingResponse(sse_generator(), media_type="text/event-stream")

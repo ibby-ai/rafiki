@@ -437,6 +437,50 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Ralph control settings (pause/resume)
+    ralph_control_store_name: str = Field(
+        default="ralph-control-store",
+        description="Modal Dict name for storing Ralph pause/resume control state",
+    )
+    enable_ralph_control: bool = Field(
+        default=True,
+        description=(
+            "Enable Ralph pause/resume control. "
+            "When enabled, clients can pause and resume Ralph loops mid-execution "
+            "via POST /ralph/{job_id}/pause and POST /ralph/{job_id}/resume endpoints."
+        ),
+    )
+    ralph_control_expiry_seconds: int = Field(
+        default=86400,
+        description=(
+            "How long (seconds) a Ralph control entry remains valid. "
+            "After this time, pause/checkpoint entries are considered stale. "
+            "Default: 24 hours (matches sandbox lifetime)."
+        ),
+    )
+
+    # Ralph iteration snapshot settings (rollback support)
+    ralph_iteration_snapshot_store_name: str = Field(
+        default="ralph-iteration-snapshots",
+        description="Modal Dict name for storing Ralph iteration filesystem snapshots",
+    )
+    enable_ralph_iteration_snapshots: bool = Field(
+        default=True,
+        description=(
+            "Enable filesystem snapshots after each Ralph iteration. "
+            "When enabled, the system takes a snapshot after each successful iteration, "
+            "allowing rollback to any previous iteration state."
+        ),
+    )
+    ralph_max_snapshots_per_job: int = Field(
+        default=20,
+        description=(
+            "Maximum number of iteration snapshots to retain per job. "
+            "Older snapshots are deleted when limit is reached. "
+            "Default: 20 snapshots."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

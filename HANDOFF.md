@@ -8,14 +8,15 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 6: Multiplayer Session Support**:
+The following implementation was completed for **Priority 12: Ralph Loop Improvements**:
 
-```
-76f964e feat: add multiplayer session support with user attribution
-```
+- Progress streaming via SSE
+- Pause/Resume endpoints
+- Iteration snapshots for rollback
 
 **Previous session commits:**
 ```
+76f964e feat: add multiplayer session support with user attribution
 d3e87a3 feat: add follow-up prompt queue for sessions
 6a3d70c feat: add session stop/cancel for graceful mid-execution termination
 ```
@@ -943,6 +944,206 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
 # Response: {"enabled": true, "total_sessions": 10, "shared_sessions": 3, ...}
 ```
 
+### Priority 12: Ralph Loop Improvements ✅ COMPLETE
+
+**Problem**: No real-time progress visibility, can't pause/resume mid-execution, no rollback support.
+
+**Solution**: Add SSE streaming for progress, pause/resume control, and iteration snapshots for rollback.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `ralph_control_store_name` setting (default: "ralph-control-store")
+   - Added `enable_ralph_control` setting (default: True)
+   - Added `ralph_control_expiry_seconds` setting (default: 86400)
+   - Added `ralph_iteration_snapshot_store_name` setting (default: "ralph-iteration-snapshots")
+   - Added `enable_ralph_iteration_snapshots` setting (default: True)
+   - Added `ralph_max_snapshots_per_job` setting (default: 20)
+
+2. `agent_sandbox/ralph/schemas.py` - MODIFIED
+   - Added `RalphLoopStatus.PAUSED` enum value
+   - Added `RalphPauseRequest` / `RalphPauseResponse` schemas
+   - Added `RalphResumeRequest` / `RalphResumeResponse` schemas
+   - Added `RalphCheckpoint` schema for pause/resume state
+   - Added `RalphIterationSnapshotEntry` schema
+   - Added `RalphSnapshotListResponse` schema
+   - Added `RalphRollbackRequest` / `RalphRollbackResponse` schemas
+   - Added `RalphStreamEvent` schema for SSE streaming
+   - Added `resume_checkpoint` field to `RalphExecuteRequest`
+
+3. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `RALPH_CONTROL` Modal Dict for pause/resume state
+   - Added `request_ralph_pause()` function to request loop pause
+   - Added `is_ralph_paused()` function to check pause status
+   - Added `mark_ralph_paused()` function to mark loop as paused with checkpoint
+   - Added `get_ralph_checkpoint()` function to retrieve checkpoint data
+   - Added `mark_ralph_resumed()` function to mark loop as resumed
+   - Added `clear_ralph_control()` function to clean up control state
+   - Added `get_ralph_control_status()` function for monitoring
+   - Added `RALPH_ITERATION_SNAPSHOTS` Modal Dict for iteration snapshots
+   - Added `store_ralph_iteration_snapshot()` function to save iteration snapshots
+   - Added `get_ralph_iteration_snapshot()` function to get specific snapshot
+   - Added `list_ralph_iteration_snapshots()` function to list all snapshots
+   - Added `delete_ralph_iteration_snapshot()` function to delete specific snapshot
+   - Added `clear_ralph_iteration_snapshots()` function to clear all snapshots
+   - Added `get_ralph_snapshot_status()` function for monitoring
+
+4. `agent_sandbox/ralph/loop.py` - MODIFIED
+   - Added `create_checkpoint()` function to create checkpoint for pausing
+   - Added `run_ralph_loop_streaming()` generator function for SSE streaming
+   - Added `resume_ralph_loop()` function to resume from checkpoint
+   - Modified `run_ralph_loop()` to accept `_start_iteration`, `_prior_results`, `_skip_workspace_init` parameters
+   - Modified `run_ralph_loop()` to check for pause request before each iteration
+   - Both functions now support pausing and resuming
+
+5. `agent_sandbox/controllers/cli_controller.py` - MODIFIED
+   - Added import for `resume_ralph_loop`, `RalphCheckpoint`, `RalphStreamEvent`
+   - Added `POST /ralph/execute_stream` endpoint for SSE streaming
+   - Modified `POST /ralph/execute` to handle `resume_checkpoint` for resuming
+
+6. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for Ralph control functions and schemas
+   - Added `POST /ralph/{job_id}/pause` endpoint to request loop pause
+   - Added `POST /ralph/{job_id}/resume` endpoint to resume paused loop
+   - Added `GET /ralph/{job_id}/control` endpoint to check control status
+   - Added `GET /ralph/{job_id}/snapshots` endpoint to list iteration snapshots
+   - Added `POST /ralph/{job_id}/rollback/{iteration}` endpoint to rollback
+   - Added `GET /ralph/snapshots/status` endpoint for overall statistics
+   - Modified `run_ralph_remote()` to accept `resume_checkpoint_json` parameter
+
+**How it works:**
+
+1. **Progress Streaming (SSE)**:
+   - Client calls `POST /ralph/execute_stream` (via CLI sandbox)
+   - Server yields SSE events for each iteration: `iteration_start`, `iteration_complete`, `iteration_failed`, `paused`, `done`
+   - Events contain `job_id`, `iteration`, `task_id`, `status`, and final `result` on completion
+
+2. **Pause/Resume**:
+   - Client calls `POST /ralph/{job_id}/pause` to request pause
+   - Server sets `status="pause_requested"` in `RALPH_CONTROL` Modal Dict
+   - Ralph loop checks `is_ralph_paused()` before each iteration
+   - If paused, loop creates checkpoint with PRD state and iteration results
+   - Client calls `POST /ralph/{job_id}/resume` to resume
+   - Server spawns new `run_ralph_remote` with checkpoint data
+   - Loop continues from saved checkpoint
+
+3. **Iteration Snapshots (Rollback)**:
+   - After each successful iteration, a filesystem snapshot can be stored
+   - Snapshots include task_id, commit_sha, and Modal Image object_id
+   - Client can list snapshots via `GET /ralph/{job_id}/snapshots`
+   - Rollback uses the snapshot's image_id to restore filesystem state
+
+**Control Entry Structure:**
+
+```python
+RALPH_CONTROL[job_id] = {
+    "job_id": str,
+    "status": "running" | "pause_requested" | "paused" | "resumed",
+    "pause_requested_at": int,
+    "paused_at": int | None,
+    "resumed_at": int | None,
+    "requested_by": str | None,
+    "reason": str | None,
+    "checkpoint": dict | None,  # Full checkpoint data
+    "expires_at": int,
+}
+```
+
+**Checkpoint Structure:**
+
+```python
+{
+    "job_id": str,
+    "iteration": int,           # Next iteration to run
+    "max_iterations": int,
+    "tasks_completed": int,
+    "tasks_total": int,
+    "current_task_id": str | None,
+    "iteration_results": list,  # Results from prior iterations
+    "prd_json": str,            # Serialized PRD state
+    "created_at": int,
+    "reason": str | None,
+    "requested_by": str | None,
+}
+```
+
+**Snapshot Entry Structure:**
+
+```python
+RALPH_ITERATION_SNAPSHOTS[job_id] = {
+    "job_id": str,
+    "snapshots": [
+        {
+            "iteration": int,
+            "task_id": str | None,
+            "task_description": str | None,
+            "image_id": str,        # Modal Image object_id
+            "commit_sha": str | None,
+            "created_at": int,
+            "feedback_passed": bool,
+        }
+    ],
+    "updated_at": int,
+}
+```
+
+**HTTP Endpoints:**
+
+- `POST /ralph/{job_id}/pause` - Request loop pause
+- `POST /ralph/{job_id}/resume` - Resume paused loop (returns new call_id)
+- `GET /ralph/{job_id}/control` - Get pause/resume status
+- `GET /ralph/{job_id}/snapshots` - List iteration snapshots
+- `POST /ralph/{job_id}/rollback/{iteration}` - Get snapshot for rollback
+- `GET /ralph/snapshots/status` - Get overall snapshot statistics
+- `POST /ralph/execute_stream` (CLI sandbox) - SSE streaming execution
+
+**Example Usage:**
+
+```bash
+# Request loop pause
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/ralph/550e8400-e29b-41d4-a716-446655440000/pause' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "Need to review progress"}'
+
+# Response: {"ok": true, "job_id": "...", "status": "pause_requested", ...}
+
+# Check control status
+curl 'https://<org>--test-sandbox-http-app.modal.run/ralph/550e8400-e29b-41d4-a716-446655440000/control'
+
+# Response: {"ok": true, "paused": true, "has_checkpoint": true, ...}
+
+# Resume paused loop
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/ralph/550e8400-e29b-41d4-a716-446655440000/resume' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+
+# Response: {"ok": true, "status": "resumed", "call_id": "new-call-id", ...}
+
+# List iteration snapshots
+curl 'https://<org>--test-sandbox-http-app.modal.run/ralph/550e8400-e29b-41d4-a716-446655440000/snapshots'
+
+# Response: {"ok": true, "snapshots": [...], "total": 5}
+```
+
+**SSE Streaming Usage:**
+
+```bash
+# Stream Ralph execution (via CLI sandbox)
+curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"job_id": "...", "prd": {...}, ...}'
+
+# Events:
+# event: iteration_start
+# data: {"event_type": "iteration_start", "job_id": "...", "iteration": 1, "task_id": "task_1", ...}
+#
+# event: iteration_complete
+# data: {"event_type": "iteration_complete", "job_id": "...", "iteration": 1, "feedback_passed": true, ...}
+#
+# event: done
+# data: {"event_type": "done", "job_id": "...", "status": "complete", "result": {...}}
+```
+
 ## Current Todo List State
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
@@ -954,18 +1155,18 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
 7. ✅ Stop/Cancel Mid-Execution (Priority 8) - COMPLETE
 8. ✅ Follow-up Prompt Queue (Priority 7) - COMPLETE
 9. ✅ Multiplayer Session Support (Priority 6) - COMPLETE
-10. 🔄 Ralph Loop Improvements (Priority 12) - NEXT
-11. ⏳ CLI Job Workspace Improvements (Priority 13)
+10. ✅ Ralph Loop Improvements (Priority 12) - COMPLETE
+11. 🔄 CLI Job Workspace Improvements (Priority 13) - NEXT
 12. ⏳ VS Code Integration (Priority 9)
 13. ⏳ Sub-Session Spawning Tool (Priority 4)
 
 ## Next Steps
 
-1. Continue with **Priority 12: Ralph Loop Improvements**
-   - Progress streaming via SSE
-   - Pause/Resume endpoints
-   - Iteration snapshots for rollback
+1. Continue with **Priority 13: CLI Job Workspace Improvements**
+   - Artifact manifest tracking
+   - Workspace cleanup with retention policy
+   - `GET /jobs/{job_id}/artifacts/{path}` endpoint
 
-2. After completing Priority 12, move to CLI Job Workspace Improvements (Priority 13)
+2. After completing Priority 13, move to VS Code Integration (Priority 9)
 
 3. Follow the phased implementation order in the plan file
