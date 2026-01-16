@@ -346,6 +346,29 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Session cancellation settings (stop/cancel mid-execution)
+    session_cancellation_store_name: str = Field(
+        default="agent-session-cancellations",
+        description="Modal Dict name for storing session cancellation flags",
+    )
+    enable_session_cancellation: bool = Field(
+        default=True,
+        description=(
+            "Enable the session stop/cancel API. "
+            "When enabled, clients can call POST /session/{id}/stop to gracefully "
+            "terminate agent execution mid-query by rejecting further tool calls."
+        ),
+    )
+    cancellation_expiry_seconds: int = Field(
+        default=3600,
+        description=(
+            "How long (seconds) a cancellation flag remains active. "
+            "After this time, the cancellation flag is considered stale and ignored. "
+            "This prevents old cancellation requests from affecting new sessions. "
+            "Default: 1 hour."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

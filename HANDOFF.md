@@ -8,14 +8,15 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 3: Pre-warm API**:
+The following commits were created for **Priority 8: Stop/Cancel Mid-Execution**:
 
 ```
-d160cf4 feat: add pre-warm API for speculative sandbox warming
+(uncommitted) feat: add session stop/cancel for graceful mid-execution termination
 ```
 
 **Previous session commits:**
 ```
+57a3514 feat: add pre-warm API for speculative sandbox warming
 1340824 feat: add CLI warm pool for reduced cold-start latency
 22eb84b feat: add Agent SDK warm pool for reduced cold-start latency
 11be2ff docs: add commit history to handoff for next agent
@@ -350,6 +351,102 @@ if snapshot:
     sandbox = modal.Sandbox.create(image=sandbox_image, ...)
 ```
 
+### Priority 8: Stop/Cancel Mid-Execution ✅ COMPLETE
+
+**Problem**: No way to stop agent mid-execution if it's going off-track.
+
+**Solution**: Add graceful stop mechanism for running sessions that checks a cancellation flag before each tool call.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `session_cancellation_store_name` setting (default: "agent-session-cancellations")
+   - Added `enable_session_cancellation` setting (default: True)
+   - Added `cancellation_expiry_seconds` setting (default: 3600) for cancellation flag lifetime
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `SESSION_CANCELLATIONS` Modal Dict for storing cancellation flags
+   - Added `cancel_session()` function to request session cancellation
+   - Added `is_session_cancelled()` function to check if session is cancelled
+   - Added `get_session_cancellation()` function to get cancellation details
+   - Added `acknowledge_session_cancellation()` function to mark cancellation as acknowledged
+   - Added `clear_session_cancellation()` function to clear cancellation flag
+   - Added `cleanup_expired_cancellations()` function for maintenance
+   - Added `get_cancellation_status()` function for monitoring
+
+3. `agent_sandbox/controllers/controller.py` - MODIFIED
+   - Added imports for `is_session_cancelled`, `acknowledge_session_cancellation`
+   - Added `_make_can_use_tool_handler()` factory function that creates a closure-based handler
+   - Modified `_options()` to use the factory instead of static `allow_web_only`
+   - The handler checks for cancellation before each tool call
+   - When cancelled, returns `PermissionResultDeny` with a message asking agent to stop
+
+4. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+   - Added `SessionStopRequest` schema for stop request body
+   - Added `SessionStopResponse` schema for stop response
+   - Added `SessionCancellationStatusResponse` schema for status endpoint
+
+5. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for new session cancellation schemas
+
+6. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for `cancel_session`, `get_session_cancellation`, `get_cancellation_status`
+   - Added imports for `SessionStopRequest`, `SessionStopResponse`, `SessionCancellationStatusResponse`
+   - Added `POST /session/{session_id}/stop` endpoint to request session stop
+   - Added `GET /session/{session_id}/stop` endpoint to check stop status
+   - Added `GET /session/cancellations/status` endpoint for overall statistics
+
+**How it works:**
+1. Client calls `POST /session/{session_id}/stop` when user wants to stop an agent
+2. Server sets a cancellation flag in `SESSION_CANCELLATIONS` Modal Dict
+3. The agent's `can_use_tool` handler (created via `_make_can_use_tool_handler`) checks for cancellation before each tool call
+4. If cancelled, the handler returns `PermissionResultDeny` with a message
+5. The Agent SDK receives the denial and should terminate gracefully
+6. Cancellation flags expire after `cancellation_expiry_seconds` to prevent stale flags
+
+**Cancellation Entry Structure:**
+
+```python
+SESSION_CANCELLATIONS[session_id] = {
+    "session_id": "sess_abc123",       # Session being cancelled
+    "status": "requested",              # "requested" | "acknowledged"
+    "requested_at": 1704067200,         # Unix timestamp
+    "expires_at": 1704070800,           # Unix timestamp (created + expiry)
+    "requested_by": "user_123",         # Optional requester identifier
+    "reason": "User requested stop",    # Optional reason
+}
+```
+
+**HTTP Endpoints:**
+
+- `POST /session/{session_id}/stop` - Request session stop
+- `GET /session/{session_id}/stop` - Check stop status for a session
+- `GET /session/cancellations/status` - Get overall cancellation statistics
+
+**Example Usage:**
+
+```bash
+# Request session stop
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "Taking too long", "requested_by": "user_123"}'
+
+# Response: {"ok": true, "session_id": "sess_abc123", "status": "requested", ...}
+
+# Check stop status
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop'
+
+# Response: {"ok": true, "session_id": "sess_abc123", "status": "acknowledged", ...}
+
+# Get overall statistics
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/cancellations/status'
+
+# Response: {"enabled": true, "total": 5, "requested": 2, "acknowledged": 3, ...}
+```
+
+**Note on CLI Sandbox:**
+CLI sandbox cancellation is handled differently since it runs Claude Code CLI as a subprocess. The existing `DELETE /claude_cli/{call_id}` endpoint cancels async CLI function calls. For synchronous CLI execution, process-level termination would require a different approach (e.g., subprocess kill signals).
+
 ### Priority 3: Pre-warm API ✅ COMPLETE
 
 **Problem**: Users wait for sandbox to be ready after submitting prompt.
@@ -556,8 +653,8 @@ modal deploy -m agent_sandbox.deploy
 4. ✅ Agent SDK Warm Pool (Priority 2) - COMPLETE
 5. ✅ CLI Warm Pool (Priority 11) - COMPLETE
 6. ✅ Pre-warm API (Priority 3) - COMPLETE
-7. 🔄 Stop/Cancel Mid-Execution (Priority 8) - NEXT
-8. ⏳ Follow-up Prompt Queue (Priority 7)
+7. ✅ Stop/Cancel Mid-Execution (Priority 8) - COMPLETE
+8. 🔄 Follow-up Prompt Queue (Priority 7) - NEXT
 9. ⏳ Multiplayer Session Support (Priority 6)
 10. ⏳ Ralph Loop Improvements (Priority 12)
 11. ⏳ CLI Job Workspace Improvements (Priority 13)
@@ -566,13 +663,12 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 8: Stop/Cancel Mid-Execution**
-   - Add `POST /session/{id}/stop` endpoint
-   - Set cancellation flag in session state
-   - Check flag in agent's `can_use_tool` handler
-   - Reject further tool calls when cancelled
-   - Provides graceful termination for runaway agents
+1. Continue with **Priority 7: Follow-up Prompt Queue**
+   - Add per-session prompt queue in `SESSION_STORE`
+   - Queue prompts during execution, process after
+   - Add `GET /session/{id}/queue` to view pending prompts
+   - Enables sending follow-up prompts while agent is still executing
 
-2. After completing Priority 8, move to Priority 7: Follow-up Prompt Queue
+2. After completing Priority 7, move to Priority 6: Multiplayer Session Support
 
 3. Follow the phased implementation order in the plan file

@@ -51,6 +51,7 @@ from agent_sandbox.jobs import (
     JOB_QUEUE,
     bump_attempts,
     cancel_job,
+    cancel_session,
     claim_cli_warm_sandbox,
     claim_prewarm,
     claim_warm_sandbox,
@@ -60,6 +61,7 @@ from agent_sandbox.jobs import (
     generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
     generate_warm_id,
+    get_cancellation_status,
     get_cli_job_snapshot,
     get_cli_warm_pool_status,
     get_expired_cli_pool_entries,
@@ -68,6 +70,7 @@ from agent_sandbox.jobs import (
     get_job_status,
     get_prewarm,
     get_prewarm_status,
+    get_session_cancellation,
     get_session_snapshot,
     get_stats,
     get_warm_pool_status,
@@ -108,6 +111,9 @@ from agent_sandbox.schemas import (
     JobSubmitRequest,
     JobSubmitResponse,
     QueryBody,
+    SessionCancellationStatusResponse,
+    SessionStopRequest,
+    SessionStopResponse,
     WarmRequest,
     WarmResponse,
     WarmStatusResponse,
@@ -1876,6 +1882,170 @@ async def prewarm_status_endpoint() -> WarmStatusResponse:
         claimed=status["claimed"],
         expired=status["expired"],
         timeout_seconds=_settings.prewarm_timeout_seconds,
+    )
+
+
+# =============================================================================
+# Session Stop/Cancel Endpoints
+# =============================================================================
+# These endpoints allow graceful termination of agent sessions mid-execution.
+# When a session is stopped, the cancellation flag is checked by the agent's
+# can_use_tool handler before each tool call, causing the agent to stop.
+# =============================================================================
+
+
+@web_app.post("/session/{session_id}/stop", response_model=SessionStopResponse)
+async def stop_session(
+    session_id: str,
+    body: SessionStopRequest | None = None,
+) -> SessionStopResponse:
+    """Stop an agent session mid-execution.
+
+    Requests graceful termination of an active agent session. The agent will
+    finish its current tool call, then be denied further tool calls, causing
+    it to stop execution and return a summary.
+
+    This is a "soft" stop - it doesn't forcibly terminate the sandbox, but
+    signals to the agent that it should stop working.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to stop.
+        body: Optional request body with reason and requester info.
+
+    Returns:
+        SessionStopResponse with cancellation details and status.
+
+    Example:
+        ```bash
+        # Basic stop
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop'
+
+        # With reason
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"reason": "User requested stop", "requested_by": "user_123"}'
+        ```
+    """
+    if not _settings.enable_session_cancellation:
+        return SessionStopResponse(
+            ok=False,
+            session_id=session_id,
+            status="disabled",
+            message="Session cancellation is disabled in settings",
+        )
+
+    # Check if session is already cancelled
+    existing = get_session_cancellation(session_id)
+    if existing:
+        return SessionStopResponse(
+            ok=True,
+            session_id=session_id,
+            status=existing.get("status", "requested"),
+            requested_at=existing.get("requested_at"),
+            expires_at=existing.get("expires_at"),
+            reason=existing.get("reason"),
+            requested_by=existing.get("requested_by"),
+            message="Session stop already requested",
+        )
+
+    # Request cancellation
+    reason = body.reason if body else None
+    requested_by = body.requested_by if body else None
+    entry = cancel_session(
+        session_id=session_id,
+        requested_by=requested_by,
+        reason=reason,
+    )
+
+    return SessionStopResponse(
+        ok=True,
+        session_id=session_id,
+        status=entry["status"],
+        requested_at=entry["requested_at"],
+        expires_at=entry["expires_at"],
+        reason=entry.get("reason"),
+        requested_by=entry.get("requested_by"),
+        message="Session stop requested. Agent will stop after current tool call.",
+    )
+
+
+@web_app.get("/session/{session_id}/stop", response_model=SessionStopResponse)
+async def get_session_stop_status(session_id: str) -> SessionStopResponse:
+    """Check the cancellation status for a session.
+
+    Returns the current cancellation status if one exists, or indicates
+    that the session has no active cancellation.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to check.
+
+    Returns:
+        SessionStopResponse with current cancellation status.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop'
+        ```
+    """
+    if not _settings.enable_session_cancellation:
+        return SessionStopResponse(
+            ok=False,
+            session_id=session_id,
+            status="disabled",
+            message="Session cancellation is disabled in settings",
+        )
+
+    entry = get_session_cancellation(session_id)
+    if not entry:
+        return SessionStopResponse(
+            ok=True,
+            session_id=session_id,
+            status="not_found",
+            message="No active cancellation for this session",
+        )
+
+    return SessionStopResponse(
+        ok=True,
+        session_id=session_id,
+        status=entry.get("status", "requested"),
+        requested_at=entry.get("requested_at"),
+        expires_at=entry.get("expires_at"),
+        reason=entry.get("reason"),
+        requested_by=entry.get("requested_by"),
+        message=None,
+    )
+
+
+@web_app.get("/session/cancellations/status", response_model=SessionCancellationStatusResponse)
+async def get_cancellation_status_endpoint() -> SessionCancellationStatusResponse:
+    """Get current status of session cancellations across all sessions.
+
+    Returns statistics about cancellation requests including counts of
+    requested, acknowledged, and expired cancellations.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/cancellations/status'
+        ```
+    """
+    if not _settings.enable_session_cancellation:
+        return SessionCancellationStatusResponse(
+            enabled=False,
+            total=0,
+            requested=0,
+            acknowledged=0,
+            expired=0,
+            expiry_seconds=_settings.cancellation_expiry_seconds,
+        )
+
+    status = get_cancellation_status()
+    return SessionCancellationStatusResponse(
+        enabled=True,
+        total=status["total"],
+        requested=status["requested"],
+        acknowledged=status["acknowledged"],
+        expired=status["expired"],
+        expiry_seconds=_settings.cancellation_expiry_seconds,
     )
 
 

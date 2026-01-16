@@ -49,6 +49,8 @@ from agent_sandbox.controllers.serialization import (
     serialize_message,
 )
 from agent_sandbox.jobs import (
+    acknowledge_session_cancellation,
+    is_session_cancelled,
     job_workspace_root,
     normalize_job_id,
     record_session_end,
@@ -360,12 +362,83 @@ def _persist_session_id(session_key: str | None, session_id: str | None) -> None
         SESSION_CACHE[session_key] = session_id
 
 
+def _make_can_use_tool_handler(session_id: str | None = None):
+    """Create a tool permission handler with session-aware cancellation checking.
+
+    This factory function creates a closure that has access to the session_id,
+    enabling the handler to check for cancellation requests before allowing tools.
+
+    Args:
+        session_id: The session ID to check for cancellation. If None,
+            cancellation checking is skipped.
+
+    Returns:
+        An async function suitable for use as ClaudeAgentOptions.can_use_tool.
+
+    Usage:
+        ```python
+        options = ClaudeAgentOptions(
+            can_use_tool=_make_can_use_tool_handler(session_id="sess_123"),
+            ...
+        )
+        ```
+    """
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        ctx: ToolPermissionContext,
+    ):
+        """Permission handler that checks cancellation and allows web-related tools.
+
+        This handler is called before each tool invocation. It:
+        1. Checks if the session has been cancelled (via POST /session/{id}/stop)
+        2. If cancelled, denies the tool call with a cancellation message
+        3. Otherwise, allows only web-related tools (WebSearch, WebFetch)
+
+        Args:
+            tool_name: Name of the tool being requested.
+            tool_input: Input parameters for the tool.
+            ctx: Permission context from the Agent SDK.
+
+        Returns:
+            PermissionResultDeny if session is cancelled or tool is not allowed.
+            PermissionResultAllow if tool is allowed and session is active.
+        """
+        # Check for session cancellation first
+        if session_id and _settings.enable_session_cancellation:
+            if is_session_cancelled(session_id):
+                # Acknowledge the cancellation so it's tracked
+                acknowledge_session_cancellation(session_id)
+                _logger.info(
+                    "agent.tool_denied.cancelled",
+                    extra={"session_id": session_id, "tool_name": tool_name},
+                )
+                return PermissionResultDeny(
+                    message=(
+                        "Session has been cancelled by the user. "
+                        "Please stop execution and summarize what was accomplished."
+                    )
+                )
+
+        # Allow web-related tools
+        if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
+            return PermissionResultAllow(updated_input=tool_input)
+
+        return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
+
+    return can_use_tool
+
+
 async def allow_web_only(
     tool_name: str,
     tool_input: dict[str, Any],
     ctx: ToolPermissionContext,
 ):
-    """Permission handler that allows only web-related tools.
+    """Permission handler that allows only web-related tools (legacy, non-cancellable).
+
+    This is the original handler without session cancellation support.
+    Use _make_can_use_tool_handler() for sessions that need cancellation support.
 
     Args:
         tool_name: Name of the tool being requested.
@@ -391,6 +464,10 @@ def _options(
     requires tool permission checks via can_use_tool. This is safer than
     "bypassPermissions" while still enabling autonomous operation in the sandbox.
 
+    The can_use_tool handler is created via _make_can_use_tool_handler() to enable
+    session cancellation support. When session_id is provided, the handler will
+    check for cancellation before each tool call.
+
     Returns:
         A configured `ClaudeAgentOptions` instance using our local MCP servers,
         allowed tools, and `SYSTEM_PROMPT`.
@@ -406,7 +483,8 @@ def _options(
         system_prompt=system_prompt,
         mcp_servers=get_mcp_servers(),
         allowed_tools=get_allowed_tools(),
-        can_use_tool=allow_web_only,
+        # Use the factory to create a handler with cancellation support
+        can_use_tool=_make_can_use_tool_handler(session_id=session_id),
         # acceptEdits: Auto-approve file operations, but still check tools via can_use_tool.
         # bypassPermissions would skip all checks but isn't allowed with root access.
         permission_mode="acceptEdits",

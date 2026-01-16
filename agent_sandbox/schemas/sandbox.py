@@ -123,3 +123,51 @@ class WarmStatusResponse(BaseSchema):
     claimed: int
     expired: int
     timeout_seconds: int  # Configured pre-warm timeout
+
+
+# =============================================================================
+# Session Stop/Cancel API Schemas
+# =============================================================================
+# These schemas support graceful termination of agent sessions mid-execution.
+# Clients call POST /session/{id}/stop to request cancellation.
+# =============================================================================
+
+
+class SessionStopRequest(BaseSchema):
+    """Request body for stopping a session mid-execution.
+
+    All fields are optional. The session_id is provided in the URL path.
+    """
+
+    reason: str | None = None  # Human-readable reason for stopping
+    requested_by: str | None = None  # Identifier of who requested the stop
+
+
+class SessionStopResponse(BaseSchema):
+    """Response from session stop request.
+
+    Contains the cancellation entry details and current status.
+    """
+
+    ok: bool
+    session_id: str
+    status: Literal["requested", "acknowledged", "not_found", "disabled"]
+    requested_at: int | None = None  # Unix timestamp when stop was requested
+    expires_at: int | None = None  # Unix timestamp when cancellation flag expires
+    reason: str | None = None  # The provided reason for stopping
+    requested_by: str | None = None  # Who requested the stop
+    message: str | None = None  # Human-readable status message
+
+
+class SessionCancellationStatusResponse(BaseSchema):
+    """Response for session cancellation status endpoint.
+
+    Shows current state of cancellation requests across all sessions.
+    """
+
+    enabled: bool
+    total: int
+    requested: int
+    acknowledged: int
+    expired: int
+    expiry_seconds: int  # Configured cancellation expiry time

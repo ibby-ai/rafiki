@@ -2262,3 +2262,289 @@ def cleanup_expired_prewarms() -> int:
     except Exception:
         pass
     return removed
+
+
+# =============================================================================
+# SESSION CANCELLATION MANAGEMENT
+# =============================================================================
+# Functions for tracking and checking session cancellation requests.
+# When a user calls POST /session/{id}/stop, a cancellation flag is set.
+# The agent's can_use_tool handler checks this flag before allowing tool calls,
+# enabling graceful termination of runaway agents.
+#
+# Cancellation Entry Structure:
+#   SESSION_CANCELLATIONS[session_id] = {
+#       "session_id": str,       # Session being cancelled
+#       "status": str,           # "requested" | "acknowledged"
+#       "requested_at": int,     # Unix timestamp of cancellation request
+#       "expires_at": int,       # Unix timestamp when flag expires
+#       "requested_by": str,     # Optional user/client identifier
+#       "reason": str | None,    # Optional cancellation reason
+#   }
+#
+# The cancellation flag is checked in can_use_tool handler:
+#   - If cancelled and not expired, tool calls are rejected
+#   - Agent receives PermissionResultDeny with cancellation message
+#   - Agent SDK handles the denial and should terminate gracefully
+
+SESSION_CANCELLATIONS = modal.Dict.from_name(
+    _settings.session_cancellation_store_name, create_if_missing=True
+)
+
+
+def cancel_session(
+    session_id: str,
+    requested_by: str | None = None,
+    reason: str | None = None,
+    expiry_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Request cancellation of an active session.
+
+    Sets a cancellation flag that will be checked by the agent's tool
+    permission handler. Once set, further tool calls will be rejected,
+    causing the agent to terminate gracefully.
+
+    Args:
+        session_id: The Claude Agent SDK session ID to cancel.
+        requested_by: Optional identifier of who requested cancellation.
+        reason: Optional human-readable reason for cancellation.
+        expiry_seconds: Custom expiry time (defaults to settings.cancellation_expiry_seconds).
+
+    Returns:
+        Dict with cancellation entry metadata.
+
+    Usage:
+        ```python
+        # In stop endpoint handler
+        result = cancel_session(session_id, requested_by="user_123", reason="User stopped")
+        # result["status"] == "requested"
+        ```
+
+    Notes:
+        - Cancellation is "soft" - it doesn't forcibly terminate the sandbox
+        - The agent will finish its current tool call, then be denied further tools
+        - Cancellation flags expire after expiry_seconds to prevent stale flags
+        - Setting a new cancellation overwrites any existing flag for the session
+    """
+    now = int(time.time())
+    expiry = expiry_seconds or _settings.cancellation_expiry_seconds
+
+    entry = {
+        "session_id": session_id,
+        "status": "requested",
+        "requested_at": now,
+        "expires_at": now + expiry,
+        "requested_by": requested_by,
+        "reason": reason,
+    }
+    SESSION_CANCELLATIONS[session_id] = entry
+    return entry
+
+
+def is_session_cancelled(session_id: str) -> bool:
+    """Check if a session has an active cancellation flag.
+
+    Called by the agent's can_use_tool handler before each tool call.
+    Returns True if the session should be cancelled (flag exists and not expired).
+
+    Args:
+        session_id: The session ID to check.
+
+    Returns:
+        True if session is cancelled and flag hasn't expired, False otherwise.
+
+    Usage:
+        ```python
+        async def can_use_tool(tool_name, tool_input, ctx):
+            if is_session_cancelled(ctx.session_id):
+                return PermissionResultDeny(message="Session cancelled by user")
+            # ... rest of permission logic
+        ```
+
+    Performance:
+        This function is called frequently (once per tool call). The Modal Dict
+        lookup is fast but adds some latency. For very high-throughput scenarios,
+        consider local caching with a short TTL.
+    """
+    entry = SESSION_CANCELLATIONS.get(session_id)
+    if not entry:
+        return False
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired - clean up lazily
+        try:
+            del SESSION_CANCELLATIONS[session_id]
+        except KeyError:
+            pass
+        return False
+
+    return entry.get("status") in ("requested", "acknowledged")
+
+
+def get_session_cancellation(session_id: str) -> dict[str, Any] | None:
+    """Get the cancellation entry for a session if it exists.
+
+    Args:
+        session_id: The session ID to look up.
+
+    Returns:
+        Cancellation entry dict if found and not expired, None otherwise.
+
+    Usage:
+        ```python
+        cancellation = get_session_cancellation(session_id)
+        if cancellation:
+            print(f"Cancelled by {cancellation['requested_by']}: {cancellation['reason']}")
+        ```
+    """
+    entry = SESSION_CANCELLATIONS.get(session_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        # Expired - clean up lazily
+        try:
+            del SESSION_CANCELLATIONS[session_id]
+        except KeyError:
+            pass
+        return None
+
+    return entry
+
+
+def acknowledge_session_cancellation(session_id: str) -> dict[str, Any] | None:
+    """Mark a session cancellation as acknowledged.
+
+    Called when the agent actually receives and processes the cancellation.
+    This is useful for tracking and debugging to distinguish between
+    requested and acknowledged cancellations.
+
+    Args:
+        session_id: The session ID to acknowledge.
+
+    Returns:
+        Updated cancellation entry if found, None otherwise.
+
+    Usage:
+        ```python
+        async def can_use_tool(tool_name, tool_input, ctx):
+            if is_session_cancelled(ctx.session_id):
+                acknowledge_session_cancellation(ctx.session_id)
+                return PermissionResultDeny(message="Session cancelled")
+        ```
+    """
+    entry = SESSION_CANCELLATIONS.get(session_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    if now > entry.get("expires_at", 0):
+        return None
+
+    updated = {
+        **entry,
+        "status": "acknowledged",
+        "acknowledged_at": now,
+    }
+    SESSION_CANCELLATIONS[session_id] = updated
+    return updated
+
+
+def clear_session_cancellation(session_id: str) -> bool:
+    """Clear the cancellation flag for a session.
+
+    Called when a session completes or when manually clearing a cancellation.
+    This is useful to allow a session to continue if the user changes their mind.
+
+    Args:
+        session_id: The session ID to clear.
+
+    Returns:
+        True if a cancellation was cleared, False if none existed.
+
+    Usage:
+        ```python
+        # User wants to resume the session
+        clear_session_cancellation(session_id)
+        ```
+    """
+    try:
+        del SESSION_CANCELLATIONS[session_id]
+        return True
+    except KeyError:
+        return False
+
+
+def cleanup_expired_cancellations() -> int:
+    """Remove expired cancellation entries from the store.
+
+    Called periodically to clean up stale cancellation flags that
+    have passed their expiry time.
+
+    Returns:
+        Number of expired entries removed.
+
+    Usage:
+        ```python
+        # In scheduled maintenance
+        removed = cleanup_expired_cancellations()
+        ```
+    """
+    now = int(time.time())
+    removed = 0
+    try:
+        for session_id, entry in list(SESSION_CANCELLATIONS.items()):
+            if now > entry.get("expires_at", 0):
+                try:
+                    del SESSION_CANCELLATIONS[session_id]
+                    removed += 1
+                except KeyError:
+                    pass
+    except Exception:
+        pass
+    return removed
+
+
+def get_cancellation_status() -> dict[str, Any]:
+    """Get current status of session cancellations.
+
+    Returns:
+        Dict with cancellation statistics:
+        - total: Total active cancellation entries
+        - requested: Cancellations waiting to be acknowledged
+        - acknowledged: Cancellations that have been processed
+        - expired: Entries past their expiry (will be cleaned up)
+
+    Usage:
+        ```python
+        status = get_cancellation_status()
+        print(f"Active cancellations: {status['total']}")
+        ```
+    """
+    now = int(time.time())
+    entries = []
+    try:
+        entries = [entry for _, entry in SESSION_CANCELLATIONS.items()]
+    except Exception:
+        pass
+
+    requested = 0
+    acknowledged = 0
+    expired = 0
+
+    for entry in entries:
+        if now > entry.get("expires_at", 0):
+            expired += 1
+        elif entry.get("status") == "requested":
+            requested += 1
+        elif entry.get("status") == "acknowledged":
+            acknowledged += 1
+
+    return {
+        "total": len(entries),
+        "requested": requested,
+        "acknowledged": acknowledged,
+        "expired": expired,
+    }

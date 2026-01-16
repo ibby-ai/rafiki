@@ -18,6 +18,9 @@ from agent_sandbox.schemas.responses import (
 from agent_sandbox.schemas.sandbox import (
     ClaudeCliRequest,
     QueryBody,
+    SessionCancellationStatusResponse,
+    SessionStopRequest,
+    SessionStopResponse,
     WarmRequest,
     WarmResponse,
     WarmStatusResponse,
@@ -40,4 +43,7 @@ __all__ = [
     "WarmRequest",
     "WarmResponse",
     "WarmStatusResponse",
+    "SessionStopRequest",
+    "SessionStopResponse",
+    "SessionCancellationStatusResponse",
 ]
