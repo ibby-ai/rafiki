@@ -29,7 +29,14 @@ from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.controllers.middleware import RequestIdMiddleware
-from agent_sandbox.jobs import job_workspace_root, normalize_job_id
+from agent_sandbox.jobs import (
+    build_artifact_manifest,
+    job_workspace_root,
+    normalize_job_id,
+    register_job_workspace,
+    update_job,
+    update_workspace_metadata,
+)
 from agent_sandbox.ralph.loop import resume_ralph_loop, run_ralph_loop, run_ralph_loop_streaming
 from agent_sandbox.ralph.schemas import RalphCheckpoint, RalphExecuteRequest, RalphStreamEvent
 from agent_sandbox.schemas import ClaudeCliRequest
@@ -155,6 +162,11 @@ async def execute_claude_cli(body: ClaudeCliRequest, request: Request) -> JSONRe
         job_root = job_workspace_root(_settings.claude_cli_fs_root, normalized_job_id)
         job_root.mkdir(parents=True, exist_ok=True)
         maybe_chown_for_claude(job_root)
+        # Register workspace for retention tracking
+        try:
+            register_job_workspace(normalized_job_id, str(job_root), job_status="running")
+        except Exception as e:
+            _logger.warning("Failed to register workspace for %s: %s", normalized_job_id, e)
 
     cmd, probe_cmd = _build_cli_command(body)
 
@@ -279,6 +291,20 @@ async def execute_claude_cli(body: ClaudeCliRequest, request: Request) -> JSONRe
         )
         _commit_cli_volume()
 
+        # Record artifact manifest after successful execution
+        if normalized_job_id and job_root and status_code == 200:
+            try:
+                manifest = build_artifact_manifest(str(job_root))
+                job_status = "complete" if payload.get("ok") else "failed"
+                update_job(normalized_job_id, {"artifacts": manifest.model_dump()})
+                update_workspace_metadata(
+                    normalized_job_id, job_status=job_status, recalculate_size=True
+                )
+            except Exception as e:
+                _logger.warning(
+                    "Failed to record artifact manifest for %s: %s", normalized_job_id, e
+                )
+
     return JSONResponse(status_code=status_code, content=payload)
 
 
@@ -299,6 +325,11 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
     workspace = job_workspace_root(_settings.claude_cli_fs_root, normalized_job_id)
     workspace.mkdir(parents=True, exist_ok=True)
     maybe_chown_for_claude(workspace)
+    # Register workspace for retention tracking
+    try:
+        register_job_workspace(normalized_job_id, str(workspace), job_status="running")
+    except Exception as e:
+        _logger.warning("Failed to register workspace for %s: %s", normalized_job_id, e)
 
     env = claude_cli_env()
     require_claude_cli_auth(env)
@@ -348,6 +379,17 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
     finally:
         _commit_cli_volume()
 
+        # Record artifact manifest after execution
+        try:
+            manifest = build_artifact_manifest(str(workspace))
+            job_status = "complete" if payload.get("ok") else "failed"
+            update_job(normalized_job_id, {"artifacts": manifest.model_dump()})
+            update_workspace_metadata(
+                normalized_job_id, job_status=job_status, recalculate_size=True
+            )
+        except Exception as e:
+            _logger.warning("Failed to record artifact manifest for %s: %s", normalized_job_id, e)
+
     return JSONResponse(status_code=status_code, content=payload)
 
 
@@ -373,6 +415,11 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
     workspace = job_workspace_root(_settings.claude_cli_fs_root, normalized_job_id)
     workspace.mkdir(parents=True, exist_ok=True)
     maybe_chown_for_claude(workspace)
+    # Register workspace for retention tracking
+    try:
+        register_job_workspace(normalized_job_id, str(workspace), job_status="running")
+    except Exception as e:
+        _logger.warning("Failed to register workspace for %s: %s", normalized_job_id, e)
 
     env = claude_cli_env()
     require_claude_cli_auth(env)
@@ -383,6 +430,7 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
 
     def _run_streaming():
         """Generator that runs Ralph loop and yields SSE-formatted events."""
+        job_status = "running"
         try:
             gen = run_ralph_loop_streaming(
                 job_id=normalized_job_id,
@@ -412,8 +460,22 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
                 error=str(exc),
             )
             yield _format_sse(error_event)
+            job_status = "failed"
+        else:
+            job_status = "complete"
         finally:
             _commit_cli_volume()
+            # Record artifact manifest after streaming completes
+            try:
+                manifest = build_artifact_manifest(str(workspace))
+                update_job(normalized_job_id, {"artifacts": manifest.model_dump()})
+                update_workspace_metadata(
+                    normalized_job_id, job_status=job_status, recalculate_size=True
+                )
+            except Exception as e:
+                _logger.warning(
+                    "Failed to record artifact manifest for %s: %s", normalized_job_id, e
+                )
 
     async def sse_generator():
         """Async wrapper for the streaming generator."""

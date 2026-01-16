@@ -481,6 +481,52 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Workspace Retention Settings
+    workspace_retention_store_name: str = Field(
+        default="cli-workspace-retention",
+        description="Modal Dict name for storing workspace retention metadata",
+    )
+    enable_workspace_retention: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic workspace retention tracking and cleanup. "
+            "When enabled, the system tracks job workspaces and automatically "
+            "deletes old workspaces based on retention policy."
+        ),
+    )
+    workspace_retention_days: int = Field(
+        default=7,
+        description=(
+            "Number of days to keep completed job workspaces before cleanup. "
+            "Applies to jobs with status 'complete'. "
+            "Default: 7 days."
+        ),
+    )
+    failed_job_retention_days: int = Field(
+        default=14,
+        description=(
+            "Number of days to keep failed job workspaces before cleanup. "
+            "Failed jobs are retained longer to allow debugging. "
+            "Default: 14 days."
+        ),
+    )
+    max_workspace_size_mb: int | None = Field(
+        default=None,
+        description=(
+            "Optional maximum size limit per workspace in megabytes. "
+            "Workspaces exceeding this limit may be flagged for review. "
+            "None = no limit. Default: None."
+        ),
+    )
+    workspace_cleanup_interval_seconds: int = Field(
+        default=3600,
+        description=(
+            "Seconds between automatic workspace cleanup runs. "
+            "The cleanup task checks for expired workspaces at this interval. "
+            "Default: 3600 (1 hour)."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

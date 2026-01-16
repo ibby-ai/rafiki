@@ -91,11 +91,16 @@ from agent_sandbox.jobs import (
     get_session_users,
     get_stats,
     get_warm_pool_status,
+    # Workspace retention functions
+    get_workspace_metadata,
+    get_workspace_retention_status,
     is_job_due,
     is_session_executing,
     job_workspace_root,
     list_ralph_iteration_snapshots,
+    list_workspaces_for_cleanup,
     mark_ralph_resumed,
+    mark_workspace_deleted,
     normalize_job_id,
     queue_prompt,
     register_cli_warm_sandbox,
@@ -165,6 +170,11 @@ from agent_sandbox.schemas import (
     WarmRequest,
     WarmResponse,
     WarmStatusResponse,
+    # Workspace retention schemas
+    WorkspaceCleanupRequest,
+    WorkspaceCleanupResponse,
+    WorkspaceDeleteResponse,
+    WorkspaceRetentionStatusResponse,
 )
 from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
 from agent_sandbox.schemas.responses import ClaudeCliSubmitResponse
@@ -1577,6 +1587,198 @@ async def cancel_job_request(job_id: str) -> JobStatusResponse:
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+# =============================================================================
+# WORKSPACE RETENTION ENDPOINTS
+# =============================================================================
+
+
+def _delete_job_workspace(job_id: str, fs_root: str) -> tuple[bool, int]:
+    """Delete a job workspace directory and return (deleted, bytes_freed).
+
+    Deletes the workspace directory and all its contents. Does not raise
+    exceptions on failure; returns (False, 0) if deletion fails.
+
+    Args:
+        job_id: Validated UUID job identifier
+        fs_root: Root filesystem path (e.g., /data or /data-cli)
+
+    Returns:
+        Tuple of (was_deleted, bytes_freed)
+    """
+    import shutil
+
+    workspace = job_workspace_root(fs_root, job_id)
+    if not workspace.exists():
+        return False, 0
+
+    # Calculate size before deletion
+    bytes_freed = 0
+    try:
+        for path in workspace.rglob("*"):
+            if path.is_file():
+                bytes_freed += path.stat().st_size
+    except Exception:
+        pass
+
+    # Delete the workspace directory
+    try:
+        shutil.rmtree(str(workspace))
+        mark_workspace_deleted(job_id)
+        return True, bytes_freed
+    except Exception as e:
+        _logger.warning("Failed to delete workspace for %s: %s", job_id, e)
+        return False, 0
+
+
+def _cleanup_expired_workspaces(
+    older_than_days: int | None = None,
+    status_filter: list[str] | None = None,
+    dry_run: bool = False,
+) -> WorkspaceCleanupResponse:
+    """Delete workspaces older than retention period.
+
+    Scans tracked workspaces and deletes those that have exceeded retention.
+    Returns cleanup statistics.
+
+    Args:
+        older_than_days: Override retention days (None = use settings)
+        status_filter: Only clean up jobs with these statuses
+        dry_run: If True, report what would be deleted without deleting
+
+    Returns:
+        WorkspaceCleanupResponse with cleanup statistics
+    """
+    # Calculate cutoff timestamp
+    now = int(time.time())
+    if older_than_days is not None:
+        cutoff = now - (older_than_days * 86400)
+    else:
+        cutoff = None
+
+    eligible = list_workspaces_for_cleanup(
+        before_timestamp=cutoff,
+        status_filter=status_filter,
+    )
+
+    response = WorkspaceCleanupResponse(
+        ok=True,
+        dry_run=dry_run,
+        workspaces_checked=len(eligible),
+        workspaces_deleted=0,
+        bytes_freed=0,
+        deleted_job_ids=[],
+        errors=[],
+    )
+
+    for entry in eligible:
+        job_id = entry.get("job_id")
+        if not job_id:
+            continue
+
+        workspace_root = entry.get("workspace_root")
+        if not workspace_root:
+            continue
+
+        if dry_run:
+            # Count what would be deleted
+            response.workspaces_deleted += 1
+            response.bytes_freed += entry.get("size_bytes", 0) or 0
+            response.deleted_job_ids.append(job_id)
+        else:
+            # Actually delete
+            # Determine which fs_root based on workspace_root path
+            if "/data-cli/" in workspace_root:
+                fs_root = _settings.claude_cli_fs_root
+            else:
+                fs_root = _settings.agent_fs_root
+
+            deleted, freed = _delete_job_workspace(job_id, fs_root)
+            if deleted:
+                response.workspaces_deleted += 1
+                response.bytes_freed += freed
+                response.deleted_job_ids.append(job_id)
+            else:
+                response.errors.append(f"Failed to delete workspace for {job_id}")
+
+    return response
+
+
+@web_app.delete("/jobs/{job_id}/workspace", response_model=WorkspaceDeleteResponse)
+async def delete_job_workspace_endpoint(job_id: str) -> WorkspaceDeleteResponse:
+    """Delete a specific job's workspace directory.
+
+    Permanently deletes the job's workspace directory and all artifacts.
+    The job metadata in the job store is preserved.
+
+    Args:
+        job_id: UUID of the job whose workspace should be deleted
+
+    Returns:
+        WorkspaceDeleteResponse with deletion status and bytes freed
+    """
+    job_id = _normalize_job_id_or_400(job_id)
+
+    # Check workspace metadata to determine which volume
+    metadata = get_workspace_metadata(job_id)
+    if metadata and metadata.get("workspace_root"):
+        workspace_root = metadata["workspace_root"]
+        if "/data-cli/" in workspace_root:
+            fs_root = _settings.claude_cli_fs_root
+        else:
+            fs_root = _settings.agent_fs_root
+    else:
+        # Default to CLI workspace as that's most common for job-based work
+        fs_root = _settings.claude_cli_fs_root
+
+    deleted, bytes_freed = _delete_job_workspace(job_id, fs_root)
+
+    return WorkspaceDeleteResponse(
+        ok=True,
+        job_id=job_id,
+        deleted=deleted,
+        bytes_freed=bytes_freed,
+    )
+
+
+@web_app.get("/workspace/retention/status", response_model=WorkspaceRetentionStatusResponse)
+async def workspace_retention_status_endpoint() -> WorkspaceRetentionStatusResponse:
+    """Get workspace retention statistics.
+
+    Returns an overview of workspace retention settings and current state,
+    including counts, total size, and age statistics.
+
+    Returns:
+        WorkspaceRetentionStatusResponse with retention statistics
+    """
+    status = get_workspace_retention_status()
+    return WorkspaceRetentionStatusResponse(**status)
+
+
+@web_app.post("/workspace/cleanup", response_model=WorkspaceCleanupResponse)
+async def workspace_cleanup_endpoint(
+    body: WorkspaceCleanupRequest,
+) -> WorkspaceCleanupResponse:
+    """Trigger manual workspace cleanup.
+
+    Deletes workspaces that have exceeded their retention period based on
+    job status. Failed jobs have longer retention than completed jobs.
+
+    Supports dry-run mode to preview what would be deleted without
+    actually deleting anything.
+
+    Args:
+        body: Cleanup request with optional filters and dry_run flag
+
+    Returns:
+        WorkspaceCleanupResponse with cleanup statistics
+    """
+    return _cleanup_expired_workspaces(
+        older_than_days=body.older_than_days,
+        status_filter=body.status_filter,
+        dry_run=body.dry_run,
+    )
 
 
 # =============================================================================
@@ -3473,6 +3675,56 @@ def maintain_cli_warm_pool():
         "pool_warm": pool_status["warm"],
         "pool_claimed": pool_status["claimed"],
         "pool_total": pool_status["total"],
+    }
+
+
+# =============================================================================
+# WORKSPACE RETENTION SCHEDULED TASK
+# =============================================================================
+
+
+@app.function(
+    image=claude_cli_image,
+    secrets=agent_sdk_secrets,
+    schedule=modal.Cron(
+        f"0 */{max(_settings.workspace_cleanup_interval_seconds // 3600, 1)} * * *"
+    ),
+    timeout=1800,
+    **_retry_kwargs(),
+)
+def maintain_workspace_retention():
+    """Periodic cleanup of expired job workspaces.
+
+    Runs on a schedule to delete workspaces that have exceeded their retention
+    period. Completed jobs are cleaned up after workspace_retention_days,
+    failed jobs after failed_job_retention_days.
+
+    The schedule is derived from workspace_cleanup_interval_seconds setting.
+    Default: every hour.
+    """
+    if not _settings.enable_workspace_retention:
+        return {"status": "disabled"}
+
+    _logger.info("Running workspace retention maintenance")
+
+    result = _cleanup_expired_workspaces(dry_run=False)
+
+    _logger.info(
+        "Workspace cleanup completed",
+        extra={
+            "workspaces_checked": result.workspaces_checked,
+            "workspaces_deleted": result.workspaces_deleted,
+            "bytes_freed": result.bytes_freed,
+        },
+    )
+
+    return {
+        "status": "ok",
+        "workspaces_checked": result.workspaces_checked,
+        "workspaces_deleted": result.workspaces_deleted,
+        "bytes_freed": result.bytes_freed,
+        "deleted_job_ids": result.deleted_job_ids,
+        "errors": result.errors,
     }
 
 

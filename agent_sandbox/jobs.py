@@ -26,7 +26,12 @@ from uuid import UUID
 import modal
 
 from agent_sandbox.config.settings import get_settings
-from agent_sandbox.schemas.jobs import JobStatusResponse, WebhookConfig
+from agent_sandbox.schemas.jobs import (
+    ArtifactEntry,
+    ArtifactManifest,
+    JobStatusResponse,
+    WebhookConfig,
+)
 
 _settings = get_settings()
 
@@ -3977,4 +3982,356 @@ def get_ralph_snapshot_status() -> dict[str, Any]:
         "total_jobs": total_jobs,
         "total_snapshots": total_snapshots,
         "max_per_job": _settings.ralph_max_snapshots_per_job,
+    }
+
+
+# =============================================================================
+# WORKSPACE RETENTION TRACKING
+# =============================================================================
+# Distributed dictionary for tracking workspace metadata and retention.
+# Keys are job_id values, values are dicts with workspace metadata.
+# Used to determine which workspaces are eligible for cleanup.
+
+WORKSPACE_RETENTION = modal.Dict.from_name(
+    _settings.workspace_retention_store_name, create_if_missing=True
+)
+
+
+def register_job_workspace(
+    job_id: str,
+    workspace_root: str,
+    *,
+    job_status: str | None = None,
+) -> dict[str, Any]:
+    """Register a job workspace for retention tracking.
+
+    Called after creating a job workspace to track it for retention and cleanup.
+    Records workspace path, creation time, and basic metadata.
+
+    Args:
+        job_id: Validated UUID job identifier
+        workspace_root: Absolute path to the workspace directory
+        job_status: Optional job status (queued, running, complete, failed, canceled)
+
+    Returns:
+        Dict with workspace metadata entry that was created/updated.
+
+    Usage:
+        ```python
+        # After creating workspace directory
+        workspace = job_workspace_root("/data", job_id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        register_job_workspace(job_id, str(workspace))
+        ```
+    """
+    if not _settings.enable_workspace_retention:
+        return {}
+
+    now = int(time.time())
+    workspace_path = Path(workspace_root)
+
+    # Calculate workspace size and file count if directory exists
+    size_bytes = 0
+    file_count = 0
+    if workspace_path.exists():
+        try:
+            for path in workspace_path.rglob("*"):
+                if path.is_file():
+                    file_count += 1
+                    size_bytes += path.stat().st_size
+        except Exception:
+            pass
+
+    entry = {
+        "job_id": job_id,
+        "workspace_root": str(workspace_root),
+        "created_at": now,
+        "size_bytes": size_bytes,
+        "file_count": file_count,
+        "status": "active",
+        "deleted_at": None,
+        "job_status": job_status,
+        "updated_at": now,
+    }
+
+    WORKSPACE_RETENTION[job_id] = entry
+    return entry
+
+
+def update_workspace_metadata(
+    job_id: str,
+    *,
+    job_status: str | None = None,
+    recalculate_size: bool = False,
+) -> dict[str, Any] | None:
+    """Update workspace metadata for a job.
+
+    Updates existing workspace tracking entry with new job status or
+    recalculates size/file count from filesystem.
+
+    Args:
+        job_id: Validated UUID job identifier
+        job_status: New job status to record
+        recalculate_size: If True, re-scan filesystem for size/file count
+
+    Returns:
+        Updated workspace metadata dict, or None if workspace not tracked.
+    """
+    if not _settings.enable_workspace_retention:
+        return None
+
+    entry = WORKSPACE_RETENTION.get(job_id)
+    if not entry:
+        return None
+
+    now = int(time.time())
+    entry["updated_at"] = now
+
+    if job_status:
+        entry["job_status"] = job_status
+
+    if recalculate_size:
+        workspace_path = Path(entry["workspace_root"])
+        size_bytes = 0
+        file_count = 0
+        if workspace_path.exists():
+            try:
+                for path in workspace_path.rglob("*"):
+                    if path.is_file():
+                        file_count += 1
+                        size_bytes += path.stat().st_size
+            except Exception:
+                pass
+        entry["size_bytes"] = size_bytes
+        entry["file_count"] = file_count
+
+    WORKSPACE_RETENTION[job_id] = entry
+    return entry
+
+
+def get_workspace_metadata(job_id: str) -> dict[str, Any] | None:
+    """Get workspace metadata including creation time and size.
+
+    Args:
+        job_id: Validated UUID job identifier
+
+    Returns:
+        Dict with workspace metadata, or None if not tracked.
+    """
+    if not _settings.enable_workspace_retention:
+        return None
+
+    return WORKSPACE_RETENTION.get(job_id)
+
+
+def list_workspaces_for_cleanup(
+    before_timestamp: int | None = None,
+    status_filter: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """List workspaces eligible for cleanup based on age and job status.
+
+    Finds workspaces that have exceeded their retention period based on
+    job status. Failed jobs have longer retention than completed jobs.
+
+    Args:
+        before_timestamp: Only include workspaces created before this timestamp.
+                         If None, calculates based on retention settings.
+        status_filter: Only include workspaces for jobs with these statuses.
+                      If None, defaults to ["complete", "failed", "canceled"].
+
+    Returns:
+        List of workspace metadata dicts eligible for cleanup.
+    """
+    if not _settings.enable_workspace_retention:
+        return []
+
+    now = int(time.time())
+    default_statuses = ["complete", "failed", "canceled"]
+    statuses_to_check = status_filter or default_statuses
+
+    # Calculate cutoff times based on retention settings
+    completed_cutoff = now - (_settings.workspace_retention_days * 86400)
+    failed_cutoff = now - (_settings.failed_job_retention_days * 86400)
+
+    eligible = []
+    try:
+        for job_id, entry in WORKSPACE_RETENTION.items():
+            # Skip already deleted workspaces
+            if entry.get("status") == "deleted":
+                continue
+
+            job_status = entry.get("job_status")
+            created_at = entry.get("created_at", now)
+
+            # Skip if job status doesn't match filter
+            if job_status and job_status not in statuses_to_check:
+                continue
+
+            # Determine cutoff based on job status
+            if job_status == "failed":
+                cutoff = failed_cutoff
+            else:
+                cutoff = completed_cutoff
+
+            # Override with explicit before_timestamp if provided
+            if before_timestamp is not None:
+                cutoff = before_timestamp
+
+            # Check if workspace is old enough for cleanup
+            if created_at <= cutoff:
+                eligible.append(entry)
+    except Exception:
+        pass
+
+    return eligible
+
+
+def build_artifact_manifest(workspace_root: str) -> ArtifactManifest:
+    """Build artifact manifest from a workspace directory.
+
+    Recursively scans the workspace directory and collects metadata for all files,
+    including size, MIME type, and timestamps. This is a shared utility function
+    used by both the CLI controller and the HTTP gateway.
+
+    Args:
+        workspace_root: Absolute path to the job workspace directory
+
+    Returns:
+        ArtifactManifest containing:
+            - root: Absolute path to workspace
+            - files: List of ArtifactEntry objects with metadata for each file
+
+    Scanning Behavior:
+        - Uses rglob("*") for recursive traversal of all subdirectories
+        - Only includes files (not directories)
+        - Relative paths computed from workspace root
+        - Returns empty file list if workspace doesn't exist
+
+    Metadata Collected:
+        - path: Relative path from workspace root (e.g., "output.txt")
+        - size_bytes: File size from os.stat().st_size
+        - content_type: MIME type guessed from extension
+        - created_at: Unix timestamp from st_birthtime (macOS/BSD) or None (Linux)
+        - modified_at: Unix timestamp from st_mtime (all platforms)
+
+    Usage:
+        ```python
+        workspace = job_workspace_root("/data-cli", job_id)
+        manifest = build_artifact_manifest(str(workspace))
+        update_job(job_id, {"artifacts": manifest.model_dump()})
+        ```
+    """
+    import mimetypes
+
+    root_path = Path(workspace_root)
+    files: list[ArtifactEntry] = []
+
+    if root_path.exists():
+        for path in root_path.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+                content_type, _ = mimetypes.guess_type(str(path))
+                created_at = getattr(stat, "st_birthtime", None)
+                files.append(
+                    ArtifactEntry(
+                        path=str(path.relative_to(root_path)),
+                        size_bytes=stat.st_size,
+                        content_type=content_type,
+                        created_at=int(created_at) if created_at is not None else None,
+                        modified_at=int(stat.st_mtime),
+                    )
+                )
+            except Exception:
+                # Skip files we can't stat
+                continue
+
+    return ArtifactManifest(root=str(root_path), files=files)
+
+
+def mark_workspace_deleted(job_id: str) -> bool:
+    """Mark a workspace as deleted in retention tracking.
+
+    Called after successfully deleting a workspace directory to update
+    the tracking record. Preserves metadata for audit purposes.
+
+    Args:
+        job_id: Validated UUID job identifier
+
+    Returns:
+        True if workspace was found and marked deleted, False otherwise.
+    """
+    if not _settings.enable_workspace_retention:
+        return False
+
+    entry = WORKSPACE_RETENTION.get(job_id)
+    if not entry:
+        return False
+
+    now = int(time.time())
+    entry["status"] = "deleted"
+    entry["deleted_at"] = now
+    entry["updated_at"] = now
+
+    WORKSPACE_RETENTION[job_id] = entry
+    return True
+
+
+def get_workspace_retention_status() -> dict[str, Any]:
+    """Get overall workspace retention statistics.
+
+    Returns summary of workspace retention system including settings,
+    counts, and cleanup eligibility.
+
+    Returns:
+        Dict with retention statistics matching WorkspaceRetentionStatusResponse.
+    """
+    if not _settings.enable_workspace_retention:
+        return {
+            "enabled": False,
+            "retention_days": _settings.workspace_retention_days,
+            "failed_retention_days": _settings.failed_job_retention_days,
+            "total_workspaces": 0,
+            "active_workspaces": 0,
+            "total_size_bytes": 0,
+            "oldest_workspace_age_days": None,
+            "workspaces_pending_cleanup": 0,
+        }
+
+    now = int(time.time())
+    total_workspaces = 0
+    active_workspaces = 0
+    total_size_bytes = 0
+    oldest_created_at: int | None = None
+
+    try:
+        for _, entry in WORKSPACE_RETENTION.items():
+            total_workspaces += 1
+            if entry.get("status") == "active":
+                active_workspaces += 1
+                total_size_bytes += entry.get("size_bytes", 0) or 0
+                created_at = entry.get("created_at")
+                if created_at and (oldest_created_at is None or created_at < oldest_created_at):
+                    oldest_created_at = created_at
+    except Exception:
+        pass
+
+    # Calculate oldest workspace age in days
+    oldest_age_days: float | None = None
+    if oldest_created_at is not None:
+        oldest_age_days = (now - oldest_created_at) / 86400
+
+    # Count workspaces pending cleanup
+    pending_cleanup = len(list_workspaces_for_cleanup())
+
+    return {
+        "enabled": _settings.enable_workspace_retention,
+        "retention_days": _settings.workspace_retention_days,
+        "failed_retention_days": _settings.failed_job_retention_days,
+        "total_workspaces": total_workspaces,
+        "active_workspaces": active_workspaces,
+        "total_size_bytes": total_size_bytes,
+        "oldest_workspace_age_days": oldest_age_days,
+        "workspaces_pending_cleanup": pending_cleanup,
     }

@@ -5,6 +5,11 @@ from agent_sandbox.schemas.jobs import (
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
+    WorkspaceCleanupRequest,
+    WorkspaceCleanupResponse,
+    WorkspaceDeleteResponse,
+    WorkspaceMetadata,
+    WorkspaceRetentionStatusResponse,
 )
 from agent_sandbox.schemas.responses import (
     ClaudeCliCancelResponse,
@@ -79,4 +84,10 @@ __all__ = [
     "SessionHistoryResponse",
     "SessionUsersResponse",
     "MultiplayerStatusResponse",
+    # Workspace retention schemas
+    "WorkspaceMetadata",
+    "WorkspaceCleanupRequest",
+    "WorkspaceCleanupResponse",
+    "WorkspaceRetentionStatusResponse",
+    "WorkspaceDeleteResponse",
 ]
