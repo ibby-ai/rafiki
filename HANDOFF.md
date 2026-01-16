@@ -6,6 +6,29 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 - **Agent SDK Sandbox** (`svc-runner-8001`): Long-lived service for conversational queries via Claude Agent SDK
 - **CLI Sandbox** (`claude-cli-runner`): Code execution via Claude Code CLI
 
+## Recent Commits (This Session)
+
+The following commits were created for **Priority 10: CLI Sandbox Snapshots**:
+
+```
+b2590ad docs: update handoff with CLI snapshot implementation
+f453804 feat: add CLI sandbox snapshot restoration and persistence
+f7f5713 feat: add CLI job snapshot storage functions
+390ed2b feat: add CLI job snapshot configuration settings
+```
+
+**Previous session commits (Priority 1 & 5):**
+```
+0004188 docs: add handoff document for project improvements
+4e10478 feat: add stats endpoint and session snapshot persistence
+73d6fb5 feat: integrate statistics recording into query endpoints
+53ab32d feat: add statistics tracking and session snapshot storage
+c3548aa feat: add statistics and snapshot configuration settings
+9eadf0e feat: add statistics schemas and user tracking field
+```
+
+The branch is ahead of `origin/main` by 10 commits.
+
 ## Background Context
 
 We analyzed a blog post from Ramp (https://builders.ramp.com/post/why-we-built-our-background-agent) about their "Inspect" background coding agent and identified 13 improvements to implement in this project. The full plan is documented at:
