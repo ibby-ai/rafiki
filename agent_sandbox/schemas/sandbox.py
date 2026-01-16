@@ -171,3 +171,95 @@ class SessionCancellationStatusResponse(BaseSchema):
     acknowledged: int
     expired: int
     expiry_seconds: int  # Configured cancellation expiry time
+
+
+# =============================================================================
+# Prompt Queue API Schemas
+# =============================================================================
+# These schemas support the follow-up prompt queue feature.
+# Clients can queue prompts while a session is executing, and they will be
+# processed sequentially after the current query completes.
+# =============================================================================
+
+
+class QueuedPromptEntry(BaseSchema):
+    """A single queued prompt entry.
+
+    Represents a prompt that is waiting in the queue to be processed.
+    """
+
+    prompt_id: str  # Unique identifier for this prompt
+    question: str  # The prompt text
+    user_id: str | None = None  # Who submitted the prompt
+    queued_at: int  # Unix timestamp when queued
+    expires_at: int  # Unix timestamp when prompt expires
+    position: int | None = None  # Position in queue (1-indexed)
+
+
+class QueuePromptRequest(BaseSchema):
+    """Request body for queueing a prompt.
+
+    Use this to add a follow-up prompt to a session's queue while
+    the session is executing another query.
+    """
+
+    question: str  # The prompt text to queue
+    user_id: str | None = None  # Who is submitting the prompt
+
+
+class QueuePromptResponse(BaseSchema):
+    """Response from adding a prompt to the queue.
+
+    Contains status of the queue operation and prompt details.
+    """
+
+    ok: bool
+    queued: bool
+    session_id: str
+    prompt_id: str | None = None  # ID if queued successfully
+    position: int | None = None  # Position in queue (1-indexed)
+    queue_size: int = 0  # Total prompts in queue
+    expires_at: int | None = None  # When this prompt expires
+    error: str | None = None  # Error message if not queued
+    message: str | None = None  # Human-readable status
+
+
+class PromptQueueListResponse(BaseSchema):
+    """Response for listing a session's queued prompts.
+
+    Contains all pending prompts in the queue.
+    """
+
+    ok: bool
+    session_id: str
+    is_executing: bool  # Whether session is currently executing
+    queue_size: int  # Number of pending prompts
+    prompts: list[QueuedPromptEntry]  # List of queued prompts
+    max_queue_size: int  # Configured limit
+
+
+class PromptQueueClearResponse(BaseSchema):
+    """Response from clearing a session's prompt queue.
+
+    Contains the number of prompts that were cleared.
+    """
+
+    ok: bool
+    session_id: str
+    cleared_count: int  # Number of prompts cleared
+    message: str | None = None
+
+
+class PromptQueueStatusResponse(BaseSchema):
+    """Response for prompt queue status endpoint.
+
+    Shows current state of prompt queues across all sessions.
+    """
+
+    enabled: bool
+    sessions_with_queues: int  # Number of sessions with pending prompts
+    total_queued_prompts: int  # Total prompts across all sessions
+    active_prompts: int  # Non-expired prompts
+    expired_prompts: int  # Prompts past expiry
+    max_queue_size: int  # Configured limit per session
+    entry_expiry_seconds: int  # Configured expiry time

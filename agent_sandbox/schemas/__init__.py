@@ -17,7 +17,13 @@ from agent_sandbox.schemas.responses import (
 )
 from agent_sandbox.schemas.sandbox import (
     ClaudeCliRequest,
+    PromptQueueClearResponse,
+    PromptQueueListResponse,
+    PromptQueueStatusResponse,
     QueryBody,
+    QueuedPromptEntry,
+    QueuePromptRequest,
+    QueuePromptResponse,
     SessionCancellationStatusResponse,
     SessionStopRequest,
     SessionStopResponse,
@@ -46,4 +52,10 @@ __all__ = [
     "SessionStopRequest",
     "SessionStopResponse",
     "SessionCancellationStatusResponse",
+    "QueuedPromptEntry",
+    "QueuePromptRequest",
+    "QueuePromptResponse",
+    "PromptQueueListResponse",
+    "PromptQueueClearResponse",
+    "PromptQueueStatusResponse",
 ]

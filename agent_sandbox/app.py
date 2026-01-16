@@ -57,6 +57,7 @@ from agent_sandbox.jobs import (
     claim_warm_sandbox,
     cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
+    clear_session_queue,
     enqueue_job,
     generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
@@ -70,18 +71,24 @@ from agent_sandbox.jobs import (
     get_job_status,
     get_prewarm,
     get_prewarm_status,
+    get_prompt_queue_status,
+    get_queue_size,
     get_session_cancellation,
+    get_session_queue,
     get_session_snapshot,
     get_stats,
     get_warm_pool_status,
     is_job_due,
+    is_session_executing,
     job_workspace_root,
     normalize_job_id,
+    queue_prompt,
     register_cli_warm_sandbox,
     register_prewarm,
     register_warm_sandbox,
     remove_from_cli_pool,
     remove_from_pool,
+    remove_queued_prompt,
     resolve_job_artifact,
     should_skip_job,
     should_snapshot_cli_job,
@@ -110,7 +117,13 @@ from agent_sandbox.schemas import (
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
+    PromptQueueClearResponse,
+    PromptQueueListResponse,
+    PromptQueueStatusResponse,
     QueryBody,
+    QueuedPromptEntry,
+    QueuePromptRequest,
+    QueuePromptResponse,
     SessionCancellationStatusResponse,
     SessionStopRequest,
     SessionStopResponse,
@@ -2046,6 +2059,275 @@ async def get_cancellation_status_endpoint() -> SessionCancellationStatusRespons
         acknowledged=status["acknowledged"],
         expired=status["expired"],
         expiry_seconds=_settings.cancellation_expiry_seconds,
+    )
+
+
+# =============================================================================
+# Prompt Queue API
+# =============================================================================
+# These endpoints manage per-session follow-up prompt queues.
+# When a session is executing, prompts can be queued instead of rejected.
+# Queued prompts are stored until the session becomes idle.
+# =============================================================================
+
+
+@web_app.get("/session/{session_id}/queue", response_model=PromptQueueListResponse)
+async def get_session_queue_endpoint(session_id: str) -> PromptQueueListResponse:
+    """Get all pending prompts in a session's queue.
+
+    Returns the list of queued prompts waiting to be processed,
+    along with the session's current execution status.
+
+    Args:
+        session_id: The session ID to get queue for.
+
+    Returns:
+        PromptQueueListResponse with queue contents and status.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
+        ```
+    """
+    if not _settings.enable_prompt_queue:
+        return PromptQueueListResponse(
+            ok=False,
+            session_id=session_id,
+            is_executing=False,
+            queue_size=0,
+            prompts=[],
+            max_queue_size=_settings.max_queued_prompts_per_session,
+        )
+
+    prompts = get_session_queue(session_id)
+    is_exec = is_session_executing(session_id)
+
+    # Add position numbers to prompts
+    prompt_entries = [
+        QueuedPromptEntry(
+            prompt_id=p["prompt_id"],
+            question=p["question"],
+            user_id=p.get("user_id"),
+            queued_at=p["queued_at"],
+            expires_at=p["expires_at"],
+            position=i + 1,
+        )
+        for i, p in enumerate(prompts)
+    ]
+
+    return PromptQueueListResponse(
+        ok=True,
+        session_id=session_id,
+        is_executing=is_exec,
+        queue_size=len(prompts),
+        prompts=prompt_entries,
+        max_queue_size=_settings.max_queued_prompts_per_session,
+    )
+
+
+@web_app.post("/session/{session_id}/queue", response_model=QueuePromptResponse)
+async def queue_prompt_endpoint(
+    session_id: str,
+    body: QueuePromptRequest,
+) -> QueuePromptResponse:
+    """Queue a follow-up prompt for a session.
+
+    If the session is currently executing, the prompt is queued and will
+    be available for processing after the current query completes.
+    If the session is idle, the prompt is still queued (client can then
+    decide to process it immediately via the normal /query endpoint).
+
+    Args:
+        session_id: The session ID to queue the prompt for.
+        body: QueuePromptRequest containing the prompt text.
+
+    Returns:
+        QueuePromptResponse with queue status and prompt details.
+
+    Example:
+        ```bash
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"question": "Follow-up question here"}'
+        ```
+    """
+    if not _settings.enable_prompt_queue:
+        return QueuePromptResponse(
+            ok=False,
+            queued=False,
+            session_id=session_id,
+            error="Prompt queue feature is disabled",
+        )
+
+    result = queue_prompt(
+        session_id=session_id,
+        question=body.question,
+        user_id=body.user_id,
+    )
+
+    if result.get("queued"):
+        is_exec = is_session_executing(session_id)
+        message = "Prompt queued"
+        if is_exec:
+            message = "Prompt queued. Session is executing, will process after current query."
+        else:
+            message = "Prompt queued. Session is idle, ready for processing."
+
+        return QueuePromptResponse(
+            ok=True,
+            queued=True,
+            session_id=session_id,
+            prompt_id=result.get("prompt_id"),
+            position=result.get("position"),
+            queue_size=result.get("queue_size", 0),
+            expires_at=result.get("expires_at"),
+            message=message,
+        )
+    else:
+        return QueuePromptResponse(
+            ok=False,
+            queued=False,
+            session_id=session_id,
+            queue_size=result.get("queue_size", 0),
+            error=result.get("error", "Failed to queue prompt"),
+        )
+
+
+@web_app.delete("/session/{session_id}/queue", response_model=PromptQueueClearResponse)
+async def clear_session_queue_endpoint(session_id: str) -> PromptQueueClearResponse:
+    """Clear all pending prompts from a session's queue.
+
+    Args:
+        session_id: The session ID to clear queue for.
+
+    Returns:
+        PromptQueueClearResponse with number of prompts cleared.
+
+    Example:
+        ```bash
+        curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
+        ```
+    """
+    if not _settings.enable_prompt_queue:
+        return PromptQueueClearResponse(
+            ok=False,
+            session_id=session_id,
+            cleared_count=0,
+            message="Prompt queue feature is disabled",
+        )
+
+    count = clear_session_queue(session_id)
+    return PromptQueueClearResponse(
+        ok=True,
+        session_id=session_id,
+        cleared_count=count,
+        message=f"Cleared {count} queued prompt(s)" if count > 0 else "Queue was already empty",
+    )
+
+
+@web_app.delete("/session/{session_id}/queue/{prompt_id}")
+async def remove_queued_prompt_endpoint(session_id: str, prompt_id: str) -> JSONResponse:
+    """Remove a specific prompt from the queue by its ID.
+
+    Args:
+        session_id: The session ID.
+        prompt_id: The prompt ID to remove.
+
+    Returns:
+        JSONResponse with removal status.
+
+    Example:
+        ```bash
+        curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue/prompt_xyz'
+        ```
+    """
+    if not _settings.enable_prompt_queue:
+        return JSONResponse(
+            {"ok": False, "removed": False, "error": "Prompt queue feature is disabled"},
+            status_code=503,
+        )
+
+    removed = remove_queued_prompt(session_id, prompt_id)
+    if removed:
+        return JSONResponse(
+            {"ok": True, "removed": True, "session_id": session_id, "prompt_id": prompt_id}
+        )
+    else:
+        return JSONResponse(
+            {
+                "ok": False,
+                "removed": False,
+                "session_id": session_id,
+                "prompt_id": prompt_id,
+                "error": "Prompt not found in queue",
+            },
+            status_code=404,
+        )
+
+
+@web_app.get("/session/{session_id}/executing")
+async def is_session_executing_endpoint(session_id: str) -> JSONResponse:
+    """Check if a session is currently executing a query.
+
+    Useful for clients to decide whether to queue a prompt or
+    submit it directly.
+
+    Args:
+        session_id: The session ID to check.
+
+    Returns:
+        JSONResponse with execution status.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/executing'
+        ```
+    """
+    is_exec = is_session_executing(session_id) if _settings.enable_prompt_queue else False
+    queue_size = get_queue_size(session_id) if _settings.enable_prompt_queue else 0
+    return JSONResponse(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "is_executing": is_exec,
+            "queue_size": queue_size,
+            "queue_enabled": _settings.enable_prompt_queue,
+        }
+    )
+
+
+@web_app.get("/session/queue/status", response_model=PromptQueueStatusResponse)
+async def get_prompt_queue_status_endpoint() -> PromptQueueStatusResponse:
+    """Get current status of prompt queues across all sessions.
+
+    Returns statistics about queued prompts including counts of
+    active, expired, and total queued prompts.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/queue/status'
+        ```
+    """
+    if not _settings.enable_prompt_queue:
+        return PromptQueueStatusResponse(
+            enabled=False,
+            sessions_with_queues=0,
+            total_queued_prompts=0,
+            active_prompts=0,
+            expired_prompts=0,
+            max_queue_size=_settings.max_queued_prompts_per_session,
+            entry_expiry_seconds=_settings.prompt_queue_entry_expiry_seconds,
+        )
+
+    status = get_prompt_queue_status()
+    return PromptQueueStatusResponse(
+        enabled=True,
+        sessions_with_queues=status["sessions_with_queues"],
+        total_queued_prompts=status["total_queued_prompts"],
+        active_prompts=status["active_prompts"],
+        expired_prompts=status["expired_prompts"],
+        max_queue_size=status["max_queue_size"],
+        entry_expiry_seconds=status["entry_expiry_seconds"],
     )
 
 

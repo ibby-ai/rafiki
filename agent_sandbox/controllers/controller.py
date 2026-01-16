@@ -52,6 +52,8 @@ from agent_sandbox.jobs import (
     acknowledge_session_cancellation,
     is_session_cancelled,
     job_workspace_root,
+    mark_session_executing,
+    mark_session_idle,
     normalize_job_id,
     record_session_end,
     record_session_start,
@@ -570,6 +572,12 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
     start_time = time.time()
     final_status = "failed"
+    final_session_id: str | None = None
+
+    # Mark session as executing (for prompt queue feature)
+    # We mark using resolved_session_id initially; will update after SDK returns actual ID
+    if resolved_session_id and _settings.enable_prompt_queue:
+        mark_session_executing(resolved_session_id)
 
     try:
         messages: list[Message] = []
@@ -595,14 +603,14 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             final_text = "\n".join(text_blocks)
 
         summary = build_final_summary(result_message, final_text)
-        session_id = summary.get("session_id")
-        _persist_session_id(body.session_key, session_id)
+        final_session_id = summary.get("session_id")
+        _persist_session_id(body.session_key, final_session_id)
         _logger.info(
             "agent.query.complete",
             extra={
                 "job_id": body.job_id,
                 "request_id": request_id,
-                "session_id": session_id,
+                "session_id": final_session_id,
                 "duration_ms": summary.get("duration_ms"),
                 "num_turns": summary.get("num_turns"),
             },
@@ -612,7 +620,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             "ok": True,
             "messages": [serialize_message(message) for message in messages],
             "summary": summary,
-            "session_id": session_id,
+            "session_id": final_session_id,
         }
     finally:
         # Record session end for statistics tracking
@@ -622,6 +630,11 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             status=final_status,
             duration_ms=duration_ms,
         )
+        # Mark session as idle (for prompt queue feature)
+        if _settings.enable_prompt_queue:
+            session_to_mark = final_session_id or resolved_session_id
+            if session_to_mark:
+                mark_session_idle(session_to_mark)
         _maybe_commit_volume(force=job_root is not None)
 
 
@@ -654,6 +667,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
         messages: list[Message] = []
         result_message: ResultMessage | None = None
         request_id = getattr(request.state, "request_id", None)
+        final_session_id: str | None = None
         _logger.info(
             "agent.query_stream.start",
             extra={
@@ -667,6 +681,10 @@ async def query_agent_stream(body: QueryBody, request: Request):
         record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
         start_time = time.time()
         final_status = "failed"
+
+        # Mark session as executing (for prompt queue feature)
+        if resolved_session_id and _settings.enable_prompt_queue:
+            mark_session_executing(resolved_session_id)
 
         try:
             async with ClaudeSDKClient(
@@ -692,13 +710,14 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 final_text = "\n".join(text_blocks)
 
             summary = build_final_summary(result_message, final_text)
-            _persist_session_id(body.session_key, summary.get("session_id"))
+            final_session_id = summary.get("session_id")
+            _persist_session_id(body.session_key, final_session_id)
             _logger.info(
                 "agent.query_stream.complete",
                 extra={
                     "job_id": body.job_id,
                     "request_id": request_id,
-                    "session_id": summary.get("session_id"),
+                    "session_id": final_session_id,
                     "duration_ms": summary.get("duration_ms"),
                     "num_turns": summary.get("num_turns"),
                 },
@@ -713,6 +732,11 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 status=final_status,
                 duration_ms=duration_ms,
             )
+            # Mark session as idle (for prompt queue feature)
+            if _settings.enable_prompt_queue:
+                session_to_mark = final_session_id or resolved_session_id
+                if session_to_mark:
+                    mark_session_idle(session_to_mark)
             _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")

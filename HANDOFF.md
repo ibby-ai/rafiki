@@ -8,13 +8,18 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 8: Stop/Cancel Mid-Execution**:
+The following commits were created for **Priority 7: Follow-up Prompt Queue**:
 
+```
+(pending) feat: add follow-up prompt queue for sessions
+```
+
+**Previous session commits:**
 ```
 6a3d70c feat: add session stop/cancel for graceful mid-execution termination
 ```
 
-**Previous session commits:**
+**Earlier commits:**
 ```
 57a3514 feat: add pre-warm API for speculative sandbox warming
 1340824 feat: add CLI warm pool for reduced cold-start latency
@@ -447,6 +452,165 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/cancellations/statu
 **Note on CLI Sandbox:**
 CLI sandbox cancellation is handled differently since it runs Claude Code CLI as a subprocess. The existing `DELETE /claude_cli/{call_id}` endpoint cancels async CLI function calls. For synchronous CLI execution, process-level termination would require a different approach (e.g., subprocess kill signals).
 
+### Priority 7: Follow-up Prompt Queue ✅ COMPLETE
+
+**Problem**: Can't send follow-up prompts while agent is still executing.
+
+**Solution**: Queue follow-up prompts to run after current execution.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `prompt_queue_store_name` setting (default: "agent-prompt-queue")
+   - Added `enable_prompt_queue` setting (default: True)
+   - Added `max_queued_prompts_per_session` setting (default: 10)
+   - Added `prompt_queue_entry_expiry_seconds` setting (default: 3600)
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `PROMPT_QUEUE` Modal Dict for storing per-session prompt queues
+   - Added `SESSION_EXECUTION_STATE` Modal Dict for tracking session execution status
+   - Added `mark_session_executing()` function to mark session as running
+   - Added `mark_session_idle()` function to mark session as idle
+   - Added `is_session_executing()` function to check session status
+   - Added `queue_prompt()` function to add prompt to queue
+   - Added `dequeue_prompt()` function to get and remove next prompt
+   - Added `peek_next_prompt()` function to view next prompt without removing
+   - Added `get_session_queue()` function to list all queued prompts
+   - Added `get_queue_size()` function to get queue length
+   - Added `clear_session_queue()` function to clear all prompts
+   - Added `remove_queued_prompt()` function to remove specific prompt
+   - Added `cleanup_expired_queue_entries()` function for maintenance
+   - Added `get_prompt_queue_status()` function for overall statistics
+
+3. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+   - Added `QueuedPromptEntry` schema for queued prompt entries
+   - Added `QueuePromptRequest` schema for queue request body
+   - Added `QueuePromptResponse` schema for queue response
+   - Added `PromptQueueListResponse` schema for listing queue
+   - Added `PromptQueueClearResponse` schema for clearing queue
+   - Added `PromptQueueStatusResponse` schema for status endpoint
+
+4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for all new prompt queue schemas
+
+5. `agent_sandbox/controllers/controller.py` - MODIFIED
+   - Added imports for `mark_session_executing`, `mark_session_idle`
+   - Modified `/query` endpoint to mark session executing/idle around query
+   - Modified `/query_stream` endpoint similarly
+
+6. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for prompt queue functions and schemas
+   - Added `GET /session/{session_id}/queue` endpoint to list queued prompts
+   - Added `POST /session/{session_id}/queue` endpoint to queue a prompt
+   - Added `DELETE /session/{session_id}/queue` endpoint to clear queue
+   - Added `DELETE /session/{session_id}/queue/{prompt_id}` endpoint to remove specific prompt
+   - Added `GET /session/{session_id}/executing` endpoint to check execution status
+   - Added `GET /session/queue/status` endpoint for overall statistics
+
+**How it works:**
+
+1. Controller marks session as "executing" when starting a query
+2. Client can check `GET /session/{id}/executing` to see if session is busy
+3. If session is executing, client queues prompt via `POST /session/{id}/queue`
+4. When query completes, controller marks session as "idle"
+5. Client can poll queue and decide when to process next prompt
+6. Queued prompts expire after configured time (default: 1 hour)
+
+**Queue Entry Structure:**
+
+```python
+PROMPT_QUEUE[session_id] = {
+    "session_id": "sess_abc123",        # Session this queue belongs to
+    "prompts": [                         # List of queued prompts (FIFO)
+        {
+            "prompt_id": "prompt-uuid",  # Unique ID for this prompt
+            "question": "follow-up...",  # The prompt text
+            "user_id": "user_123",       # Who submitted (optional)
+            "queued_at": 1704067200,     # Unix timestamp when queued
+            "expires_at": 1704070800,    # Unix timestamp when expires
+            "metadata": {},              # Optional metadata
+        }
+    ],
+    "updated_at": 1704067200,            # Last update timestamp
+}
+```
+
+**Execution State Structure:**
+
+```python
+SESSION_EXECUTION_STATE[session_id] = {
+    "session_id": "sess_abc123",  # Session ID
+    "status": "executing",        # "executing" | "idle"
+    "started_at": 1704067200,     # When execution started
+    "updated_at": 1704067200,     # Last status update
+}
+```
+
+**HTTP Endpoints:**
+
+- `GET /session/{session_id}/queue` - List queued prompts
+- `POST /session/{session_id}/queue` - Queue a prompt
+- `DELETE /session/{session_id}/queue` - Clear all queued prompts
+- `DELETE /session/{session_id}/queue/{prompt_id}` - Remove specific prompt
+- `GET /session/{session_id}/executing` - Check if session is executing
+- `GET /session/queue/status` - Get overall queue statistics
+
+**Example Usage:**
+
+```bash
+# Check if session is executing
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/executing'
+# Response: {"ok": true, "session_id": "sess_abc123", "is_executing": true, "queue_size": 0, ...}
+
+# Queue a follow-up prompt
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue' \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What about the next step?"}'
+# Response: {"ok": true, "queued": true, "prompt_id": "abc-123", "position": 1, ...}
+
+# View queued prompts
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
+# Response: {"ok": true, "session_id": "sess_abc123", "is_executing": false, "queue_size": 1, "prompts": [...], ...}
+
+# Clear the queue
+curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
+# Response: {"ok": true, "session_id": "sess_abc123", "cleared_count": 1, ...}
+
+# Get overall statistics
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/queue/status'
+# Response: {"enabled": true, "sessions_with_queues": 5, "total_queued_prompts": 12, ...}
+```
+
+**Client-side Usage Pattern:**
+
+```javascript
+// When user submits a prompt
+async function submitPrompt(sessionId, question) {
+  // Check if session is executing
+  const statusResp = await fetch(`/session/${sessionId}/executing`);
+  const status = await statusResp.json();
+
+  if (status.is_executing) {
+    // Session is busy, queue the prompt
+    const queueResp = await fetch(`/session/${sessionId}/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const result = await queueResp.json();
+    return { queued: true, position: result.position };
+  } else {
+    // Session is idle, submit directly
+    const queryResp = await fetch('/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, session_id: sessionId }),
+    });
+    return { queued: false, response: await queryResp.json() };
+  }
+}
+```
+
 ### Priority 3: Pre-warm API ✅ COMPLETE
 
 **Problem**: Users wait for sandbox to be ready after submitting prompt.
@@ -654,8 +818,8 @@ modal deploy -m agent_sandbox.deploy
 5. ✅ CLI Warm Pool (Priority 11) - COMPLETE
 6. ✅ Pre-warm API (Priority 3) - COMPLETE
 7. ✅ Stop/Cancel Mid-Execution (Priority 8) - COMPLETE
-8. 🔄 Follow-up Prompt Queue (Priority 7) - NEXT
-9. ⏳ Multiplayer Session Support (Priority 6)
+8. ✅ Follow-up Prompt Queue (Priority 7) - COMPLETE
+9. 🔄 Multiplayer Session Support (Priority 6) - NEXT
 10. ⏳ Ralph Loop Improvements (Priority 12)
 11. ⏳ CLI Job Workspace Improvements (Priority 13)
 12. ⏳ VS Code Integration (Priority 9)
@@ -663,12 +827,11 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 7: Follow-up Prompt Queue**
-   - Add per-session prompt queue in `SESSION_STORE`
-   - Queue prompts during execution, process after
-   - Add `GET /session/{id}/queue` to view pending prompts
-   - Enables sending follow-up prompts while agent is still executing
+1. Continue with **Priority 6: Multiplayer Session Support**
+   - Add `user_id` field for attribution (already done in QueryBody)
+   - Store message history with author attribution
+   - Session becomes shared resource multiple clients can query
 
-2. After completing Priority 7, move to Priority 6: Multiplayer Session Support
+2. After completing Priority 6, move to Ralph Loop Improvements (Priority 12)
 
 3. Follow the phased implementation order in the plan file

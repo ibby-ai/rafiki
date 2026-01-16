@@ -369,6 +369,36 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Prompt queue settings (follow-up prompts while agent is executing)
+    prompt_queue_store_name: str = Field(
+        default="agent-prompt-queue",
+        description="Modal Dict name for storing per-session prompt queues",
+    )
+    enable_prompt_queue: bool = Field(
+        default=True,
+        description=(
+            "Enable the prompt queue feature. "
+            "When enabled, prompts sent while a session is executing are queued "
+            "and processed sequentially after the current query completes."
+        ),
+    )
+    max_queued_prompts_per_session: int = Field(
+        default=10,
+        description=(
+            "Maximum number of prompts that can be queued per session. "
+            "Additional prompts are rejected with a 429 status when limit is reached. "
+            "Default: 10 prompts."
+        ),
+    )
+    prompt_queue_entry_expiry_seconds: int = Field(
+        default=3600,
+        description=(
+            "How long (seconds) a queued prompt remains valid. "
+            "Expired prompts are skipped during processing. "
+            "Default: 1 hour."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
