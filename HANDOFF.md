@@ -1407,7 +1407,53 @@ The controller must call `set_parent_context(job_id)` before agent execution to 
 
 2. Priority 9 (VS Code Integration) has been deferred - adds complexity and resource overhead that may not be needed initially
 
-3. Possible future enhancements:
-   - Integration testing for session spawning tools
-   - Controller integration to set parent context for session tools
-   - CLI sandbox type support for spawned children
+## Outstanding Tasks
+
+### Controller Integration for Sub-Session Tools
+Add `set_parent_context()` calls in `controller.py` and `cli_controller.py` to enable the session spawning tools:
+
+```python
+# In controller.py before agent execution:
+from agent_sandbox.tools.session_tools import set_parent_context
+set_parent_context(job_id)  # Enable session tools for this parent
+```
+
+Without this integration, the session tools return "No parent session context available" errors.
+
+**Files to modify:**
+- `agent_sandbox/controllers/controller.py` - Set parent context before `/query` and `/query_stream`
+- `agent_sandbox/controllers/cli_controller.py` - Set parent context before `/execute` and `/ralph/execute`
+
+### Integration Testing
+Run through the verification matrix from the plan file:
+
+**Agent SDK Sandbox:**
+- [ ] Snapshot persistence after sandbox timeout
+- [ ] Warm pool latency measurements
+- [ ] Pre-warm latency reduction
+- [ ] Sub-session parallel execution
+- [ ] Stats endpoint validation
+- [ ] Multiplayer attribution
+- [ ] Queue execution order
+- [ ] Stop/cancel clean termination
+
+**CLI Sandbox:**
+- [ ] CLI snapshot file preservation
+- [ ] CLI warm pool cold start measurements
+- [ ] Ralph SSE streaming
+- [ ] Ralph pause/resume checkpoint
+- [ ] Artifact download via endpoint
+- [ ] Workspace cleanup per policy
+
+### GitHub App for Repo Operations
+Add GitHub App integration for:
+- Cloning private repositories
+- Creating branches and PRs
+- Committing changes on behalf of users
+- Webhook integration for PR events
+
+### Periodic Image Rebuilds
+Implement automatic image rebuilds (every 30 min as Ramp does) to:
+- Pick up dependency updates
+- Ensure fresh base images
+- Invalidate warm pool sandboxes on rebuild
