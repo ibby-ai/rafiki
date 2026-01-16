@@ -211,6 +211,28 @@ class Settings(BaseSettings):
             "Prevents excessive snapshot creation for rapid-fire queries."
         ),
     )
+
+    # CLI sandbox snapshot settings
+    cli_job_snapshot_store_name: str = Field(
+        default="cli-job-snapshots",
+        description="Modal Dict name for storing CLI job filesystem snapshots",
+    )
+    enable_cli_job_snapshots: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic filesystem snapshots for CLI job persistence. "
+            "When enabled, snapshots are taken after CLI jobs complete, "
+            "allowing job state to be restored when resuming after sandbox timeout."
+        ),
+    )
+    cli_snapshot_min_interval_seconds: int = Field(
+        default=60,
+        description=(
+            "Minimum seconds between snapshots for the same CLI job. "
+            "Prevents excessive snapshot creation for rapid-fire executions."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
