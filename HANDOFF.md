@@ -1277,16 +1277,15 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
 9. ✅ Multiplayer Session Support (Priority 6) - COMPLETE
 10. ✅ Ralph Loop Improvements (Priority 12) - COMPLETE
 11. ✅ CLI Job Workspace Improvements (Priority 13) - COMPLETE
-12. 🔄 VS Code Integration (Priority 9) - NEXT
-13. ⏳ Sub-Session Spawning Tool (Priority 4)
+12. ⏭️ VS Code Integration (Priority 9) - SKIP FOR NOW
+13. 🔄 Sub-Session Spawning Tool (Priority 4) - NEXT
 
 ## Next Steps
 
-1. Continue with **Priority 9: VS Code Integration**
-   - Add code-server to CLI image
-   - Expose on separate tunnel port
-   - Add endpoint for VS Code URL
+1. Continue with **Priority 4: Sub-Session Spawning Tool**
+   - Create MCP tool for spawning child sessions
+   - Create tool for checking session status
 
-2. After completing Priority 9, move to Sub-Session Spawning Tool (Priority 4)
+2. Priority 9 (VS Code Integration) has been deferred - adds complexity and resource overhead that may not be needed initially
 
 3. Follow the phased implementation order in the plan file
