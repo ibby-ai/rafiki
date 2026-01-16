@@ -1116,3 +1116,183 @@ def delete_session_snapshot(session_id: str) -> bool:
         return True
     except KeyError:
         return False
+
+
+# =============================================================================
+# CLI JOB SNAPSHOT MANAGEMENT
+# =============================================================================
+# Functions for storing and retrieving CLI sandbox filesystem snapshots.
+# Snapshots capture the CLI sandbox filesystem state after job execution,
+# enabling state restoration when resuming a job after sandbox timeout.
+# Unlike session snapshots (keyed by session_id), CLI snapshots are keyed
+# by job_id since CLI sandboxes use a job-based execution model.
+
+CLI_JOB_SNAPSHOTS = modal.Dict.from_name(
+    _settings.cli_job_snapshot_store_name, create_if_missing=True
+)
+
+
+def store_cli_job_snapshot(
+    job_id: str,
+    image_id: str,
+    sandbox_name: str,
+) -> dict[str, Any]:
+    """Store a filesystem snapshot reference for a CLI job.
+
+    Records the Modal Image ID from a sandbox.snapshot_filesystem() call,
+    allowing the CLI job's filesystem state to be restored when the job
+    resumes in a new sandbox.
+
+    Args:
+        job_id: The CLI job ID (UUID) to associate with this snapshot.
+        image_id: Modal Image object_id from sandbox.snapshot_filesystem().
+        sandbox_name: Name of the sandbox that was snapshotted (e.g., "claude-cli-runner").
+
+    Returns:
+        Dict with snapshot metadata including job_id, image_id, sandbox_name,
+        and created_at timestamp.
+
+    Storage Structure:
+        CLI_JOB_SNAPSHOTS[job_id] = {
+            "job_id": "550e8400-...",
+            "image_id": "im-xxx",
+            "sandbox_name": "claude-cli-runner",
+            "created_at": 1704067200,
+        }
+
+    Usage:
+        Called after CLI job completes to capture filesystem state:
+        ```python
+        # After CLI execution completes
+        image = sandbox.snapshot_filesystem()
+        store_cli_job_snapshot(
+            job_id=job_id,
+            image_id=image.object_id,
+            sandbox_name="claude-cli-runner",
+        )
+        ```
+
+    Note:
+        - Only stores the latest snapshot per job (overwrites previous)
+        - image_id can be used to create a new sandbox from the snapshot:
+          `modal.Sandbox.create(image=modal.Image.from_id(image_id), ...)`
+        - Snapshots persist in Modal Dict across sandbox restarts
+
+    See Also:
+        - get_cli_job_snapshot(): Retrieve snapshot for job restoration
+        - should_snapshot_cli_job(): Check if snapshot is needed
+    """
+    now = int(time.time())
+    snapshot_info = {
+        "job_id": job_id,
+        "image_id": image_id,
+        "sandbox_name": sandbox_name,
+        "created_at": now,
+    }
+    CLI_JOB_SNAPSHOTS[job_id] = snapshot_info
+    return snapshot_info
+
+
+def get_cli_job_snapshot(job_id: str) -> dict[str, Any] | None:
+    """Retrieve the stored filesystem snapshot for a CLI job.
+
+    Looks up the most recent snapshot for the given job ID, which can be
+    used to restore filesystem state when creating a new sandbox.
+
+    Args:
+        job_id: The CLI job ID (UUID) to look up.
+
+    Returns:
+        Snapshot metadata dict if found, containing:
+        - job_id: The job identifier
+        - image_id: Modal Image object_id for sandbox.create(image=...)
+        - sandbox_name: Original sandbox name
+        - created_at: Unix timestamp of snapshot
+
+        None if no snapshot exists for this job.
+
+    Usage:
+        Called when resuming a job to check for restorable state:
+        ```python
+        snapshot = get_cli_job_snapshot(job_id)
+        if snapshot:
+            # Create sandbox from snapshot
+            image = modal.Image.from_id(snapshot["image_id"])
+            sandbox = modal.Sandbox.create(image=image, ...)
+        ```
+
+    See Also:
+        - store_cli_job_snapshot(): Store new snapshot
+        - should_snapshot_cli_job(): Check if new snapshot needed
+    """
+    return CLI_JOB_SNAPSHOTS.get(job_id)
+
+
+def should_snapshot_cli_job(
+    job_id: str,
+    min_interval_seconds: int = 60,
+) -> bool:
+    """Check if a new snapshot should be taken for a CLI job.
+
+    Prevents excessive snapshot creation by enforcing a minimum interval
+    between snapshots for the same job. Snapshots are expensive I/O
+    operations, so throttling is important for high-frequency executions.
+
+    Args:
+        job_id: The job to check.
+        min_interval_seconds: Minimum seconds since last snapshot before
+            allowing a new one. Default 60 seconds.
+
+    Returns:
+        True if no snapshot exists for this job, or if the last snapshot
+        was taken more than min_interval_seconds ago.
+        False if a recent snapshot exists (within the interval).
+
+    Usage:
+        ```python
+        if should_snapshot_cli_job(job_id, min_interval_seconds=60):
+            image = sandbox.snapshot_filesystem()
+            store_cli_job_snapshot(job_id, image.object_id, sandbox_name)
+        ```
+
+    Throttling Behavior:
+        - First execution for a job: Always snapshots (no existing snapshot)
+        - Rapid follow-ups (<60s): Skip snapshot to reduce I/O
+        - After interval: Snapshot to capture recent changes
+
+    See Also:
+        - store_cli_job_snapshot(): Store new snapshot
+        - get_cli_job_snapshot(): Retrieve existing snapshot
+    """
+    snapshot = CLI_JOB_SNAPSHOTS.get(job_id)
+    if not snapshot:
+        return True
+    created_at = snapshot.get("created_at", 0)
+    now = int(time.time())
+    return (now - created_at) >= min_interval_seconds
+
+
+def delete_cli_job_snapshot(job_id: str) -> bool:
+    """Delete the stored snapshot for a CLI job.
+
+    Removes the snapshot reference from storage. The underlying Modal Image
+    may still exist in Modal's infrastructure but will no longer be associated
+    with this job.
+
+    Args:
+        job_id: The job whose snapshot should be deleted.
+
+    Returns:
+        True if a snapshot was deleted, False if no snapshot existed.
+
+    Usage:
+        Called when a job is explicitly cleaned up:
+        ```python
+        delete_cli_job_snapshot(job_id)
+        ```
+    """
+    try:
+        del CLI_JOB_SNAPSHOTS[job_id]
+        return True
+    except KeyError:
+        return False
