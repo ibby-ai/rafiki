@@ -11,7 +11,7 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 The following commits were created for **Priority 8: Stop/Cancel Mid-Execution**:
 
 ```
-(uncommitted) feat: add session stop/cancel for graceful mid-execution termination
+6a3d70c feat: add session stop/cancel for graceful mid-execution termination
 ```
 
 **Previous session commits:**
