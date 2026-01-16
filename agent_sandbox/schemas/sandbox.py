@@ -263,3 +263,152 @@ class PromptQueueStatusResponse(BaseSchema):
     expired_prompts: int  # Prompts past expiry
     max_queue_size: int  # Configured limit per session
     entry_expiry_seconds: int  # Configured expiry time
+
+
+# =============================================================================
+# Multiplayer Session Schemas
+# =============================================================================
+# These schemas support multiplayer session collaboration where multiple users
+# can interact with the same session. Sessions track ownership, authorized users,
+# and message history with user attribution.
+# =============================================================================
+
+
+class MessageHistoryEntry(BaseSchema):
+    """A single message in session history with user attribution.
+
+    Represents either a user query or agent response in the conversation.
+    """
+
+    message_id: str  # Unique identifier for this message
+    role: Literal["user", "assistant"]  # Who sent the message
+    content: str  # Message content (query or response summary)
+    user_id: str | None = None  # Who sent the message (for user role)
+    timestamp: int  # Unix timestamp when message was recorded
+    turn_number: int | None = None  # Conversation turn number
+    tokens_used: int | None = None  # Tokens consumed (for assistant)
+
+
+class SessionMetadata(BaseSchema):
+    """Metadata about a session including ownership and access control.
+
+    Tracks who created the session, who can access it, and conversation history.
+    """
+
+    session_id: str  # The session identifier
+    owner_id: str | None = None  # User who created the session
+    created_at: int  # Unix timestamp when session was created
+    updated_at: int  # Unix timestamp of last activity
+    name: str | None = None  # Human-readable session name
+    description: str | None = None  # Session description
+    authorized_users: list[str] = []  # Users with access (excludes owner)
+    message_count: int = 0  # Total messages in history
+    is_shared: bool = False  # Whether session has been shared
+
+
+class SessionShareRequest(BaseSchema):
+    """Request body for sharing a session with another user.
+
+    The session_id is provided in the URL path.
+    """
+
+    user_id: str  # User to share with
+    requested_by: str | None = None  # Who is sharing (for audit)
+
+
+class SessionShareResponse(BaseSchema):
+    """Response from session sharing request.
+
+    Contains the updated list of authorized users.
+    """
+
+    ok: bool
+    session_id: str
+    shared_with: str  # User ID that was granted access
+    authorized_users: list[str]  # All authorized users (excludes owner)
+    message: str | None = None
+
+
+class SessionUnshareRequest(BaseSchema):
+    """Request body for revoking a user's access to a session.
+
+    The session_id is provided in the URL path.
+    """
+
+    user_id: str  # User to revoke access from
+    requested_by: str | None = None  # Who is revoking (for audit)
+
+
+class SessionUnshareResponse(BaseSchema):
+    """Response from session unshare request.
+
+    Contains the updated list of authorized users.
+    """
+
+    ok: bool
+    session_id: str
+    revoked_from: str  # User ID whose access was revoked
+    authorized_users: list[str]  # Remaining authorized users
+    message: str | None = None
+
+
+class SessionMetadataResponse(BaseSchema):
+    """Response for retrieving session metadata.
+
+    Contains full session metadata including access control info.
+    """
+
+    ok: bool
+    session_id: str
+    owner_id: str | None = None
+    created_at: int | None = None
+    updated_at: int | None = None
+    name: str | None = None
+    description: str | None = None
+    authorized_users: list[str] = []
+    message_count: int = 0
+    is_shared: bool = False
+    is_executing: bool = False  # Current execution state
+    has_snapshot: bool = False  # Whether a filesystem snapshot exists
+    message: str | None = None
+
+
+class SessionHistoryResponse(BaseSchema):
+    """Response for retrieving session message history.
+
+    Contains the conversation history with user attribution.
+    """
+
+    ok: bool
+    session_id: str
+    message_count: int
+    messages: list[MessageHistoryEntry]
+    has_more: bool = False  # For pagination
+    message: str | None = None
+
+
+class SessionUsersResponse(BaseSchema):
+    """Response for listing users with access to a session.
+
+    Contains owner and all authorized users.
+    """
+
+    ok: bool
+    session_id: str
+    owner_id: str | None = None
+    authorized_users: list[str]
+    total_users: int  # owner + authorized users
+    message: str | None = None
+
+
+class MultiplayerStatusResponse(BaseSchema):
+    """Response for multiplayer session status endpoint.
+
+    Shows current state of multiplayer sessions across the system.
+    """
+
+    enabled: bool
+    total_sessions: int  # Total sessions with metadata
+    shared_sessions: int  # Sessions shared with at least one user
+    total_messages: int  # Total messages tracked
+    max_history_per_session: int  # Configured limit

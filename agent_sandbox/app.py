@@ -49,6 +49,8 @@ from starlette.responses import StreamingResponse
 from agent_sandbox.config.settings import Settings, get_modal_secrets
 from agent_sandbox.jobs import (
     JOB_QUEUE,
+    # Multiplayer session functions
+    authorize_session_user,
     bump_attempts,
     cancel_job,
     cancel_session,
@@ -58,6 +60,7 @@ from agent_sandbox.jobs import (
     cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
     clear_session_queue,
+    create_session_metadata,
     enqueue_job,
     generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
@@ -69,13 +72,18 @@ from agent_sandbox.jobs import (
     get_expired_pool_entries,
     get_job_record,
     get_job_status,
+    get_multiplayer_status,
     get_prewarm,
     get_prewarm_status,
     get_prompt_queue_status,
     get_queue_size,
     get_session_cancellation,
+    get_session_history,
+    get_session_message_count,
+    get_session_metadata,
     get_session_queue,
     get_session_snapshot,
+    get_session_users,
     get_stats,
     get_warm_pool_status,
     is_job_due,
@@ -90,6 +98,7 @@ from agent_sandbox.jobs import (
     remove_from_pool,
     remove_queued_prompt,
     resolve_job_artifact,
+    revoke_session_user,
     should_skip_job,
     should_snapshot_cli_job,
     should_snapshot_session,
@@ -117,6 +126,9 @@ from agent_sandbox.schemas import (
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
+    # Multiplayer session schemas
+    MessageHistoryEntry,
+    MultiplayerStatusResponse,
     PromptQueueClearResponse,
     PromptQueueListResponse,
     PromptQueueStatusResponse,
@@ -125,8 +137,15 @@ from agent_sandbox.schemas import (
     QueuePromptRequest,
     QueuePromptResponse,
     SessionCancellationStatusResponse,
+    SessionHistoryResponse,
+    SessionMetadataResponse,
+    SessionShareRequest,
+    SessionShareResponse,
     SessionStopRequest,
     SessionStopResponse,
+    SessionUnshareRequest,
+    SessionUnshareResponse,
+    SessionUsersResponse,
     WarmRequest,
     WarmResponse,
     WarmStatusResponse,
@@ -2328,6 +2347,284 @@ async def get_prompt_queue_status_endpoint() -> PromptQueueStatusResponse:
         expired_prompts=status["expired_prompts"],
         max_queue_size=status["max_queue_size"],
         entry_expiry_seconds=status["entry_expiry_seconds"],
+    )
+
+
+# =============================================================================
+# Multiplayer Session Endpoints
+# =============================================================================
+# These endpoints support multiplayer session collaboration where multiple users
+# can interact with the same session. Sessions track ownership, authorized users,
+# and message history with user attribution.
+# =============================================================================
+
+
+@web_app.get("/session/{session_id}/metadata", response_model=SessionMetadataResponse)
+async def get_session_metadata_endpoint(session_id: str) -> SessionMetadataResponse:
+    """Get metadata for a session including ownership and access info.
+
+    Returns session metadata including owner, authorized users, and message count.
+    Returns a 404-like response if session metadata doesn't exist.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/metadata'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return SessionMetadataResponse(
+            ok=False,
+            session_id=session_id,
+            message="Multiplayer sessions are disabled",
+        )
+
+    metadata = get_session_metadata(session_id)
+    if not metadata:
+        return SessionMetadataResponse(
+            ok=False,
+            session_id=session_id,
+            message="Session metadata not found",
+        )
+
+    # Check for snapshot and execution state
+    snapshot = get_session_snapshot(session_id)
+    is_exec = is_session_executing(session_id)
+
+    return SessionMetadataResponse(
+        ok=True,
+        session_id=session_id,
+        owner_id=metadata.get("owner_id"),
+        created_at=metadata.get("created_at"),
+        updated_at=metadata.get("updated_at"),
+        name=metadata.get("name"),
+        description=metadata.get("description"),
+        authorized_users=metadata.get("authorized_users", []),
+        message_count=len(metadata.get("messages", [])),
+        is_shared=bool(metadata.get("authorized_users")),
+        is_executing=is_exec,
+        has_snapshot=snapshot is not None,
+    )
+
+
+@web_app.get("/session/{session_id}/users", response_model=SessionUsersResponse)
+async def get_session_users_endpoint(session_id: str) -> SessionUsersResponse:
+    """Get list of users with access to a session.
+
+    Returns the owner and all authorized users for a session.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/users'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return SessionUsersResponse(
+            ok=False,
+            session_id=session_id,
+            authorized_users=[],
+            total_users=0,
+            message="Multiplayer sessions are disabled",
+        )
+
+    users = get_session_users(session_id)
+    if not users:
+        return SessionUsersResponse(
+            ok=False,
+            session_id=session_id,
+            authorized_users=[],
+            total_users=0,
+            message="Session metadata not found",
+        )
+
+    return SessionUsersResponse(
+        ok=True,
+        session_id=session_id,
+        owner_id=users.get("owner_id"),
+        authorized_users=users.get("authorized_users", []),
+        total_users=users.get("total_users", 0),
+    )
+
+
+@web_app.post("/session/{session_id}/share", response_model=SessionShareResponse)
+async def share_session_endpoint(
+    session_id: str, body: SessionShareRequest
+) -> SessionShareResponse:
+    """Share a session with another user.
+
+    Adds a user to the authorized_users list, granting them access to query
+    and interact with the session.
+
+    Example:
+        ```bash
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/share' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"user_id": "user_456", "requested_by": "user_123"}'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return SessionShareResponse(
+            ok=False,
+            session_id=session_id,
+            shared_with=body.user_id,
+            authorized_users=[],
+            message="Multiplayer sessions are disabled",
+        )
+
+    # Check if session exists, auto-create if not
+    metadata = get_session_metadata(session_id)
+    if not metadata:
+        # Create session metadata with requester as owner
+        metadata = create_session_metadata(session_id, owner_id=body.requested_by)
+
+    # Authorize the user
+    result = authorize_session_user(session_id, body.user_id, authorized_by=body.requested_by)
+    if not result:
+        return SessionShareResponse(
+            ok=False,
+            session_id=session_id,
+            shared_with=body.user_id,
+            authorized_users=metadata.get("authorized_users", []),
+            message="Failed to authorize user (max users limit may be reached)",
+        )
+
+    return SessionShareResponse(
+        ok=True,
+        session_id=session_id,
+        shared_with=body.user_id,
+        authorized_users=result.get("authorized_users", []),
+        message=f"Session shared with {body.user_id}",
+    )
+
+
+@web_app.post("/session/{session_id}/unshare", response_model=SessionUnshareResponse)
+async def unshare_session_endpoint(
+    session_id: str, body: SessionUnshareRequest
+) -> SessionUnshareResponse:
+    """Revoke a user's access to a session.
+
+    Removes a user from the authorized_users list.
+
+    Example:
+        ```bash
+        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/unshare' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"user_id": "user_456", "requested_by": "user_123"}'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return SessionUnshareResponse(
+            ok=False,
+            session_id=session_id,
+            revoked_from=body.user_id,
+            authorized_users=[],
+            message="Multiplayer sessions are disabled",
+        )
+
+    result = revoke_session_user(session_id, body.user_id, revoked_by=body.requested_by)
+    if not result:
+        return SessionUnshareResponse(
+            ok=False,
+            session_id=session_id,
+            revoked_from=body.user_id,
+            authorized_users=[],
+            message="Session metadata not found",
+        )
+
+    return SessionUnshareResponse(
+        ok=True,
+        session_id=session_id,
+        revoked_from=body.user_id,
+        authorized_users=result.get("authorized_users", []),
+        message=f"Access revoked from {body.user_id}",
+    )
+
+
+@web_app.get("/session/{session_id}/history", response_model=SessionHistoryResponse)
+async def get_session_history_endpoint(
+    session_id: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> SessionHistoryResponse:
+    """Get message history for a session.
+
+    Returns the conversation history with user attribution.
+    Supports pagination with limit and offset parameters.
+
+    Example:
+        ```bash
+        # Get all history
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/history'
+
+        # Get last 10 messages
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/history?limit=10'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return SessionHistoryResponse(
+            ok=False,
+            session_id=session_id,
+            message_count=0,
+            messages=[],
+            message="Multiplayer sessions are disabled",
+        )
+
+    total_count = get_session_message_count(session_id)
+    messages = get_session_history(session_id, limit=limit, offset=offset)
+
+    # Convert to schema objects
+    message_entries = [
+        MessageHistoryEntry(
+            message_id=m["message_id"],
+            role=m["role"],
+            content=m["content"],
+            user_id=m.get("user_id"),
+            timestamp=m["timestamp"],
+            turn_number=m.get("turn_number"),
+            tokens_used=m.get("tokens_used"),
+        )
+        for m in messages
+    ]
+
+    # Check if there are more messages
+    has_more = (offset + len(messages)) < total_count if limit else False
+
+    return SessionHistoryResponse(
+        ok=True,
+        session_id=session_id,
+        message_count=total_count,
+        messages=message_entries,
+        has_more=has_more,
+    )
+
+
+@web_app.get("/session/multiplayer/status", response_model=MultiplayerStatusResponse)
+async def get_multiplayer_status_endpoint() -> MultiplayerStatusResponse:
+    """Get current status of multiplayer sessions across the system.
+
+    Returns statistics about sessions with metadata, shared sessions,
+    and message counts.
+
+    Example:
+        ```bash
+        curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
+        ```
+    """
+    if not _settings.enable_multiplayer_sessions:
+        return MultiplayerStatusResponse(
+            enabled=False,
+            total_sessions=0,
+            shared_sessions=0,
+            total_messages=0,
+            max_history_per_session=_settings.max_message_history_per_session,
+        )
+
+    status = get_multiplayer_status()
+    return MultiplayerStatusResponse(
+        enabled=True,
+        total_sessions=status["total_sessions"],
+        shared_sessions=status["shared_sessions"],
+        total_messages=status["total_messages"],
+        max_history_per_session=status["max_history_per_session"],
     )
 
 

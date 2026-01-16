@@ -8,14 +8,15 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 7: Follow-up Prompt Queue**:
+The following commits were created for **Priority 6: Multiplayer Session Support**:
 
 ```
-d3e87a3 feat: add follow-up prompt queue for sessions
+d26ebd8 feat: add multiplayer session support with user attribution
 ```
 
 **Previous session commits:**
 ```
+d3e87a3 feat: add follow-up prompt queue for sessions
 6a3d70c feat: add session stop/cancel for graceful mid-execution termination
 ```
 
@@ -809,6 +810,139 @@ modal serve -m agent_sandbox.app
 modal deploy -m agent_sandbox.deploy
 ```
 
+### Priority 6: Multiplayer Session Support ✅ COMPLETE
+
+**Problem**: Sessions are single-user; no collaboration support.
+
+**Solution**: Allow multiple users to interact with the same session with user attribution and message history tracking.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `session_metadata_store_name` setting (default: "agent-session-metadata")
+   - Added `enable_multiplayer_sessions` setting (default: True)
+   - Added `max_message_history_per_session` setting (default: 100)
+   - Added `message_content_max_length` setting (default: 1000)
+   - Added `max_authorized_users_per_session` setting (default: 20)
+
+2. `agent_sandbox/schemas/sandbox.py` - MODIFIED (at end of file)
+   - Added `MessageHistoryEntry` schema for messages with user attribution
+   - Added `SessionMetadata` schema for ownership and access control
+   - Added `SessionShareRequest` / `SessionShareResponse` schemas
+   - Added `SessionUnshareRequest` / `SessionUnshareResponse` schemas
+   - Added `SessionMetadataResponse` schema
+   - Added `SessionHistoryResponse` schema
+   - Added `SessionUsersResponse` schema
+   - Added `MultiplayerStatusResponse` schema
+
+3. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for all new multiplayer session schemas
+
+4. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `SESSION_METADATA` Modal Dict for storing session metadata
+   - Added `create_session_metadata()` function to create session with owner
+   - Added `get_session_metadata()` function to retrieve session info
+   - Added `update_session_metadata()` function to update session fields
+   - Added `authorize_session_user()` function to share session with users
+   - Added `revoke_session_user()` function to remove user access
+   - Added `is_user_authorized()` function to check access permissions
+   - Added `get_session_users()` function to list users with access
+   - Added `add_message_to_history()` function to record messages with attribution
+   - Added `get_session_history()` function to retrieve conversation history
+   - Added `get_session_message_count()` function for history size
+   - Added `clear_session_history()` function to clear messages
+   - Added `delete_session_metadata()` function for cleanup
+   - Added `get_multiplayer_status()` function for overall statistics
+
+5. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for multiplayer session functions and schemas
+   - Added `GET /session/{session_id}/metadata` endpoint to get session info
+   - Added `GET /session/{session_id}/users` endpoint to list authorized users
+   - Added `POST /session/{session_id}/share` endpoint to share session
+   - Added `POST /session/{session_id}/unshare` endpoint to revoke access
+   - Added `GET /session/{session_id}/history` endpoint to get message history
+   - Added `GET /session/multiplayer/status` endpoint for statistics
+
+6. `agent_sandbox/controllers/controller.py` - MODIFIED
+   - Added imports for `add_message_to_history`, `create_session_metadata`
+   - Modified `/query` endpoint to track message history with user attribution
+   - Modified `/query_stream` endpoint similarly
+
+**How it works:**
+
+1. When a new session is created, metadata is stored with the owner's user_id
+2. Sessions can be shared with other users via `POST /session/{id}/share`
+3. User access can be revoked via `POST /session/{id}/unshare`
+4. All query messages (user and assistant) are recorded with user attribution
+5. Message history can be retrieved via `GET /session/{id}/history`
+6. Session metadata includes ownership, authorized users, and message counts
+
+**Session Metadata Structure:**
+
+```python
+SESSION_METADATA[session_id] = {
+    "session_id": "sess_abc123",       # Session identifier
+    "owner_id": "user_123",            # User who created the session
+    "created_at": 1704067200,          # Unix timestamp
+    "updated_at": 1704067200,          # Last activity timestamp
+    "name": "My Session",              # Optional human-readable name
+    "description": None,               # Optional description
+    "authorized_users": ["user_456"],  # Users with access (excludes owner)
+    "messages": [...],                 # Message history with attribution
+}
+```
+
+**Message Entry Structure:**
+
+```python
+{
+    "message_id": "uuid-string",       # Unique message identifier
+    "role": "user" | "assistant",      # Who sent the message
+    "content": "What is 2+2?",         # Message content (truncated)
+    "user_id": "user_123",             # Who sent (for user role)
+    "timestamp": 1704067200,           # Unix timestamp
+    "turn_number": 1,                  # Conversation turn
+    "tokens_used": 50,                 # Tokens consumed (assistant only)
+}
+```
+
+**HTTP Endpoints:**
+
+- `GET /session/{session_id}/metadata` - Get session metadata
+- `GET /session/{session_id}/users` - List users with access
+- `POST /session/{session_id}/share` - Share session with a user
+- `POST /session/{session_id}/unshare` - Revoke user access
+- `GET /session/{session_id}/history` - Get message history
+- `GET /session/multiplayer/status` - Get overall statistics
+
+**Example Usage:**
+
+```bash
+# Get session metadata
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/metadata'
+# Response: {"ok": true, "session_id": "sess_abc123", "owner_id": "user_123", ...}
+
+# Share session with another user
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/share' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "user_456", "requested_by": "user_123"}'
+# Response: {"ok": true, "shared_with": "user_456", "authorized_users": ["user_456"], ...}
+
+# Get message history
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/history?limit=10'
+# Response: {"ok": true, "message_count": 5, "messages": [...], ...}
+
+# Query with user attribution (regular /query endpoint)
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What is 2+2?", "session_id": "sess_abc123", "user_id": "user_123"}'
+# Messages are automatically recorded with user attribution
+
+# Get multiplayer statistics
+curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
+# Response: {"enabled": true, "total_sessions": 10, "shared_sessions": 3, ...}
+```
+
 ## Current Todo List State
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
@@ -819,19 +953,19 @@ modal deploy -m agent_sandbox.deploy
 6. ✅ Pre-warm API (Priority 3) - COMPLETE
 7. ✅ Stop/Cancel Mid-Execution (Priority 8) - COMPLETE
 8. ✅ Follow-up Prompt Queue (Priority 7) - COMPLETE
-9. 🔄 Multiplayer Session Support (Priority 6) - NEXT
-10. ⏳ Ralph Loop Improvements (Priority 12)
+9. ✅ Multiplayer Session Support (Priority 6) - COMPLETE
+10. 🔄 Ralph Loop Improvements (Priority 12) - NEXT
 11. ⏳ CLI Job Workspace Improvements (Priority 13)
 12. ⏳ VS Code Integration (Priority 9)
 13. ⏳ Sub-Session Spawning Tool (Priority 4)
 
 ## Next Steps
 
-1. Continue with **Priority 6: Multiplayer Session Support**
-   - Add `user_id` field for attribution (already done in QueryBody)
-   - Store message history with author attribution
-   - Session becomes shared resource multiple clients can query
+1. Continue with **Priority 12: Ralph Loop Improvements**
+   - Progress streaming via SSE
+   - Pause/Resume endpoints
+   - Iteration snapshots for rollback
 
-2. After completing Priority 6, move to Ralph Loop Improvements (Priority 12)
+2. After completing Priority 12, move to CLI Job Workspace Improvements (Priority 13)
 
 3. Follow the phased implementation order in the plan file

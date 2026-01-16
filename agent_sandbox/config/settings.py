@@ -399,6 +399,44 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Multiplayer session settings (collaborative sessions)
+    session_metadata_store_name: str = Field(
+        default="agent-session-metadata",
+        description="Modal Dict name for storing session metadata and message history",
+    )
+    enable_multiplayer_sessions: bool = Field(
+        default=True,
+        description=(
+            "Enable multiplayer session support. "
+            "When enabled, sessions track ownership, authorized users, and message history "
+            "with user attribution, allowing multiple users to collaborate on the same session."
+        ),
+    )
+    max_message_history_per_session: int = Field(
+        default=100,
+        description=(
+            "Maximum number of messages to retain in session history. "
+            "Older messages are removed when limit is reached. "
+            "Default: 100 messages."
+        ),
+    )
+    message_content_max_length: int = Field(
+        default=1000,
+        description=(
+            "Maximum length of message content stored in history. "
+            "Longer messages are truncated. This limits storage cost for verbose responses. "
+            "Default: 1000 characters."
+        ),
+    )
+    max_authorized_users_per_session: int = Field(
+        default=20,
+        description=(
+            "Maximum number of users that can be authorized on a single session. "
+            "Does not include the session owner. "
+            "Default: 20 users."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

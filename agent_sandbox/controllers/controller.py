@@ -50,6 +50,8 @@ from agent_sandbox.controllers.serialization import (
 )
 from agent_sandbox.jobs import (
     acknowledge_session_cancellation,
+    add_message_to_history,
+    create_session_metadata,
     is_session_cancelled,
     job_workspace_root,
     mark_session_executing,
@@ -605,6 +607,32 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         summary = build_final_summary(result_message, final_text)
         final_session_id = summary.get("session_id")
         _persist_session_id(body.session_key, final_session_id)
+
+        # Track message history for multiplayer sessions
+        if _settings.enable_multiplayer_sessions and final_session_id:
+            # Create/update session metadata with owner if this is a new session
+            if not resolved_session_id and body.user_id:
+                create_session_metadata(final_session_id, owner_id=body.user_id)
+
+            # Record user message with attribution
+            add_message_to_history(
+                session_id=final_session_id,
+                role="user",
+                content=body.question,
+                user_id=body.user_id,
+                turn_number=summary.get("num_turns"),
+            )
+
+            # Record assistant response
+            if final_text:
+                add_message_to_history(
+                    session_id=final_session_id,
+                    role="assistant",
+                    content=final_text,
+                    turn_number=summary.get("num_turns"),
+                    tokens_used=summary.get("tokens_used"),
+                )
+
         _logger.info(
             "agent.query.complete",
             extra={
@@ -712,6 +740,32 @@ async def query_agent_stream(body: QueryBody, request: Request):
             summary = build_final_summary(result_message, final_text)
             final_session_id = summary.get("session_id")
             _persist_session_id(body.session_key, final_session_id)
+
+            # Track message history for multiplayer sessions
+            if _settings.enable_multiplayer_sessions and final_session_id:
+                # Create/update session metadata with owner if this is a new session
+                if not resolved_session_id and body.user_id:
+                    create_session_metadata(final_session_id, owner_id=body.user_id)
+
+                # Record user message with attribution
+                add_message_to_history(
+                    session_id=final_session_id,
+                    role="user",
+                    content=body.question,
+                    user_id=body.user_id,
+                    turn_number=summary.get("num_turns"),
+                )
+
+                # Record assistant response
+                if final_text:
+                    add_message_to_history(
+                        session_id=final_session_id,
+                        role="assistant",
+                        content=final_text,
+                        turn_number=summary.get("num_turns"),
+                        tokens_used=summary.get("tokens_used"),
+                    )
+
             _logger.info(
                 "agent.query_stream.complete",
                 extra={

@@ -3015,3 +3015,490 @@ def get_prompt_queue_status() -> dict[str, Any]:
         "max_queue_size": _settings.max_queued_prompts_per_session,
         "entry_expiry_seconds": _settings.prompt_queue_entry_expiry_seconds,
     }
+
+
+# =============================================================================
+# Multiplayer Session Metadata Storage and Management
+# =============================================================================
+#
+# This module provides session metadata tracking for multiplayer collaboration.
+# Sessions can track ownership, authorized users, and message history with
+# user attribution.
+#
+# Data Structure:
+#   SESSION_METADATA[session_id] = {
+#       "session_id": str,           # The session identifier
+#       "owner_id": str | None,      # User who created the session
+#       "created_at": int,           # Unix timestamp when created
+#       "updated_at": int,           # Unix timestamp of last activity
+#       "name": str | None,          # Human-readable session name
+#       "description": str | None,   # Session description
+#       "authorized_users": list,    # Users with access (excludes owner)
+#       "messages": list[dict],      # Message history with attribution
+#   }
+#
+# Message Entry Structure:
+#   {
+#       "message_id": str,           # Unique message identifier
+#       "role": "user" | "assistant", # Who sent the message
+#       "content": str,              # Message content (truncated)
+#       "user_id": str | None,       # Who sent (for user role)
+#       "timestamp": int,            # Unix timestamp
+#       "turn_number": int | None,   # Conversation turn
+#       "tokens_used": int | None,   # Tokens consumed (assistant only)
+#   }
+#
+# Usage Examples:
+#   ```python
+#   # Create session metadata when session starts
+#   create_session_metadata(session_id, owner_id="user_123")
+#
+#   # Share session with another user
+#   authorize_session_user(session_id, "user_456", authorized_by="user_123")
+#
+#   # Add message to history
+#   add_message_to_history(session_id, "user", "What is 2+2?", user_id="user_123")
+#
+#   # Get session info
+#   metadata = get_session_metadata(session_id)
+#   ```
+# =============================================================================
+
+# Modal Dict for storing session metadata
+try:
+    SESSION_METADATA = modal.Dict.from_name(
+        _settings.session_metadata_store_name, create_if_missing=True
+    )
+except Exception:
+    # Fallback for testing without Modal
+    SESSION_METADATA = {}  # type: ignore[assignment]
+
+
+def create_session_metadata(
+    session_id: str,
+    owner_id: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Create metadata for a new session.
+
+    Initializes session metadata with ownership and empty message history.
+    If metadata already exists, returns the existing entry unchanged.
+
+    Args:
+        session_id: The session identifier.
+        owner_id: User ID of the session creator.
+        name: Optional human-readable name for the session.
+        description: Optional description of the session.
+
+    Returns:
+        The session metadata entry.
+
+    Usage:
+        ```python
+        metadata = create_session_metadata(
+            session_id="sess_abc123",
+            owner_id="user_123",
+            name="Code Review Session",
+        )
+        ```
+    """
+    # Check if already exists
+    existing = SESSION_METADATA.get(session_id)
+    if existing:
+        return existing
+
+    now = int(time.time())
+    metadata = {
+        "session_id": session_id,
+        "owner_id": owner_id,
+        "created_at": now,
+        "updated_at": now,
+        "name": name,
+        "description": description,
+        "authorized_users": [],
+        "messages": [],
+    }
+    SESSION_METADATA[session_id] = metadata
+    return metadata
+
+
+def get_session_metadata(session_id: str) -> dict[str, Any] | None:
+    """Get metadata for a session.
+
+    Args:
+        session_id: The session identifier.
+
+    Returns:
+        Session metadata if found, None otherwise.
+
+    Usage:
+        ```python
+        metadata = get_session_metadata(session_id)
+        if metadata:
+            print(f"Owner: {metadata['owner_id']}")
+            print(f"Users: {metadata['authorized_users']}")
+        ```
+    """
+    return SESSION_METADATA.get(session_id)
+
+
+def update_session_metadata(
+    session_id: str,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any] | None:
+    """Update session metadata fields.
+
+    Args:
+        session_id: The session identifier.
+        name: New name for the session (None to leave unchanged).
+        description: New description (None to leave unchanged).
+
+    Returns:
+        Updated metadata if session exists, None otherwise.
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return None
+
+    if name is not None:
+        metadata["name"] = name
+    if description is not None:
+        metadata["description"] = description
+
+    metadata["updated_at"] = int(time.time())
+    SESSION_METADATA[session_id] = metadata
+    return metadata
+
+
+def authorize_session_user(
+    session_id: str,
+    user_id: str,
+    authorized_by: str | None = None,
+) -> dict[str, Any] | None:
+    """Authorize a user to access a session.
+
+    Adds user to the authorized_users list. The owner is implicitly authorized
+    and should not be added to this list.
+
+    Args:
+        session_id: The session identifier.
+        user_id: User ID to authorize.
+        authorized_by: Who is granting access (for audit).
+
+    Returns:
+        Updated metadata if session exists and user was added, None otherwise.
+
+    Usage:
+        ```python
+        result = authorize_session_user(
+            session_id, "user_456", authorized_by="user_123"
+        )
+        if result:
+            print(f"Authorized users: {result['authorized_users']}")
+        ```
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return None
+
+    # Check max authorized users limit
+    if len(metadata["authorized_users"]) >= _settings.max_authorized_users_per_session:
+        return None
+
+    # Don't add duplicates or the owner
+    if user_id not in metadata["authorized_users"] and user_id != metadata.get("owner_id"):
+        metadata["authorized_users"].append(user_id)
+        metadata["updated_at"] = int(time.time())
+        SESSION_METADATA[session_id] = metadata
+
+    return metadata
+
+
+def revoke_session_user(
+    session_id: str,
+    user_id: str,
+    revoked_by: str | None = None,
+) -> dict[str, Any] | None:
+    """Revoke a user's access to a session.
+
+    Removes user from the authorized_users list.
+
+    Args:
+        session_id: The session identifier.
+        user_id: User ID to revoke.
+        revoked_by: Who is revoking access (for audit).
+
+    Returns:
+        Updated metadata if session exists and user was removed, None otherwise.
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return None
+
+    if user_id in metadata["authorized_users"]:
+        metadata["authorized_users"].remove(user_id)
+        metadata["updated_at"] = int(time.time())
+        SESSION_METADATA[session_id] = metadata
+
+    return metadata
+
+
+def is_user_authorized(session_id: str, user_id: str | None) -> bool:
+    """Check if a user is authorized to access a session.
+
+    A user is authorized if they are the owner or in the authorized_users list.
+    If user_id is None, returns True (anonymous access allowed).
+    If session has no metadata, returns True (no access control).
+
+    Args:
+        session_id: The session identifier.
+        user_id: User ID to check (None for anonymous).
+
+    Returns:
+        True if user is authorized, False otherwise.
+
+    Usage:
+        ```python
+        if is_user_authorized(session_id, user_id):
+            # Allow access
+        else:
+            # Deny access
+        ```
+    """
+    # Anonymous access allowed by default
+    if user_id is None:
+        return True
+
+    metadata = SESSION_METADATA.get(session_id)
+
+    # No metadata = no access control enforced
+    if not metadata:
+        return True
+
+    # Owner is always authorized
+    if metadata.get("owner_id") == user_id:
+        return True
+
+    # Check authorized users list
+    return user_id in metadata.get("authorized_users", [])
+
+
+def get_session_users(session_id: str) -> dict[str, Any] | None:
+    """Get list of users with access to a session.
+
+    Args:
+        session_id: The session identifier.
+
+    Returns:
+        Dict with owner_id and authorized_users, or None if session not found.
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return None
+
+    return {
+        "owner_id": metadata.get("owner_id"),
+        "authorized_users": metadata.get("authorized_users", []),
+        "total_users": 1 + len(metadata.get("authorized_users", []))
+        if metadata.get("owner_id")
+        else len(metadata.get("authorized_users", [])),
+    }
+
+
+def add_message_to_history(
+    session_id: str,
+    role: str,
+    content: str,
+    user_id: str | None = None,
+    turn_number: int | None = None,
+    tokens_used: int | None = None,
+) -> dict[str, Any] | None:
+    """Add a message to session history with user attribution.
+
+    Messages are stored with the user who sent them (for user role).
+    Content is truncated to configured max length.
+
+    Args:
+        session_id: The session identifier.
+        role: Message role ("user" or "assistant").
+        content: Message content.
+        user_id: Who sent the message (for user role).
+        turn_number: Conversation turn number.
+        tokens_used: Tokens consumed (for assistant messages).
+
+    Returns:
+        The added message entry, or None if session not found.
+
+    Usage:
+        ```python
+        # Record user message
+        add_message_to_history(
+            session_id, "user", "What is 2+2?", user_id="user_123"
+        )
+
+        # Record assistant response
+        add_message_to_history(
+            session_id, "assistant", "2+2 equals 4.", tokens_used=50
+        )
+        ```
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        # Auto-create metadata if it doesn't exist
+        metadata = create_session_metadata(session_id, owner_id=user_id)
+
+    # Truncate content if needed
+    max_len = _settings.message_content_max_length
+    if len(content) > max_len:
+        content = content[:max_len] + "..."
+
+    now = int(time.time())
+    message = {
+        "message_id": str(uuid.uuid4()),
+        "role": role,
+        "content": content,
+        "user_id": user_id if role == "user" else None,
+        "timestamp": now,
+        "turn_number": turn_number,
+        "tokens_used": tokens_used if role == "assistant" else None,
+    }
+
+    # Add to messages list
+    metadata["messages"].append(message)
+
+    # Trim to max history size
+    max_history = _settings.max_message_history_per_session
+    if len(metadata["messages"]) > max_history:
+        metadata["messages"] = metadata["messages"][-max_history:]
+
+    metadata["updated_at"] = now
+    SESSION_METADATA[session_id] = metadata
+
+    return message
+
+
+def get_session_history(
+    session_id: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Get message history for a session.
+
+    Args:
+        session_id: The session identifier.
+        limit: Maximum number of messages to return (None for all).
+        offset: Number of messages to skip from start.
+
+    Returns:
+        List of message entries.
+
+    Usage:
+        ```python
+        # Get last 10 messages
+        history = get_session_history(session_id, limit=10)
+        for msg in history:
+            print(f"{msg['role']}: {msg['content'][:50]}...")
+        ```
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return []
+
+    messages = metadata.get("messages", [])
+
+    # Apply offset
+    if offset > 0:
+        messages = messages[offset:]
+
+    # Apply limit
+    if limit is not None:
+        messages = messages[:limit]
+
+    return messages
+
+
+def get_session_message_count(session_id: str) -> int:
+    """Get the number of messages in session history.
+
+    Args:
+        session_id: The session identifier.
+
+    Returns:
+        Number of messages in history.
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return 0
+    return len(metadata.get("messages", []))
+
+
+def clear_session_history(session_id: str) -> int:
+    """Clear all messages from session history.
+
+    Args:
+        session_id: The session identifier.
+
+    Returns:
+        Number of messages that were cleared.
+    """
+    metadata = SESSION_METADATA.get(session_id)
+    if not metadata:
+        return 0
+
+    count = len(metadata.get("messages", []))
+    metadata["messages"] = []
+    metadata["updated_at"] = int(time.time())
+    SESSION_METADATA[session_id] = metadata
+    return count
+
+
+def delete_session_metadata(session_id: str) -> bool:
+    """Delete all metadata for a session.
+
+    Args:
+        session_id: The session identifier.
+
+    Returns:
+        True if session was found and deleted, False otherwise.
+    """
+    try:
+        existing = SESSION_METADATA.get(session_id)
+        if existing:
+            del SESSION_METADATA[session_id]
+            return True
+    except KeyError:
+        pass
+    return False
+
+
+def get_multiplayer_status() -> dict[str, Any]:
+    """Get current status of multiplayer sessions across the system.
+
+    Returns:
+        Dict with statistics:
+        - total_sessions: Sessions with metadata
+        - shared_sessions: Sessions shared with at least one user
+        - total_messages: Total messages tracked
+        - max_history_per_session: Configured limit
+    """
+    total_sessions = 0
+    shared_sessions = 0
+    total_messages = 0
+
+    try:
+        for _, metadata in SESSION_METADATA.items():
+            total_sessions += 1
+            if metadata.get("authorized_users"):
+                shared_sessions += 1
+            total_messages += len(metadata.get("messages", []))
+    except Exception:
+        pass
+
+    return {
+        "total_sessions": total_sessions,
+        "shared_sessions": shared_sessions,
+        "total_messages": total_messages,
+        "max_history_per_session": _settings.max_message_history_per_session,
+    }
