@@ -11,7 +11,7 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 The following commits were created for **Priority 6: Multiplayer Session Support**:
 
 ```
-d26ebd8 feat: add multiplayer session support with user attribution
+76f964e feat: add multiplayer session support with user attribution
 ```
 
 **Previous session commits:**
