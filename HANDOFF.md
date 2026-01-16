@@ -8,26 +8,22 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 10: CLI Sandbox Snapshots**:
+The following commits were created for **Priority 2: Agent SDK Warm Pool**:
 
 ```
+(pending commit) feat: add Agent SDK warm sandbox pool for reduced cold starts
+```
+
+**Previous session commits:**
+```
+11be2ff docs: add commit history to handoff for next agent
 b2590ad docs: update handoff with CLI snapshot implementation
 f453804 feat: add CLI sandbox snapshot restoration and persistence
 f7f5713 feat: add CLI job snapshot storage functions
 390ed2b feat: add CLI job snapshot configuration settings
 ```
 
-**Previous session commits (Priority 1 & 5):**
-```
-0004188 docs: add handoff document for project improvements
-4e10478 feat: add stats endpoint and session snapshot persistence
-73d6fb5 feat: integrate statistics recording into query endpoints
-53ab32d feat: add statistics tracking and session snapshot storage
-c3548aa feat: add statistics and snapshot configuration settings
-9eadf0e feat: add statistics schemas and user tracking field
-```
-
-The branch is ahead of `origin/main` by 10 commits.
+The branch is ahead of `origin/main` by 10+ commits.
 
 ## Background Context
 
@@ -123,6 +119,90 @@ if snapshot:
     sandbox_image = modal.Image.from_id(snapshot["image_id"])
     sandbox = modal.Sandbox.create(image=sandbox_image, ...)
 ```
+
+### Priority 2: Agent SDK Warm Pool ✅ COMPLETE
+
+**Problem**: Cold starts add latency to first request when no sandbox exists.
+
+**Solution**: Maintain a pool of pre-warmed sandboxes ready for immediate use.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `warm_pool_store_name` setting (default: "agent-warm-pool")
+   - Added `enable_warm_pool` setting (default: True)
+   - Added `warm_pool_size` setting (default: 2)
+   - Added `warm_pool_refresh_interval` setting (default: 300 seconds)
+   - Added `warm_pool_sandbox_max_age` setting (default: 3600 seconds)
+   - Added `warm_pool_claim_timeout` setting (default: 5 seconds)
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `WARM_POOL` Modal Dict for storing pool metadata
+   - Added `generate_pool_sandbox_name()` function to create unique pool sandbox names
+   - Added `register_warm_sandbox()` function to add sandbox to pool
+   - Added `claim_warm_sandbox()` function to atomically claim a sandbox
+   - Added `release_warm_sandbox()` function to return sandbox to pool
+   - Added `remove_from_pool()` function to delete pool entries
+   - Added `get_warm_pool_entries()` function to list all entries
+   - Added `get_warm_pool_status()` function for monitoring
+   - Added `get_expired_pool_entries()` function to find old sandboxes
+   - Added `cleanup_stale_pool_entries()` function to remove dead entries
+
+3. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for warm pool functions
+   - Added `_create_warm_sandbox_sync()` helper to create pool sandboxes
+   - Added `replenish_warm_pool` Modal function to add sandboxes to pool
+   - Added `maintain_warm_pool` scheduled Modal function for pool maintenance
+   - Added `GET /pool/status` HTTP endpoint for monitoring
+   - Modified `get_or_start_background_sandbox()` to try claiming from pool
+   - Modified `get_or_start_background_sandbox_aio()` with same changes
+
+**How it works:**
+1. Pool sandboxes are pre-created with uvicorn running the agent controller
+2. Each pool sandbox is registered in `WARM_POOL` Modal Dict with status="warm"
+3. When a request needs a new sandbox (no existing one):
+   - First tries to claim from the warm pool
+   - If claimed, uses that sandbox's tunnel URL directly
+   - If pool empty, falls back to creating a new sandbox
+4. After claiming, triggers async replenishment via `replenish_warm_pool.spawn()`
+5. Scheduled `maintain_warm_pool` runs every N minutes to:
+   - Clean up stale entries for terminated sandboxes
+   - Expire old sandboxes (max age) to pick up image changes
+   - Replenish pool to target size
+
+**Pool Entry Structure:**
+```python
+WARM_POOL[sandbox_id] = {
+    "sandbox_id": "sb-xxx",           # Modal sandbox object_id
+    "sandbox_name": "pool-abc123",    # Unique name for this sandbox
+    "status": "warm" | "claimed",     # Current status
+    "created_at": 1704067200,         # Unix timestamp when added to pool
+    "claimed_at": None | 1704067300,  # Unix timestamp when claimed
+    "claimed_by": None | "session_id", # Session that claimed this sandbox
+}
+```
+
+**Key Modal API used:**
+```python
+# Create pool sandbox
+sb = modal.Sandbox.create(name=pool_name, ...)
+sb.set_tags({"pool": "agent_sdk", "status": "warm"})
+register_warm_sandbox(sb.object_id, pool_name)
+
+# Claim from pool
+claim = claim_warm_sandbox(session_id=session_id)
+if claim:
+    sb = modal.Sandbox.from_id(claim["sandbox_id"])
+    # Use sb.tunnels() to get service URL
+
+# List pool sandboxes
+for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
+    if sb.poll() is None:  # Still running
+        ...
+```
+
+**HTTP Endpoints:**
+- `GET /pool/status` - Returns pool statistics (warm/claimed counts, entries)
 
 ### Priority 10: CLI Sandbox Snapshots ✅ COMPLETE
 
@@ -258,6 +338,10 @@ Same pattern for CLI sandbox.
 - **Secrets**: API key management
 - **Snapshots**: `sandbox.snapshot_filesystem()` for state persistence
 - **Image.from_id()**: Restore sandbox from snapshot image
+- **Sandbox.list()**: Enumerate sandboxes by tags for pool management
+- **Sandbox.from_id()**: Retrieve sandbox by object_id for pool claims
+- **sandbox.set_tags()**: Tag sandboxes for tracking (pool, status)
+- **Cron Schedule**: `modal.Cron()` for periodic pool maintenance
 
 ## Commands
 
@@ -281,8 +365,8 @@ modal deploy -m agent_sandbox.deploy
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
 2. ✅ Agent SDK Sandbox Snapshots (Priority 1) - COMPLETE
 3. ✅ CLI Sandbox Snapshots (Priority 10) - COMPLETE
-4. 🔄 Agent SDK Warm Pool (Priority 2) - NEXT
-5. ⏳ CLI Warm Pool (Priority 11)
+4. ✅ Agent SDK Warm Pool (Priority 2) - COMPLETE
+5. 🔄 CLI Warm Pool (Priority 11) - NEXT
 6. ⏳ Pre-warm API (Priority 3)
 7. ⏳ Stop/Cancel Mid-Execution (Priority 8)
 8. ⏳ Follow-up Prompt Queue (Priority 7)
@@ -294,12 +378,13 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 2: Agent SDK Warm Pool**
-   - Add settings: `warm_pool_size`, `warm_pool_refresh_interval`
-   - Create background task to maintain pool of warm sandboxes
-   - Use `Sandbox.list()` with tags to track pool membership
-   - Grab from pool on request, replenish asynchronously
+1. Continue with **Priority 11: CLI Warm Pool**
+   - Same pattern as Agent SDK warm pool for CLI sandboxes
+   - Add `cli_warm_pool_size` setting
+   - Pre-warm CLI sandboxes with development environment ready
+   - Tag pool sandboxes with `{"pool": "cli", "status": "warm"}`
+   - Claim from pool on `/execute` request
 
-2. After completing Priority 2, move to Priority 11: CLI Warm Pool
+2. After completing Priority 11, move to Priority 3: Pre-warm API
 
 3. Follow the phased implementation order in the plan file

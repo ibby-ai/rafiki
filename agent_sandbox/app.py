@@ -51,15 +51,22 @@ from agent_sandbox.jobs import (
     JOB_QUEUE,
     bump_attempts,
     cancel_job,
+    claim_warm_sandbox,
+    cleanup_stale_pool_entries,
     enqueue_job,
+    generate_pool_sandbox_name,
     get_cli_job_snapshot,
+    get_expired_pool_entries,
     get_job_record,
     get_job_status,
     get_session_snapshot,
     get_stats,
+    get_warm_pool_status,
     is_job_due,
     job_workspace_root,
     normalize_job_id,
+    register_warm_sandbox,
+    remove_from_pool,
     resolve_job_artifact,
     should_skip_job,
     should_snapshot_cli_job,
@@ -1613,6 +1620,41 @@ async def stats_endpoint(
     return get_stats(period_hours=period_hours, include_time_series=include_time_series)
 
 
+@web_app.get("/pool/status")
+async def pool_status_endpoint():
+    """Get current status of the warm sandbox pool.
+
+    Returns pool statistics including:
+    - enabled: Whether warm pool is enabled
+    - target_size: Configured pool size
+    - warm: Number of available warm sandboxes
+    - claimed: Number of currently claimed sandboxes
+    - total: Total sandboxes in pool
+    - entries: List of pool entries with metadata
+
+    Example:
+        ```
+        curl 'https://<org>--test-sandbox-http-app-dev.modal.run/pool/status'
+        ```
+    """
+    if not _settings.enable_warm_pool:
+        return {
+            "ok": True,
+            "enabled": False,
+            "message": "Warm pool is disabled",
+        }
+
+    pool_status = get_warm_pool_status()
+    return {
+        "ok": True,
+        "enabled": True,
+        "target_size": _settings.warm_pool_size,
+        "refresh_interval_seconds": _settings.warm_pool_refresh_interval,
+        "sandbox_max_age_seconds": _settings.warm_pool_sandbox_max_age,
+        **pool_status,
+    }
+
+
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
@@ -1736,6 +1778,209 @@ def cleanup_sessions():
         logging.getLogger(__name__).exception("Unexpected error cleaning up Claude CLI sessions")
 
 
+# =============================================================================
+# WARM POOL MANAGEMENT
+# =============================================================================
+# Functions for maintaining a pool of pre-warmed Agent SDK sandboxes.
+# The pool reduces cold-start latency by keeping sandboxes ready for use.
+# Pool sandboxes run uvicorn with the same configuration as the main service.
+
+
+def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
+    """Create a single warm sandbox and add it to the pool.
+
+    Creates a new sandbox with uvicorn running, waits for it to become healthy,
+    registers it in the pool, and returns the sandbox details.
+
+    Returns:
+        Tuple of (sandbox, sandbox_id, sandbox_name) if successful, None if failed.
+    """
+    pool_name = generate_pool_sandbox_name()
+    svc_vol = _get_persist_volume()
+
+    try:
+        sb = modal.Sandbox.create(
+            "uvicorn",
+            "agent_sandbox.controllers.controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(SERVICE_PORT),
+            app=app,
+            image=agent_sdk_image,
+            secrets=agent_sdk_secrets,
+            workdir="/root/app",
+            name=pool_name,
+            encrypted_ports=_settings.service_ports,
+            volumes={"/data": svc_vol},
+            timeout=_settings.sandbox_timeout,
+            idle_timeout=_settings.sandbox_idle_timeout,
+            **_sandbox_resource_kwargs(),
+            verbose=False,
+        )
+    except Exception:
+        _logger.warning("Failed to create warm pool sandbox", exc_info=True)
+        return None
+
+    # Set pool tags for tracking
+    sb.set_tags(
+        {
+            "pool": "agent_sdk",
+            "status": "warm",
+            "app": "test-sandbox",
+            "port": str(SERVICE_PORT),
+        }
+    )
+
+    # Wait for tunnel URL
+    deadline = time.time() + 30
+    service_url = None
+    while time.time() < deadline:
+        tunnels = sb.tunnels()
+        if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+            service_url = tunnels[SERVICE_PORT].url
+            break
+        time.sleep(0.5)
+
+    if not service_url:
+        _logger.warning("Failed to get tunnel URL for warm pool sandbox")
+        try:
+            sb.terminate()
+        except Exception:
+            pass
+        return None
+
+    # Wait for health check
+    try:
+        _wait_for_service(service_url, timeout=30)
+    except TimeoutError:
+        _logger.warning("Warm pool sandbox health check failed")
+        try:
+            sb.terminate()
+        except Exception:
+            pass
+        return None
+
+    # Register in pool
+    sandbox_id = sb.object_id
+    register_warm_sandbox(sandbox_id, pool_name)
+    _logger.info(
+        "Created warm pool sandbox",
+        extra={"sandbox_id": sandbox_id, "sandbox_name": pool_name, "url": service_url},
+    )
+
+    return sb, sandbox_id, pool_name
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    timeout=600,
+    **_retry_kwargs(),
+)
+def replenish_warm_pool():
+    """Add sandboxes to the warm pool up to the configured size.
+
+    Called after a sandbox is claimed from the pool to replenish it.
+    Also called by the pool maintainer on a schedule.
+    """
+    if not _settings.enable_warm_pool:
+        return {"status": "disabled", "created": 0}
+
+    target_size = _settings.warm_pool_size
+    pool_status = get_warm_pool_status()
+    warm_count = pool_status["warm"]
+    needed = target_size - warm_count
+
+    _logger.info(
+        "Replenishing warm pool",
+        extra={"target": target_size, "current_warm": warm_count, "needed": needed},
+    )
+
+    created = 0
+    for _ in range(needed):
+        result = _create_warm_sandbox_sync()
+        if result:
+            created += 1
+        else:
+            # Don't keep trying if creation fails
+            break
+
+    return {"status": "ok", "created": created, "target": target_size, "warm_count": warm_count}
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    schedule=modal.Cron(f"*/{max(_settings.warm_pool_refresh_interval // 60, 1)} * * * *"),
+    timeout=600,
+    **_retry_kwargs(),
+)
+def maintain_warm_pool():
+    """Periodic maintenance of the warm sandbox pool.
+
+    Runs on a schedule to:
+    1. Clean up stale pool entries for sandboxes that no longer exist
+    2. Expire old sandboxes (beyond max age) to pick up image changes
+    3. Replenish the pool to maintain target size
+
+    The schedule is derived from warm_pool_refresh_interval setting.
+    """
+    if not _settings.enable_warm_pool:
+        return {"status": "disabled"}
+
+    _logger.info("Running warm pool maintenance")
+
+    # Step 1: Find live pool sandboxes via Modal API
+    live_sandbox_ids: set[str] = set()
+    try:
+        for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
+            # Verify sandbox is still running
+            if sb.poll() is None:
+                live_sandbox_ids.add(sb.object_id)
+            else:
+                # Sandbox has exited, remove from pool
+                remove_from_pool(sb.object_id)
+    except Exception:
+        _logger.warning("Failed to list pool sandboxes", exc_info=True)
+
+    # Step 2: Clean up stale entries (entries for sandboxes that no longer exist)
+    stale_removed = cleanup_stale_pool_entries(live_sandbox_ids)
+    if stale_removed > 0:
+        _logger.info("Removed stale pool entries", extra={"count": stale_removed})
+
+    # Step 3: Expire old sandboxes
+    expired_entries = get_expired_pool_entries(_settings.warm_pool_sandbox_max_age)
+    expired_count = 0
+    for entry in expired_entries:
+        sandbox_id = entry.get("sandbox_id")
+        if sandbox_id:
+            try:
+                sb = modal.Sandbox.from_id(sandbox_id)
+                sb.terminate()
+                _logger.info("Terminated expired pool sandbox", extra={"sandbox_id": sandbox_id})
+            except Exception:
+                pass
+            remove_from_pool(sandbox_id)
+            expired_count += 1
+    if expired_count > 0:
+        _logger.info("Expired old pool sandboxes", extra={"count": expired_count})
+
+    # Step 4: Replenish pool
+    replenish_result = replenish_warm_pool.local()
+
+    pool_status = get_warm_pool_status()
+    return {
+        "status": "ok",
+        "stale_removed": stale_removed,
+        "expired_terminated": expired_count,
+        "replenished": replenish_result.get("created", 0),
+        "pool_warm": pool_status["warm"],
+        "pool_claimed": pool_status["claimed"],
+        "pool_total": pool_status["total"],
+    }
+
+
 def get_or_start_background_sandbox(
     session_id: str | None = None,
 ) -> tuple[modal.Sandbox, str]:
@@ -1752,6 +1997,11 @@ def get_or_start_background_sandbox(
 
     Returns:
         A pair of `(sandbox, service_url)`.
+
+    Warm Pool:
+        When enabled, the function first tries to claim a pre-warmed sandbox
+        from the pool. Pool sandboxes have uvicorn already running and
+        health-checked, eliminating cold-start latency.
 
     Session Snapshot Restoration:
         When resuming a session after sandbox timeout, pass the session_id to
@@ -1796,6 +2046,8 @@ def get_or_start_background_sandbox(
     # -------------------------------------------------------------------------
     sandbox_image = agent_sdk_image
     restored_from_snapshot = False
+    use_warm_pool = _settings.enable_warm_pool
+
     if session_id and _settings.enable_session_snapshots:
         snapshot = get_session_snapshot(session_id)
         if snapshot and snapshot.get("image_id"):
@@ -1803,6 +2055,8 @@ def get_or_start_background_sandbox(
                 snapshot_image = modal.Image.from_id(snapshot["image_id"])
                 sandbox_image = snapshot_image
                 restored_from_snapshot = True
+                # Don't use warm pool when restoring from snapshot - need specific image
+                use_warm_pool = False
                 _logger.info(
                     "Restoring sandbox from session snapshot",
                     extra={
@@ -1817,6 +2071,69 @@ def get_or_start_background_sandbox(
                     exc_info=True,
                     extra={"session_id": session_id, "snapshot": snapshot},
                 )
+
+    # -------------------------------------------------------------------------
+    # STEP 3.5: Try to claim from warm pool (if enabled and no snapshot)
+    # -------------------------------------------------------------------------
+    # The warm pool contains pre-created sandboxes with uvicorn already running
+    # and health-checked. Claiming from pool avoids sandbox creation overhead.
+    # Pool is only used when not restoring from snapshot (need base image).
+    # -------------------------------------------------------------------------
+    if use_warm_pool:
+        try:
+            claimed = claim_warm_sandbox(session_id=session_id)
+            if claimed:
+                sandbox_id = claimed.get("sandbox_id")
+                sandbox_name = claimed.get("sandbox_name")
+                if sandbox_id:
+                    try:
+                        pool_sb = modal.Sandbox.from_id(sandbox_id)
+                        # Verify sandbox is still running
+                        if pool_sb.poll() is None:
+                            # Get tunnel URL
+                            tunnels = pool_sb.tunnels()
+                            if SERVICE_PORT in tunnels and getattr(
+                                tunnels[SERVICE_PORT], "url", None
+                            ):
+                                pool_url = tunnels[SERVICE_PORT].url
+                                # Verify health
+                                _wait_for_service(pool_url)
+                                SANDBOX = pool_sb
+                                SERVICE_URL = pool_url
+                                _logger.info(
+                                    "Claimed sandbox from warm pool",
+                                    extra={
+                                        "sandbox_id": sandbox_id,
+                                        "sandbox_name": sandbox_name,
+                                        "session_id": session_id,
+                                    },
+                                )
+                                # Update tags to reflect active use
+                                pool_sb.set_tags(
+                                    {
+                                        "pool": "agent_sdk",
+                                        "status": "claimed",
+                                        "role": "service",
+                                        "app": "test-sandbox",
+                                        "port": str(SERVICE_PORT),
+                                    }
+                                )
+                                # Trigger async pool replenishment
+                                try:
+                                    replenish_warm_pool.spawn()
+                                except Exception:
+                                    pass  # Non-critical: pool will be replenished by maintainer
+                                return SANDBOX, SERVICE_URL
+                    except Exception:
+                        _logger.warning(
+                            "Failed to use claimed pool sandbox, will create new",
+                            exc_info=True,
+                            extra={"sandbox_id": sandbox_id},
+                        )
+                        # Remove the bad entry from pool
+                        remove_from_pool(sandbox_id)
+        except Exception:
+            _logger.warning("Error checking warm pool, will create new sandbox", exc_info=True)
 
     # -------------------------------------------------------------------------
     # STEP 4: Create a NEW sandbox
@@ -1976,6 +2293,8 @@ async def get_or_start_background_sandbox_aio(
     # Determine image for new sandbox (snapshot restoration)
     sandbox_image = agent_sdk_image
     restored_from_snapshot = False
+    use_warm_pool = _settings.enable_warm_pool
+
     if session_id and _settings.enable_session_snapshots:
         snapshot = get_session_snapshot(session_id)
         if snapshot and snapshot.get("image_id"):
@@ -1983,6 +2302,8 @@ async def get_or_start_background_sandbox_aio(
                 snapshot_image = modal.Image.from_id(snapshot["image_id"])
                 sandbox_image = snapshot_image
                 restored_from_snapshot = True
+                # Don't use warm pool when restoring from snapshot - need specific image
+                use_warm_pool = False
                 _logger.info(
                     "Restoring sandbox from session snapshot (async)",
                     extra={
@@ -1997,6 +2318,64 @@ async def get_or_start_background_sandbox_aio(
                     exc_info=True,
                     extra={"session_id": session_id, "snapshot": snapshot},
                 )
+
+    # Try to claim from warm pool (if enabled and no snapshot)
+    if use_warm_pool:
+        try:
+            claimed = claim_warm_sandbox(session_id=session_id)
+            if claimed:
+                sandbox_id = claimed.get("sandbox_id")
+                sandbox_name = claimed.get("sandbox_name")
+                if sandbox_id:
+                    try:
+                        pool_sb = modal.Sandbox.from_id(sandbox_id)
+                        # Verify sandbox is still running
+                        if pool_sb.poll() is None:
+                            # Get tunnel URL
+                            tunnels = await pool_sb.tunnels.aio()
+                            if SERVICE_PORT in tunnels and getattr(
+                                tunnels[SERVICE_PORT], "url", None
+                            ):
+                                pool_url = tunnels[SERVICE_PORT].url
+                                # Verify health
+                                await _wait_for_service_aio(pool_url)
+                                SANDBOX = pool_sb
+                                SERVICE_URL = pool_url
+                                _logger.info(
+                                    "Claimed sandbox from warm pool (async)",
+                                    extra={
+                                        "sandbox_id": sandbox_id,
+                                        "sandbox_name": sandbox_name,
+                                        "session_id": session_id,
+                                    },
+                                )
+                                # Update tags to reflect active use
+                                await pool_sb.set_tags.aio(
+                                    {
+                                        "pool": "agent_sdk",
+                                        "status": "claimed",
+                                        "role": "service",
+                                        "app": "test-sandbox",
+                                        "port": str(SERVICE_PORT),
+                                    }
+                                )
+                                # Trigger async pool replenishment
+                                try:
+                                    replenish_warm_pool.spawn()
+                                except Exception:
+                                    pass  # Non-critical
+                                return SANDBOX, SERVICE_URL
+                    except Exception:
+                        _logger.warning(
+                            "Failed to use claimed pool sandbox (async), will create new",
+                            exc_info=True,
+                            extra={"sandbox_id": sandbox_id},
+                        )
+                        remove_from_pool(sandbox_id)
+        except Exception:
+            _logger.warning(
+                "Error checking warm pool (async), will create new sandbox", exc_info=True
+            )
 
     # Create with persistent volume
     svc_vol = _get_persist_volume()

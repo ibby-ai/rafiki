@@ -233,6 +233,51 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Warm pool settings for Agent SDK sandbox
+    warm_pool_store_name: str = Field(
+        default="agent-warm-pool",
+        description="Modal Dict name for storing warm pool metadata",
+    )
+    enable_warm_pool: bool = Field(
+        default=True,
+        description=(
+            "Enable warm sandbox pool for reduced cold-start latency. "
+            "When enabled, the system maintains a pool of pre-warmed sandboxes "
+            "ready for immediate use, eliminating sandbox creation overhead."
+        ),
+    )
+    warm_pool_size: int = Field(
+        default=2,
+        description=(
+            "Number of warm sandboxes to maintain in the pool. "
+            "Higher values reduce cold-start probability but increase cost. "
+            "Recommended: 1-3 for low traffic, 3-5 for moderate traffic."
+        ),
+    )
+    warm_pool_refresh_interval: int = Field(
+        default=300,
+        description=(
+            "Seconds between pool maintenance runs. "
+            "The pool maintainer checks sandbox health and replenishes as needed. "
+            "Lower values ensure pool readiness but increase API calls."
+        ),
+    )
+    warm_pool_sandbox_max_age: int = Field(
+        default=3600,
+        description=(
+            "Maximum age (seconds) for warm sandboxes before recycling. "
+            "Sandboxes older than this are terminated and replaced to ensure "
+            "freshness and pick up image changes. Default: 1 hour."
+        ),
+    )
+    warm_pool_claim_timeout: int = Field(
+        default=5,
+        description=(
+            "Seconds to wait when attempting to claim a warm sandbox. "
+            "If claiming takes longer, falls back to creating a new sandbox."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
