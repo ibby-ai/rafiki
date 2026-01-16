@@ -11,7 +11,7 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 The following commits were created for **Priority 11: CLI Warm Pool**:
 
 ```
-(pending commit) feat: add CLI warm pool for reduced cold-start latency
+1340824 feat: add CLI warm pool for reduced cold-start latency
 ```
 
 **Previous session commits:**
