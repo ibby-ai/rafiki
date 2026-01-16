@@ -5,6 +5,12 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server
 
 from agent_sandbox.tools.calculate_tool import calculate
+from agent_sandbox.tools.session_tools import (
+    check_session_status,
+    get_session_result,
+    list_child_sessions,
+    spawn_session,
+)
 
 
 class ToolRegistry:
@@ -22,7 +28,22 @@ class ToolRegistry:
             name="utilities", version="1.0.0", tools=[calculate]
         )
 
-        self._servers = {"utilities": multi_tool_server}
+        # Create session management server for child session spawning
+        session_server = create_sdk_mcp_server(
+            name="sessions",
+            version="1.0.0",
+            tools=[
+                spawn_session,
+                check_session_status,
+                get_session_result,
+                list_child_sessions,
+            ],
+        )
+
+        self._servers = {
+            "utilities": multi_tool_server,
+            "sessions": session_server,
+        }
 
         self._allowed_tools = [
             # Built-in tools that may be available in runtime
@@ -30,8 +51,13 @@ class ToolRegistry:
             "Write",
             "WebSearch(*)",
             "WebFetch(*)",
-            # Custom MCP tools
+            # Custom MCP tools - utilities
             "mcp__utilities__calculate",
+            # Custom MCP tools - session spawning
+            "mcp__sessions__spawn_session",
+            "mcp__sessions__check_session_status",
+            "mcp__sessions__get_session_result",
+            "mcp__sessions__list_child_sessions",
         ]
 
     def register_server(self, name: str, server: Any):

@@ -53,6 +53,14 @@ SESSION_SNAPSHOTS = modal.Dict.from_name(
     _settings.session_snapshot_store_name, create_if_missing=True
 )
 
+# Distributed dictionary for tracking parent-child session relationships.
+# Keys are parent_job_id values, values are lists of child session entries:
+#   [{"child_job_id": str, "task": str, "sandbox_type": str, "status": str, ...}, ...]
+# Used by session tools to look up children spawned by a parent agent.
+CHILD_SESSION_REGISTRY = modal.Dict.from_name(
+    _settings.child_session_registry_name, create_if_missing=True
+)
+
 
 def normalize_job_id(job_id: str | None) -> str | None:
     """Normalize and validate job IDs to prevent injection attacks.
@@ -4335,3 +4343,296 @@ def get_workspace_retention_status() -> dict[str, Any]:
         "oldest_workspace_age_days": oldest_age_days,
         "workspaces_pending_cleanup": pending_cleanup,
     }
+
+
+# =============================================================================
+# CHILD SESSION REGISTRY
+# =============================================================================
+# Functions for managing parent-child session relationships.
+# Enables agents to spawn and track child sessions for parallel work delegation.
+
+
+def register_child_session(
+    parent_id: str,
+    child_job_id: str,
+    task: str,
+    sandbox_type: str,
+    *,
+    context: str | None = None,
+    timeout_seconds: int | None = None,
+    allowed_tools: str | None = None,
+) -> bool:
+    """Register a child session under a parent for tracking.
+
+    Creates a record in the CHILD_SESSION_REGISTRY linking a child job to its
+    parent session. This enables the parent to look up and monitor its spawned
+    children.
+
+    Args:
+        parent_id: UUID of the parent job/session that spawned this child
+        child_job_id: UUID of the spawned child job
+        task: Task description given to the child
+        sandbox_type: Type of sandbox used ("agent_sdk" or "cli")
+        context: Optional additional context provided to child
+        timeout_seconds: Timeout configured for child session
+        allowed_tools: Comma-separated tools allowed (CLI sandbox only)
+
+    Returns:
+        True if registration was successful, False if max children exceeded.
+
+    Registry Structure:
+        CHILD_SESSION_REGISTRY[parent_id] = [
+            {
+                "child_job_id": "uuid-1",
+                "task": "Research quantum computing",
+                "sandbox_type": "agent_sdk",
+                "status": "queued",
+                "created_at": 1672531200,
+                "context": "...",
+                "timeout_seconds": 300,
+                "allowed_tools": "Read,Write",
+            },
+            ...
+        ]
+
+    Limits:
+        Returns False if the parent has already spawned max_children_per_session
+        children, preventing resource exhaustion.
+    """
+    if not _settings.enable_child_sessions:
+        return False
+
+    now = int(time.time())
+
+    # Get existing children for this parent
+    children = CHILD_SESSION_REGISTRY.get(parent_id) or []
+
+    # Check limit
+    if len(children) >= _settings.max_children_per_session:
+        return False
+
+    # Create child entry
+    child_entry = {
+        "child_job_id": child_job_id,
+        "task": task,
+        "sandbox_type": sandbox_type,
+        "status": "queued",
+        "created_at": now,
+        "context": context,
+        "timeout_seconds": timeout_seconds,
+        "allowed_tools": allowed_tools,
+    }
+
+    children.append(child_entry)
+    CHILD_SESSION_REGISTRY[parent_id] = children
+    return True
+
+
+def get_child_sessions(parent_id: str) -> list[dict[str, Any]]:
+    """Get all child sessions spawned by a parent.
+
+    Retrieves the list of child sessions registered under a parent ID,
+    with status information updated from the job records.
+
+    Args:
+        parent_id: UUID of the parent job/session
+
+    Returns:
+        List of child session entries with current status.
+        Returns empty list if no children found.
+
+    Status Updates:
+        The status field in each entry is synchronized with the actual
+        job status from JOB_RESULTS to reflect current state.
+    """
+    if not _settings.enable_child_sessions:
+        return []
+
+    children = CHILD_SESSION_REGISTRY.get(parent_id) or []
+
+    # Update status from actual job records
+    updated_children = []
+    for child in children:
+        child_id = child.get("child_job_id")
+        if child_id:
+            job_record = JOB_RESULTS.get(child_id)
+            if job_record:
+                child["status"] = job_record.get("status", child.get("status", "queued"))
+                child["completed_at"] = job_record.get("completed_at")
+                child["started_at"] = job_record.get("started_at")
+        updated_children.append(child)
+
+    return updated_children
+
+
+def update_child_session_status(
+    parent_id: str,
+    child_job_id: str,
+    status: str,
+    *,
+    completed_at: int | None = None,
+) -> bool:
+    """Update the status of a child session in the registry.
+
+    Called when a child job transitions to a new state to keep the
+    registry in sync with actual job status.
+
+    Args:
+        parent_id: UUID of the parent job/session
+        child_job_id: UUID of the child job to update
+        status: New status value ("running", "complete", "failed", etc.)
+        completed_at: Optional completion timestamp for terminal states
+
+    Returns:
+        True if child was found and updated, False otherwise.
+    """
+    if not _settings.enable_child_sessions:
+        return False
+
+    children = CHILD_SESSION_REGISTRY.get(parent_id) or []
+
+    for child in children:
+        if child.get("child_job_id") == child_job_id:
+            child["status"] = status
+            if completed_at is not None:
+                child["completed_at"] = completed_at
+            CHILD_SESSION_REGISTRY[parent_id] = children
+            return True
+
+    return False
+
+
+def get_child_count(parent_id: str) -> int:
+    """Get the number of children spawned by a parent.
+
+    Args:
+        parent_id: UUID of the parent job/session
+
+    Returns:
+        Count of children spawned by this parent.
+    """
+    if not _settings.enable_child_sessions:
+        return 0
+
+    children = CHILD_SESSION_REGISTRY.get(parent_id) or []
+    return len(children)
+
+
+def can_spawn_child(parent_id: str) -> bool:
+    """Check if a parent can spawn another child session.
+
+    Verifies that child sessions are enabled and that the parent has not
+    exceeded the maximum number of allowed children.
+
+    Args:
+        parent_id: UUID of the parent job/session
+
+    Returns:
+        True if parent can spawn another child, False otherwise.
+    """
+    if not _settings.enable_child_sessions:
+        return False
+
+    current_count = get_child_count(parent_id)
+    return current_count < _settings.max_children_per_session
+
+
+def get_child_session_result(parent_id: str, child_job_id: str) -> dict[str, Any] | None:
+    """Get the result of a completed child session.
+
+    Retrieves the full result from a child job, including the agent response,
+    artifacts, and summary information.
+
+    Args:
+        parent_id: UUID of the parent job/session (for validation)
+        child_job_id: UUID of the child job
+
+    Returns:
+        Dict with child session result if complete, None if not found.
+        Returns partial info with status if child is still running.
+
+    Result Structure:
+        {
+            "child_id": "uuid",
+            "status": "complete",
+            "result": "Agent response text...",
+            "summary": {"session_id": "...", "duration_ms": 1234, ...},
+            "artifacts": ["output.txt", "data.csv", ...],
+        }
+    """
+    if not _settings.enable_child_sessions:
+        return None
+
+    # Verify child belongs to parent
+    children = CHILD_SESSION_REGISTRY.get(parent_id) or []
+    child_entry = None
+    for child in children:
+        if child.get("child_job_id") == child_job_id:
+            child_entry = child
+            break
+
+    if not child_entry:
+        return None
+
+    # Get job record
+    job_record = JOB_RESULTS.get(child_job_id)
+    if not job_record:
+        return {
+            "child_id": child_job_id,
+            "status": "not_found",
+            "error": "Child job record not found",
+        }
+
+    status = job_record.get("status", "queued")
+
+    # Build result based on status
+    result: dict[str, Any] = {
+        "child_id": child_job_id,
+        "status": status,
+        "task": child_entry.get("task"),
+        "sandbox_type": child_entry.get("sandbox_type"),
+        "created_at": child_entry.get("created_at"),
+        "started_at": job_record.get("started_at"),
+        "completed_at": job_record.get("completed_at"),
+    }
+
+    if status in ("queued", "running"):
+        result["error"] = f"Child session is still {status}. Use check_session_status to monitor."
+        return result
+
+    if status == "failed":
+        result["error"] = job_record.get("error", "Child session failed without error message")
+        return result
+
+    if status == "canceled":
+        result["error"] = "Child session was canceled"
+        return result
+
+    # status is "complete" - extract result
+    job_result = job_record.get("result")
+    if job_result:
+        # Extract text from messages if available
+        messages = job_result.get("messages", [])
+        result_text_parts = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                msg_type = msg.get("type")
+                if msg_type == "text":
+                    result_text_parts.append(msg.get("content", ""))
+                elif msg_type == "tool_result":
+                    tool_content = msg.get("content", "")
+                    if isinstance(tool_content, str):
+                        result_text_parts.append(tool_content)
+
+        result["result"] = "\n".join(result_text_parts) if result_text_parts else str(job_result)
+        result["summary"] = job_result.get("summary")
+
+    # Get artifacts if available
+    artifacts = job_record.get("artifacts")
+    if artifacts and isinstance(artifacts, dict):
+        files = artifacts.get("files", [])
+        result["artifacts"] = [
+            f.get("path") for f in files if isinstance(f, dict) and f.get("path")
+        ]
+
+    return result

@@ -46,6 +46,14 @@ from agent_sandbox.schemas.sandbox import (
     WarmResponse,
     WarmStatusResponse,
 )
+from agent_sandbox.schemas.session_spawn import (
+    ChildSessionEntry,
+    ChildSessionListResponse,
+    ChildSessionResult,
+    ChildSessionStatus,
+    SpawnSessionRequest,
+    SpawnSessionResponse,
+)
 
 __all__ = [
     "QueryBody",
@@ -90,4 +98,11 @@ __all__ = [
     "WorkspaceCleanupResponse",
     "WorkspaceRetentionStatusResponse",
     "WorkspaceDeleteResponse",
+    # Child session spawning schemas
+    "SpawnSessionRequest",
+    "SpawnSessionResponse",
+    "ChildSessionStatus",
+    "ChildSessionResult",
+    "ChildSessionEntry",
+    "ChildSessionListResponse",
 ]

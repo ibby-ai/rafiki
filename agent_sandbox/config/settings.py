@@ -481,6 +481,36 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Child session spawning settings
+    child_session_registry_name: str = Field(
+        default="agent-child-session-registry",
+        description="Modal Dict name for storing parent-child session relationships",
+    )
+    max_children_per_session: int = Field(
+        default=10,
+        description=(
+            "Maximum number of child sessions that can be spawned from a single parent session. "
+            "Prevents resource exhaustion from runaway parallel spawning. "
+            "Default: 10 children."
+        ),
+    )
+    child_session_default_timeout: int = Field(
+        default=300,
+        description=(
+            "Default timeout in seconds for child sessions if not specified. "
+            "Child sessions will be terminated after this duration. "
+            "Default: 300 seconds (5 minutes)."
+        ),
+    )
+    enable_child_sessions: bool = Field(
+        default=True,
+        description=(
+            "Enable child session spawning. "
+            "When enabled, agents can spawn child sessions for parallel work delegation "
+            "using the spawn_session tool. Disable to prevent resource-intensive parallel work."
+        ),
+    )
+
     # Workspace Retention Settings
     workspace_retention_store_name: str = Field(
         default="cli-workspace-retention",
