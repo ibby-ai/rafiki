@@ -11,7 +11,7 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 The following commits were created for **Priority 7: Follow-up Prompt Queue**:
 
 ```
-(pending) feat: add follow-up prompt queue for sessions
+d3e87a3 feat: add follow-up prompt queue for sessions
 ```
 
 **Previous session commits:**
