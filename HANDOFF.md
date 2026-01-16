@@ -8,14 +8,19 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following implementation was completed for **Priority 12: Ralph Loop Improvements**:
+The following implementation was completed for **Priority 13: CLI Job Workspace Improvements**:
 
-- Progress streaming via SSE
-- Pause/Resume endpoints
-- Iteration snapshots for rollback
+- Workspace retention tracking with configurable retention days
+- Automatic artifact manifest recording after CLI job execution
+- Cleanup endpoints and scheduled maintenance task
+
+```
+09ce355 feat: add CLI job workspace improvements with artifact manifest and retention
+```
 
 **Previous session commits:**
 ```
+55ea2ed feat: add Ralph loop improvements with streaming, pause/resume, and snapshots
 76f964e feat: add multiplayer session support with user attribution
 d3e87a3 feat: add follow-up prompt queue for sessions
 6a3d70c feat: add session stop/cancel for graceful mid-execution termination
@@ -33,7 +38,7 @@ f7f5713 feat: add CLI job snapshot storage functions
 390ed2b feat: add CLI job snapshot configuration settings
 ```
 
-The branch is ahead of `origin/main` by 10+ commits.
+The branch is ahead of `origin/main` by 24 commits.
 
 ## Background Context
 
@@ -1144,6 +1149,121 @@ curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
 # data: {"event_type": "done", "job_id": "...", "status": "complete", "result": {...}}
 ```
 
+### Priority 13: CLI Job Workspace Improvements ✅ COMPLETE
+
+**Problem**: No automatic artifact tracking, workspaces accumulate indefinitely, need better job output management.
+
+**Solution**: Add workspace retention tracking, automatic artifact manifest recording, and cleanup with configurable retention policy.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `workspace_retention_store_name` setting (default: "cli-workspace-retention")
+   - Added `enable_workspace_retention` setting (default: True)
+   - Added `workspace_retention_days` setting (default: 7) for completed jobs
+   - Added `failed_job_retention_days` setting (default: 14) for failed jobs
+   - Added `max_workspace_size_mb` setting (default: None) for optional size limit
+   - Added `workspace_cleanup_interval_seconds` setting (default: 3600)
+
+2. `agent_sandbox/schemas/jobs.py` - MODIFIED (at end of file)
+   - Added `WorkspaceMetadata` schema for tracked workspace info
+   - Added `WorkspaceCleanupRequest` schema for cleanup operations
+   - Added `WorkspaceCleanupResponse` schema for cleanup results
+   - Added `WorkspaceRetentionStatusResponse` schema for status endpoint
+   - Added `WorkspaceDeleteResponse` schema for workspace deletion
+
+3. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for all new workspace schemas
+
+4. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `WORKSPACE_RETENTION` Modal Dict for tracking workspace metadata
+   - Added `build_artifact_manifest()` shared function for manifest building
+   - Added `register_job_workspace()` function to track workspaces
+   - Added `update_workspace_metadata()` function to update workspace info
+   - Added `get_workspace_metadata()` function to retrieve workspace info
+   - Added `list_workspaces_for_cleanup()` function to find expired workspaces
+   - Added `mark_workspace_deleted()` function to mark workspace as deleted
+   - Added `get_workspace_retention_status()` function for monitoring
+
+5. `agent_sandbox/controllers/cli_controller.py` - MODIFIED
+   - Added imports for workspace tracking and artifact manifest functions
+   - Modified `POST /execute` to register workspace and record artifact manifest
+   - Modified `POST /ralph/execute` to register workspace and record artifact manifest
+   - Modified `POST /ralph/execute_stream` to register workspace and record artifact manifest
+
+6. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for workspace functions and schemas
+   - Added `_delete_job_workspace()` helper function
+   - Added `_cleanup_expired_workspaces()` function for batch cleanup
+   - Added `DELETE /jobs/{job_id}/workspace` endpoint to delete specific workspace
+   - Added `GET /workspace/retention/status` endpoint for retention statistics
+   - Added `POST /workspace/cleanup` endpoint to trigger manual cleanup
+   - Added `maintain_workspace_retention()` scheduled Modal function for automatic cleanup
+
+**How it works:**
+
+1. **Workspace Registration**: When a CLI job creates a workspace directory, it's registered in `WORKSPACE_RETENTION` Modal Dict with creation time, size, and job status.
+
+2. **Artifact Manifest Recording**: After CLI job execution completes, an artifact manifest is automatically built and stored in the job record. The manifest includes file paths, sizes, MIME types, and timestamps.
+
+3. **Retention Policy**: Completed job workspaces are retained for `workspace_retention_days` (default: 7). Failed jobs are retained longer (`failed_job_retention_days`, default: 14) for debugging.
+
+4. **Automatic Cleanup**: The `maintain_workspace_retention()` scheduled task runs hourly to delete expired workspaces based on retention policy.
+
+5. **Manual Cleanup**: The `POST /workspace/cleanup` endpoint allows triggering cleanup manually, with dry-run support to preview what would be deleted.
+
+**Workspace Metadata Structure:**
+
+```python
+WORKSPACE_RETENTION[job_id] = {
+    "job_id": "550e8400-...",
+    "workspace_root": "/data-cli/jobs/550e8400-.../",
+    "created_at": 1704067200,
+    "size_bytes": 102400,
+    "file_count": 15,
+    "status": "active",  # "active" | "deleted"
+    "deleted_at": None,
+    "job_status": "complete",  # "running" | "complete" | "failed"
+    "updated_at": 1704067200,
+}
+```
+
+**HTTP Endpoints:**
+
+- `DELETE /jobs/{job_id}/workspace` - Delete specific job's workspace
+- `GET /workspace/retention/status` - Get retention statistics
+- `POST /workspace/cleanup` - Trigger manual cleanup (supports dry-run)
+
+**Example Usage:**
+
+```bash
+# Check retention status
+curl 'https://<org>--test-sandbox-http-app.modal.run/workspace/retention/status'
+# Response: {"enabled": true, "retention_days": 7, "failed_retention_days": 14,
+#            "total_workspaces": 50, "active_workspaces": 45, "total_size_bytes": 1048576, ...}
+
+# Trigger cleanup (dry run)
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/workspace/cleanup' \
+  -H 'Content-Type: application/json' \
+  -d '{"dry_run": true, "older_than_days": 7}'
+# Response: {"ok": true, "dry_run": true, "workspaces_checked": 10,
+#            "workspaces_deleted": 3, "bytes_freed": 524288, ...}
+
+# Delete specific workspace
+curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-.../workspace'
+# Response: {"ok": true, "job_id": "550e8400-...", "deleted": true, "bytes_freed": 10240}
+
+# Run CLI job - artifacts are now automatically recorded
+curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/claude_cli' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Create test.py with hello world", "job_id": "550e8400-..."}'
+
+# Check job - now includes artifacts field
+curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
+# Response includes: {"artifacts": {"root": "/data-cli/jobs/550e8400-.../",
+#                     "files": [{"path": "test.py", "size_bytes": 50, ...}]}}
+```
+
 ## Current Todo List State
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
@@ -1156,17 +1276,17 @@ curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
 8. ✅ Follow-up Prompt Queue (Priority 7) - COMPLETE
 9. ✅ Multiplayer Session Support (Priority 6) - COMPLETE
 10. ✅ Ralph Loop Improvements (Priority 12) - COMPLETE
-11. 🔄 CLI Job Workspace Improvements (Priority 13) - NEXT
-12. ⏳ VS Code Integration (Priority 9)
+11. ✅ CLI Job Workspace Improvements (Priority 13) - COMPLETE
+12. 🔄 VS Code Integration (Priority 9) - NEXT
 13. ⏳ Sub-Session Spawning Tool (Priority 4)
 
 ## Next Steps
 
-1. Continue with **Priority 13: CLI Job Workspace Improvements**
-   - Artifact manifest tracking
-   - Workspace cleanup with retention policy
-   - `GET /jobs/{job_id}/artifacts/{path}` endpoint
+1. Continue with **Priority 9: VS Code Integration**
+   - Add code-server to CLI image
+   - Expose on separate tunnel port
+   - Add endpoint for VS Code URL
 
-2. After completing Priority 13, move to VS Code Integration (Priority 9)
+2. After completing Priority 9, move to Sub-Session Spawning Tool (Priority 4)
 
 3. Follow the phased implementation order in the plan file
