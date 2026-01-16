@@ -52,6 +52,7 @@ from agent_sandbox.jobs import (
     bump_attempts,
     cancel_job,
     enqueue_job,
+    get_cli_job_snapshot,
     get_job_record,
     get_job_status,
     get_session_snapshot,
@@ -61,7 +62,9 @@ from agent_sandbox.jobs import (
     normalize_job_id,
     resolve_job_artifact,
     should_skip_job,
+    should_snapshot_cli_job,
     should_snapshot_session,
+    store_cli_job_snapshot,
     store_session_snapshot,
     update_job,
 )
@@ -2067,8 +2070,26 @@ async def get_or_start_background_sandbox_aio(
     return SANDBOX, SERVICE_URL
 
 
-def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
-    """Return a running Claude CLI sandbox and its encrypted service URL."""
+def get_or_start_cli_sandbox(
+    job_id: str | None = None,
+) -> tuple[modal.Sandbox, str]:
+    """Return a running Claude CLI sandbox and its encrypted service URL.
+
+    Args:
+        job_id: Optional job ID for snapshot restoration. When provided
+            and a snapshot exists for this job, creates the sandbox from
+            the snapshot image to restore filesystem state from a previous job.
+
+    Returns:
+        A pair of `(sandbox, service_url)`.
+
+    CLI Job Snapshot Restoration:
+        When resuming a job after sandbox timeout, pass the job_id to
+        check for stored snapshots. If a snapshot exists:
+        1. The snapshot image is used instead of the base claude_cli_image
+        2. This restores installed packages, downloaded files, and other
+           filesystem changes from the previous job execution
+    """
     global CLI_SANDBOX, CLI_SERVICE_URL
 
     if CLI_SANDBOX is not None and CLI_SERVICE_URL:
@@ -2085,6 +2106,38 @@ def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
     except Exception:
         pass
 
+    # -------------------------------------------------------------------------
+    # Determine image for new sandbox (snapshot restoration)
+    # -------------------------------------------------------------------------
+    # Check if we have a stored snapshot for this job. If so, use the
+    # snapshot image to restore filesystem state from the previous execution.
+    # This enables "leave and come back" workflows where CLI-installed tools
+    # and downloaded files are preserved across sandbox restarts.
+    # -------------------------------------------------------------------------
+    sandbox_image = claude_cli_image
+    restored_from_snapshot = False
+    if job_id and _settings.enable_cli_job_snapshots:
+        snapshot = get_cli_job_snapshot(job_id)
+        if snapshot and snapshot.get("image_id"):
+            try:
+                snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                sandbox_image = snapshot_image
+                restored_from_snapshot = True
+                _logger.info(
+                    "Restoring CLI sandbox from job snapshot",
+                    extra={
+                        "job_id": job_id,
+                        "snapshot_image_id": snapshot["image_id"],
+                        "snapshot_created_at": snapshot.get("created_at"),
+                    },
+                )
+            except Exception:
+                _logger.warning(
+                    "Failed to restore CLI sandbox from snapshot, using base image",
+                    exc_info=True,
+                    extra={"job_id": job_id, "snapshot": snapshot},
+                )
+
     cli_vol = _get_claude_cli_volume()
     try:
         CLI_SANDBOX = modal.Sandbox.create(
@@ -2095,7 +2148,7 @@ def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
             "--port",
             str(CLI_SERVICE_PORT),
             app=app,
-            image=claude_cli_image,
+            image=sandbox_image,  # Use snapshot image if available
             secrets=agent_sdk_secrets,
             workdir=str(CLAUDE_CLI_APP_ROOT),
             name=CLI_SANDBOX_NAME,
@@ -2133,7 +2186,7 @@ def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
 
     _wait_for_service(CLI_SERVICE_URL)
     try:
-        SESSIONS[CLI_SANDBOX_NAME] = {
+        session_metadata: dict = {
             "id": CLI_SANDBOX.object_id,
             "url": CLI_SERVICE_URL,
             "volume": CLI_PERSIST_VOL_NAME,
@@ -2145,6 +2198,11 @@ def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
             },
             "status": "running",
         }
+        # Track snapshot restoration for observability
+        if restored_from_snapshot and job_id:
+            session_metadata["restored_from_job"] = job_id
+            session_metadata["restored_from_snapshot"] = True
+        SESSIONS[CLI_SANDBOX_NAME] = session_metadata
     except modal_exc.Error as exc:
         logging.getLogger(__name__).warning(
             "Failed to persist Claude CLI session metadata: %s", exc
@@ -2157,8 +2215,17 @@ def get_or_start_cli_sandbox() -> tuple[modal.Sandbox, str]:
     return CLI_SANDBOX, CLI_SERVICE_URL
 
 
-async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
-    """Async version of get_or_start_cli_sandbox."""
+async def get_or_start_cli_sandbox_aio(
+    job_id: str | None = None,
+) -> tuple[modal.Sandbox, str]:
+    """Async version of get_or_start_cli_sandbox.
+
+    Args:
+        job_id: Optional job ID for snapshot restoration.
+
+    Returns:
+        A pair of `(sandbox, service_url)`.
+    """
     global CLI_SANDBOX, CLI_SERVICE_URL
 
     if CLI_SANDBOX and CLI_SERVICE_URL:
@@ -2181,6 +2248,31 @@ async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
     except Exception:
         pass
 
+    # Determine image for new sandbox (snapshot restoration)
+    sandbox_image = claude_cli_image
+    restored_from_snapshot = False
+    if job_id and _settings.enable_cli_job_snapshots:
+        snapshot = get_cli_job_snapshot(job_id)
+        if snapshot and snapshot.get("image_id"):
+            try:
+                snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                sandbox_image = snapshot_image
+                restored_from_snapshot = True
+                _logger.info(
+                    "Restoring CLI sandbox from job snapshot (async)",
+                    extra={
+                        "job_id": job_id,
+                        "snapshot_image_id": snapshot["image_id"],
+                        "snapshot_created_at": snapshot.get("created_at"),
+                    },
+                )
+            except Exception:
+                _logger.warning(
+                    "Failed to restore CLI sandbox from snapshot, using base image",
+                    exc_info=True,
+                    extra={"job_id": job_id, "snapshot": snapshot},
+                )
+
     cli_vol = _get_claude_cli_volume()
     try:
         CLI_SANDBOX = await modal.Sandbox.create.aio(
@@ -2191,7 +2283,7 @@ async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
             "--port",
             str(CLI_SERVICE_PORT),
             app=app,
-            image=claude_cli_image,
+            image=sandbox_image,  # Use snapshot image if available
             secrets=agent_sdk_secrets,
             workdir=str(CLAUDE_CLI_APP_ROOT),
             name=CLI_SANDBOX_NAME,
@@ -2229,7 +2321,7 @@ async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
 
     await _wait_for_service_aio(CLI_SERVICE_URL)
     try:
-        SESSIONS[CLI_SANDBOX_NAME] = {
+        session_metadata: dict = {
             "id": CLI_SANDBOX.object_id,
             "url": CLI_SERVICE_URL,
             "volume": CLI_PERSIST_VOL_NAME,
@@ -2241,6 +2333,11 @@ async def get_or_start_cli_sandbox_aio() -> tuple[modal.Sandbox, str]:
             },
             "status": "running",
         }
+        # Track snapshot restoration for observability
+        if restored_from_snapshot and job_id:
+            session_metadata["restored_from_job"] = job_id
+            session_metadata["restored_from_snapshot"] = True
+        SESSIONS[CLI_SANDBOX_NAME] = session_metadata
     except Exception:
         pass
 
@@ -2395,7 +2492,8 @@ def run_claude_cli_remote(
         },
     )
 
-    sb, url = get_or_start_cli_sandbox()
+    # Pass job_id for potential snapshot restoration
+    sb, url = get_or_start_cli_sandbox(job_id=normalized_job_id)
     headers: dict[str, str] = {}
     settings = Settings()
     if settings.enforce_connect_token:
@@ -2425,6 +2523,21 @@ def run_claude_cli_remote(
     if payload and payload.get("ok") is False:
         message = payload.get("error") or payload.get("stderr") or "Claude CLI sandbox run failed"
         raise RuntimeError(message)
+
+    # Trigger CLI job snapshot after successful execution (fire-and-forget)
+    if (
+        normalized_job_id
+        and settings.enable_cli_job_snapshots
+        and should_snapshot_cli_job(normalized_job_id, settings.cli_snapshot_min_interval_seconds)
+    ):
+        try:
+            snapshot_cli_job_state.spawn(normalized_job_id)
+        except Exception:
+            _logger.debug(
+                "Failed to spawn CLI job snapshot",
+                exc_info=True,
+                extra={"job_id": normalized_job_id},
+            )
 
     if return_stdout:
         cli_stdout = (payload.get("stdout") or "").strip()
@@ -2485,7 +2598,8 @@ def run_ralph_remote(
     )
 
     estimated_runtime = max_iterations * timeout_per_iteration
-    sb, url = get_or_start_cli_sandbox()
+    # Pass job_id for potential snapshot restoration
+    sb, url = get_or_start_cli_sandbox(job_id=normalized_job_id)
     headers: dict[str, str] = {}
     settings = Settings()
     if settings.enforce_connect_token:
@@ -2511,6 +2625,19 @@ def run_ralph_remote(
         raise RuntimeError(message) from exc
     except Exception as exc:
         raise RuntimeError(f"Ralph sandbox request failed: {exc}") from exc
+
+    # Trigger CLI job snapshot after Ralph execution (fire-and-forget)
+    if settings.enable_cli_job_snapshots and should_snapshot_cli_job(
+        normalized_job_id, settings.cli_snapshot_min_interval_seconds
+    ):
+        try:
+            snapshot_cli_job_state.spawn(normalized_job_id)
+        except Exception:
+            _logger.debug(
+                "Failed to spawn CLI job snapshot for Ralph",
+                exc_info=True,
+                extra={"job_id": normalized_job_id},
+            )
 
     return payload
 
@@ -3059,6 +3186,86 @@ def snapshot_session_state(session_id: str) -> dict:
         return {"ok": False, "error": str(e), "type": e.__class__.__name__}
     except Exception:
         _logger.exception("Unexpected error snapshotting session %s", session_id)
+        return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
+
+
+@app.function(image=claude_cli_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
+def snapshot_cli_job_state(job_id: str) -> dict:
+    """Capture CLI sandbox filesystem state for a specific job.
+
+    Creates a snapshot tied to a job_id, enabling job state restoration when
+    resuming a job after the CLI sandbox has timed out. This enables
+    "leave and come back" workflows where the CLI's installed tools, downloaded
+    files, and other filesystem state are preserved.
+
+    Unlike snapshot_service() which creates a global snapshot, this function
+    stores the snapshot reference keyed by job_id in CLI_JOB_SNAPSHOTS,
+    allowing per-job restoration.
+
+    Args:
+        job_id: The CLI job ID (UUID) to associate with this snapshot.
+
+    Returns:
+        Dict with snapshot info:
+        - ok: True if snapshot succeeded
+        - job_id: The job ID this snapshot is associated with
+        - image_id: Modal Image object_id for restoration
+        - sandbox_name: Name of the sandbox that was snapshotted
+        - created_at: Unix timestamp
+
+    Usage:
+        Called after CLI job completes when job snapshots are enabled:
+        ```python
+        if should_snapshot_cli_job(job_id, min_interval_seconds=60):
+            result = snapshot_cli_job_state.spawn(job_id)
+        ```
+
+    Restoration:
+        When resuming a job after sandbox timeout, use get_cli_job_snapshot()
+        to retrieve the image_id and create a new sandbox from it.
+
+    See: https://modal.com/docs/guide/sandbox#filesystem-snapshots
+    """
+    if not job_id:
+        return {"ok": False, "error": "job_id is required"}
+
+    # Check if we should skip snapshotting (throttling)
+    if not should_snapshot_cli_job(job_id, _settings.cli_snapshot_min_interval_seconds):
+        existing = get_cli_job_snapshot(job_id)
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "Recent snapshot exists",
+            "job_id": job_id,
+            "existing_snapshot": existing,
+        }
+
+    try:
+        sb, _ = get_or_start_cli_sandbox()
+        img = sb.snapshot_filesystem()
+        snapshot_info = store_cli_job_snapshot(
+            job_id=job_id,
+            image_id=img.object_id,
+            sandbox_name=CLI_SANDBOX_NAME,
+        )
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "image_id": img.object_id,
+            "sandbox_name": CLI_SANDBOX_NAME,
+            "created_at": snapshot_info["created_at"],
+        }
+    except modal_exc.SandboxTerminatedError:
+        return {
+            "ok": False,
+            "error": "CLI sandbox terminated, cannot snapshot",
+            "type": "SandboxTerminatedError",
+        }
+    except modal_exc.Error as e:
+        _logger.warning("Failed to snapshot CLI job %s: %s", job_id, e)
+        return {"ok": False, "error": str(e), "type": e.__class__.__name__}
+    except Exception:
+        _logger.exception("Unexpected error snapshotting CLI job %s", job_id)
         return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 
