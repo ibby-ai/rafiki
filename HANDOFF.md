@@ -8,12 +8,18 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following implementation was completed for **Priority 13: CLI Job Workspace Improvements**:
+The following implementation was completed for **Priority 4: Sub-Session Spawning Tools**:
 
-- Workspace retention tracking with configurable retention days
-- Automatic artifact manifest recording after CLI job execution
-- Cleanup endpoints and scheduled maintenance task
+- MCP tools for spawning and managing child sessions
+- Parent-child relationship tracking via Modal Dict registry
+- Support for both agent_sdk and cli sandbox types
+- Resource limits and feature toggles
 
+```
+6852336 feat: add sub-session spawning tools for parallel work delegation
+```
+
+**Previous session commits:**
 ```
 09ce355 feat: add CLI job workspace improvements with artifact manifest and retention
 ```
@@ -38,7 +44,7 @@ f7f5713 feat: add CLI job snapshot storage functions
 390ed2b feat: add CLI job snapshot configuration settings
 ```
 
-The branch is ahead of `origin/main` by 24 commits.
+The branch is ahead of `origin/main` by 27 commits.
 
 ## Background Context
 
@@ -1264,6 +1270,121 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
 #                     "files": [{"path": "test.py", "size_bytes": 50, ...}]}}
 ```
 
+### Priority 4: Sub-Session Spawning Tools ✅ COMPLETE
+
+**Problem**: Agents can't delegate work to parallel sub-agents for complex multi-part tasks.
+
+**Solution**: Create MCP tools that allow parent agents to spawn, monitor, and retrieve results from child sessions.
+
+**Files created:**
+
+1. `agent_sandbox/schemas/session_spawn.py` - NEW FILE
+   - `SpawnSessionRequest` / `SpawnSessionResponse` schemas
+   - `ChildSessionStatus` schema for status checks
+   - `ChildSessionResult` schema for result retrieval
+   - `ChildSessionEntry` schema for list entries
+   - `ChildSessionListResponse` schema for listing children
+
+2. `agent_sandbox/tools/session_tools.py` - NEW FILE
+   - `spawn_session` tool to create child sessions
+   - `check_session_status` tool to monitor child progress
+   - `get_session_result` tool to retrieve completed results
+   - `list_child_sessions` tool to list all spawned children
+   - `set_parent_context()` / `get_parent_context()` for parent tracking
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `child_session_registry_name` setting (default: "agent-child-session-registry")
+   - Added `max_children_per_session` setting (default: 10)
+   - Added `child_session_default_timeout` setting (default: 300 seconds)
+   - Added `enable_child_sessions` setting (default: True)
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `CHILD_SESSION_REGISTRY` Modal Dict for parent-child tracking
+   - Added `register_child_session()` function to register children
+   - Added `get_child_sessions()` function to list children for a parent
+   - Added `update_child_session_status()` function to update status
+   - Added `get_child_count()` function to count children
+   - Added `can_spawn_child()` function to check spawn limits
+   - Added `get_child_session_result()` function to retrieve results
+
+3. `agent_sandbox/tools/registry.py` - MODIFIED
+   - Added imports for session tools
+   - Created "sessions" MCP server with spawn/check/get/list tools
+   - Added tools to allowed tools list
+
+4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+   - Added exports for all new session spawn schemas
+
+**How it works:**
+
+1. Parent agent calls `spawn_session` with task description and sandbox type
+2. System creates a child job via `enqueue_job()` with parent metadata
+3. Child job is registered in `CHILD_SESSION_REGISTRY` Modal Dict
+4. Parent can poll status via `check_session_status` tool
+5. When complete, parent retrieves result via `get_session_result` tool
+6. Parent can list all children via `list_child_sessions` tool
+
+**Child Job Metadata Structure:**
+
+```python
+JOB_RESULTS[child_job_id] = {
+    "job_id": "child-uuid",
+    "question": "Research quantum computing",
+    "metadata": {
+        "is_child_session": True,
+        "parent_job_id": "parent-uuid",
+        "spawn_context": {
+            "task": "Research quantum computing",
+            "context": "...",
+            "sandbox_type": "agent_sdk",
+            "timeout_seconds": 300,
+            "allowed_tools": "Read,Write",
+        },
+        "child_sequence": 1,
+    },
+    ...
+}
+```
+
+**Registry Structure:**
+
+```python
+CHILD_SESSION_REGISTRY["parent-uuid"] = [
+    {
+        "child_job_id": "child-1",
+        "task": "Research quantum computing",
+        "sandbox_type": "agent_sdk",
+        "status": "queued",
+        "created_at": 1704067200,
+        "context": "...",
+        "timeout_seconds": 300,
+        "allowed_tools": None,
+    },
+    ...
+]
+```
+
+**MCP Tools:**
+
+| Tool | Input | Returns |
+|------|-------|---------|
+| `spawn_session` | task, sandbox_type?, context? | child_id, status="queued" |
+| `check_session_status` | child_id | status, task, timing info |
+| `get_session_result` | child_id | result text, artifacts, or "still running" |
+| `list_child_sessions` | (none) | list of children with statuses |
+
+**Resource Limits:**
+
+- Max 10 children per parent session (configurable via `max_children_per_session`)
+- Default timeout of 300 seconds per child (configurable via `child_session_default_timeout`)
+- Feature can be disabled via `enable_child_sessions=False`
+
+**Integration Note:**
+
+The controller must call `set_parent_context(job_id)` before agent execution to enable the session tools. Without parent context, the tools return an error message.
+
 ## Current Todo List State
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
@@ -1278,14 +1399,15 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
 10. ✅ Ralph Loop Improvements (Priority 12) - COMPLETE
 11. ✅ CLI Job Workspace Improvements (Priority 13) - COMPLETE
 12. ⏭️ VS Code Integration (Priority 9) - SKIP FOR NOW
-13. 🔄 Sub-Session Spawning Tool (Priority 4) - NEXT
+13. ✅ Sub-Session Spawning Tools (Priority 4) - COMPLETE
 
 ## Next Steps
 
-1. Continue with **Priority 4: Sub-Session Spawning Tool**
-   - Create MCP tool for spawning child sessions
-   - Create tool for checking session status
+1. **All 13 priorities from the Ramp blog analysis have been implemented** (with Priority 9 VS Code Integration deferred)
 
 2. Priority 9 (VS Code Integration) has been deferred - adds complexity and resource overhead that may not be needed initially
 
-3. Follow the phased implementation order in the plan file
+3. Possible future enhancements:
+   - Integration testing for session spawning tools
+   - Controller integration to set parent context for session tools
+   - CLI sandbox type support for spawned children
