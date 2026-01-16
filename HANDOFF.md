@@ -8,14 +8,15 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 ## Recent Commits (This Session)
 
-The following commits were created for **Priority 2: Agent SDK Warm Pool**:
+The following commits were created for **Priority 11: CLI Warm Pool**:
 
 ```
-22eb84b feat: add Agent SDK warm pool for reduced cold-start latency
+(pending commit) feat: add CLI warm pool for reduced cold-start latency
 ```
 
 **Previous session commits:**
 ```
+22eb84b feat: add Agent SDK warm pool for reduced cold-start latency
 11be2ff docs: add commit history to handoff for next agent
 b2590ad docs: update handoff with CLI snapshot implementation
 f453804 feat: add CLI sandbox snapshot restoration and persistence
@@ -202,7 +203,96 @@ for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
 ```
 
 **HTTP Endpoints:**
+
 - `GET /pool/status` - Returns pool statistics (warm/claimed counts, entries)
+
+### Priority 11: CLI Warm Pool ✅ COMPLETE
+
+**Problem**: CLI sandbox cold starts add latency to code execution tasks.
+
+**Solution**: Maintain a separate warm pool for CLI sandboxes.
+
+**Files modified:**
+
+1. `agent_sandbox/config/settings.py` - MODIFIED
+   - Added `cli_warm_pool_store_name` setting (default: "cli-warm-pool")
+   - Added `enable_cli_warm_pool` setting (default: True)
+   - Added `cli_warm_pool_size` setting (default: 2)
+   - Added `cli_warm_pool_refresh_interval` setting (default: 300 seconds)
+   - Added `cli_warm_pool_sandbox_max_age` setting (default: 3600 seconds)
+   - Added `cli_warm_pool_claim_timeout` setting (default: 5 seconds)
+
+2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+   - Added `CLI_WARM_POOL` Modal Dict for storing CLI pool metadata
+   - Added `generate_cli_pool_sandbox_name()` function to create unique pool sandbox names
+   - Added `register_cli_warm_sandbox()` function to add CLI sandbox to pool
+   - Added `claim_cli_warm_sandbox()` function to atomically claim a CLI sandbox
+   - Added `release_cli_warm_sandbox()` function to return sandbox to pool
+   - Added `remove_from_cli_pool()` function to delete pool entries
+   - Added `get_cli_warm_pool_entries()` function to list all entries
+   - Added `get_cli_warm_pool_status()` function for monitoring
+   - Added `get_expired_cli_pool_entries()` function to find old sandboxes
+   - Added `cleanup_stale_cli_pool_entries()` function to remove dead entries
+
+3. `agent_sandbox/app.py` - MODIFIED
+   - Added imports for CLI warm pool functions
+   - Added `_create_cli_warm_sandbox_sync()` helper to create CLI pool sandboxes
+   - Added `replenish_cli_warm_pool` Modal function to add CLI sandboxes to pool
+   - Added `maintain_cli_warm_pool` scheduled Modal function for CLI pool maintenance
+   - Added `GET /cli/pool/status` HTTP endpoint for monitoring
+   - Modified `get_or_start_cli_sandbox()` to try claiming from CLI pool
+   - Modified `get_or_start_cli_sandbox_aio()` with same changes
+
+**How it works:**
+
+1. CLI pool sandboxes are pre-created with uvicorn running the CLI controller
+2. Each pool sandbox is registered in `CLI_WARM_POOL` Modal Dict with status="warm"
+3. When a request needs a new CLI sandbox (no existing one):
+   - First tries to claim from the CLI warm pool
+   - If claimed, uses that sandbox's tunnel URL directly
+   - If pool empty, falls back to creating a new sandbox
+4. After claiming, triggers async replenishment via `replenish_cli_warm_pool.spawn()`
+5. Scheduled `maintain_cli_warm_pool` runs every N minutes to:
+   - Clean up stale entries for terminated sandboxes
+   - Expire old sandboxes (max age) to pick up image changes
+   - Replenish pool to target size
+
+**Pool Entry Structure:**
+
+```python
+CLI_WARM_POOL[sandbox_id] = {
+    "sandbox_id": "sb-xxx",           # Modal sandbox object_id
+    "sandbox_name": "cli-pool-abc123", # Unique name for this sandbox
+    "status": "warm" | "claimed",     # Current status
+    "created_at": 1704067200,         # Unix timestamp when added to pool
+    "claimed_at": None | 1704067300,  # Unix timestamp when claimed
+    "claimed_by": None | "job_id",    # Job that claimed this sandbox
+}
+```
+
+**Key Modal API used:**
+
+```python
+# Create CLI pool sandbox
+sb = modal.Sandbox.create(name=pool_name, ...)
+sb.set_tags({"pool": "cli", "status": "warm"})
+register_cli_warm_sandbox(sb.object_id, pool_name)
+
+# Claim from CLI pool
+claim = claim_cli_warm_sandbox(job_id=job_id)
+if claim:
+    sb = modal.Sandbox.from_id(claim["sandbox_id"])
+    # Use sb.tunnels() to get service URL
+
+# List CLI pool sandboxes
+for sb in modal.Sandbox.list(tags={"pool": "cli"}):
+    if sb.poll() is None:  # Still running
+        ...
+```
+
+**HTTP Endpoints:**
+
+- `GET /cli/pool/status` - Returns CLI pool statistics (warm/claimed counts, entries)
 
 ### Priority 10: CLI Sandbox Snapshots ✅ COMPLETE
 
@@ -366,8 +456,8 @@ modal deploy -m agent_sandbox.deploy
 2. ✅ Agent SDK Sandbox Snapshots (Priority 1) - COMPLETE
 3. ✅ CLI Sandbox Snapshots (Priority 10) - COMPLETE
 4. ✅ Agent SDK Warm Pool (Priority 2) - COMPLETE
-5. 🔄 CLI Warm Pool (Priority 11) - NEXT
-6. ⏳ Pre-warm API (Priority 3)
+5. ✅ CLI Warm Pool (Priority 11) - COMPLETE
+6. 🔄 Pre-warm API (Priority 3) - NEXT
 7. ⏳ Stop/Cancel Mid-Execution (Priority 8)
 8. ⏳ Follow-up Prompt Queue (Priority 7)
 9. ⏳ Multiplayer Session Support (Priority 6)
@@ -378,13 +468,12 @@ modal deploy -m agent_sandbox.deploy
 
 ## Next Steps
 
-1. Continue with **Priority 11: CLI Warm Pool**
-   - Same pattern as Agent SDK warm pool for CLI sandboxes
-   - Add `cli_warm_pool_size` setting
-   - Pre-warm CLI sandboxes with development environment ready
-   - Tag pool sandboxes with `{"pool": "cli", "status": "warm"}`
-   - Claim from pool on `/execute` request
+1. Continue with **Priority 3: Pre-warm API**
+   - Add `POST /warm` endpoint that triggers sandbox pre-warming
+   - Client calls when user starts typing (speculative warmup)
+   - Use request correlation to match warm request to query
+   - Reduces perceived latency for interactive use cases
 
-2. After completing Priority 11, move to Priority 3: Pre-warm API
+2. After completing Priority 3, move to Priority 8: Stop/Cancel Mid-Execution
 
 3. Follow the phased implementation order in the plan file

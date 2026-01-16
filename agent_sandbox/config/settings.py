@@ -278,6 +278,51 @@ class Settings(BaseSettings):
         ),
     )
 
+    # CLI Warm pool settings for Claude CLI sandbox
+    cli_warm_pool_store_name: str = Field(
+        default="cli-warm-pool",
+        description="Modal Dict name for storing CLI warm pool metadata",
+    )
+    enable_cli_warm_pool: bool = Field(
+        default=True,
+        description=(
+            "Enable warm sandbox pool for CLI sandboxes to reduce cold-start latency. "
+            "When enabled, the system maintains a pool of pre-warmed CLI sandboxes "
+            "ready for immediate use, eliminating sandbox creation overhead."
+        ),
+    )
+    cli_warm_pool_size: int = Field(
+        default=2,
+        description=(
+            "Number of warm CLI sandboxes to maintain in the pool. "
+            "Higher values reduce cold-start probability but increase cost. "
+            "Recommended: 1-2 for low traffic, 2-3 for moderate traffic."
+        ),
+    )
+    cli_warm_pool_refresh_interval: int = Field(
+        default=300,
+        description=(
+            "Seconds between CLI pool maintenance runs. "
+            "The pool maintainer checks sandbox health and replenishes as needed. "
+            "Lower values ensure pool readiness but increase API calls."
+        ),
+    )
+    cli_warm_pool_sandbox_max_age: int = Field(
+        default=3600,
+        description=(
+            "Maximum age (seconds) for warm CLI sandboxes before recycling. "
+            "Sandboxes older than this are terminated and replaced to ensure "
+            "freshness and pick up image changes. Default: 1 hour."
+        ),
+    )
+    cli_warm_pool_claim_timeout: int = Field(
+        default=5,
+        description=(
+            "Seconds to wait when attempting to claim a warm CLI sandbox. "
+            "If claiming takes longer, falls back to creating a new sandbox."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )

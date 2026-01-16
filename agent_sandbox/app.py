@@ -51,11 +51,16 @@ from agent_sandbox.jobs import (
     JOB_QUEUE,
     bump_attempts,
     cancel_job,
+    claim_cli_warm_sandbox,
     claim_warm_sandbox,
+    cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
     enqueue_job,
+    generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
     get_cli_job_snapshot,
+    get_cli_warm_pool_status,
+    get_expired_cli_pool_entries,
     get_expired_pool_entries,
     get_job_record,
     get_job_status,
@@ -65,7 +70,9 @@ from agent_sandbox.jobs import (
     is_job_due,
     job_workspace_root,
     normalize_job_id,
+    register_cli_warm_sandbox,
     register_warm_sandbox,
+    remove_from_cli_pool,
     remove_from_pool,
     resolve_job_artifact,
     should_skip_job,
@@ -1655,6 +1662,41 @@ async def pool_status_endpoint():
     }
 
 
+@web_app.get("/cli/pool/status")
+async def cli_pool_status_endpoint():
+    """Get current status of the CLI warm sandbox pool.
+
+    Returns pool statistics including:
+    - enabled: Whether CLI warm pool is enabled
+    - target_size: Configured pool size
+    - warm: Number of available warm CLI sandboxes
+    - claimed: Number of currently claimed sandboxes
+    - total: Total sandboxes in pool
+    - entries: List of pool entries with metadata
+
+    Example:
+        ```
+        curl 'https://<org>--test-sandbox-http-app-dev.modal.run/cli/pool/status'
+        ```
+    """
+    if not _settings.enable_cli_warm_pool:
+        return {
+            "ok": True,
+            "enabled": False,
+            "message": "CLI warm pool is disabled",
+        }
+
+    pool_status = get_cli_warm_pool_status()
+    return {
+        "ok": True,
+        "enabled": True,
+        "target_size": _settings.cli_warm_pool_size,
+        "refresh_interval_seconds": _settings.cli_warm_pool_refresh_interval,
+        "sandbox_max_age_seconds": _settings.cli_warm_pool_sandbox_max_age,
+        **pool_status,
+    }
+
+
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
@@ -1970,6 +2012,211 @@ def maintain_warm_pool():
     replenish_result = replenish_warm_pool.local()
 
     pool_status = get_warm_pool_status()
+    return {
+        "status": "ok",
+        "stale_removed": stale_removed,
+        "expired_terminated": expired_count,
+        "replenished": replenish_result.get("created", 0),
+        "pool_warm": pool_status["warm"],
+        "pool_claimed": pool_status["claimed"],
+        "pool_total": pool_status["total"],
+    }
+
+
+# =============================================================================
+# CLI WARM POOL MANAGEMENT
+# =============================================================================
+# Functions for maintaining a pool of pre-warmed CLI sandboxes.
+# The pool reduces cold-start latency by keeping CLI sandboxes ready for use.
+# Pool sandboxes run uvicorn with the same configuration as the CLI service.
+
+
+def _create_cli_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
+    """Create a single warm CLI sandbox and add it to the pool.
+
+    Creates a new CLI sandbox with uvicorn running, waits for it to become healthy,
+    registers it in the pool, and returns the sandbox details.
+
+    Returns:
+        Tuple of (sandbox, sandbox_id, sandbox_name) if successful, None if failed.
+    """
+    pool_name = generate_cli_pool_sandbox_name()
+    cli_vol = _get_claude_cli_volume()
+
+    try:
+        sb = modal.Sandbox.create(
+            "uvicorn",
+            "agent_sandbox.controllers.cli_controller:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(CLI_SERVICE_PORT),
+            app=app,
+            image=claude_cli_image,
+            secrets=agent_sdk_secrets,
+            workdir=str(CLAUDE_CLI_APP_ROOT),
+            name=pool_name,
+            encrypted_ports=CLI_SERVICE_PORTS,
+            volumes={_settings.claude_cli_fs_root: cli_vol},
+            timeout=_settings.claude_cli_sandbox_timeout,
+            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
+            **_cli_sandbox_resource_kwargs(),
+            verbose=False,
+        )
+    except Exception:
+        _logger.warning("Failed to create CLI warm pool sandbox", exc_info=True)
+        return None
+
+    # Set pool tags for tracking
+    sb.set_tags(
+        {
+            "pool": "cli",
+            "status": "warm",
+            "app": "test-sandbox",
+            "port": str(CLI_SERVICE_PORT),
+        }
+    )
+
+    # Wait for tunnel URL
+    deadline = time.time() + 30
+    service_url = None
+    while time.time() < deadline:
+        tunnels = sb.tunnels()
+        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
+            service_url = tunnels[CLI_SERVICE_PORT].url
+            break
+        time.sleep(0.5)
+
+    if not service_url:
+        _logger.warning("Failed to get tunnel URL for CLI warm pool sandbox")
+        try:
+            sb.terminate()
+        except Exception:
+            pass
+        return None
+
+    # Wait for health check
+    try:
+        _wait_for_service(service_url, timeout=30)
+    except TimeoutError:
+        _logger.warning("CLI warm pool sandbox health check failed")
+        try:
+            sb.terminate()
+        except Exception:
+            pass
+        return None
+
+    # Register in pool
+    sandbox_id = sb.object_id
+    register_cli_warm_sandbox(sandbox_id, pool_name)
+    _logger.info(
+        "Created CLI warm pool sandbox",
+        extra={"sandbox_id": sandbox_id, "sandbox_name": pool_name, "url": service_url},
+    )
+
+    return sb, sandbox_id, pool_name
+
+
+@app.function(
+    image=claude_cli_image,
+    secrets=agent_sdk_secrets,
+    timeout=600,
+    **_retry_kwargs(),
+)
+def replenish_cli_warm_pool():
+    """Add CLI sandboxes to the warm pool up to the configured size.
+
+    Called after a sandbox is claimed from the pool to replenish it.
+    Also called by the pool maintainer on a schedule.
+    """
+    if not _settings.enable_cli_warm_pool:
+        return {"status": "disabled", "created": 0}
+
+    target_size = _settings.cli_warm_pool_size
+    pool_status = get_cli_warm_pool_status()
+    warm_count = pool_status["warm"]
+    needed = target_size - warm_count
+
+    _logger.info(
+        "Replenishing CLI warm pool",
+        extra={"target": target_size, "current_warm": warm_count, "needed": needed},
+    )
+
+    created = 0
+    for _ in range(needed):
+        result = _create_cli_warm_sandbox_sync()
+        if result:
+            created += 1
+        else:
+            # Don't keep trying if creation fails
+            break
+
+    return {"status": "ok", "created": created, "target": target_size, "warm_count": warm_count}
+
+
+@app.function(
+    image=claude_cli_image,
+    secrets=agent_sdk_secrets,
+    schedule=modal.Cron(f"*/{max(_settings.cli_warm_pool_refresh_interval // 60, 1)} * * * *"),
+    timeout=600,
+    **_retry_kwargs(),
+)
+def maintain_cli_warm_pool():
+    """Periodic maintenance of the CLI warm sandbox pool.
+
+    Runs on a schedule to:
+    1. Clean up stale pool entries for sandboxes that no longer exist
+    2. Expire old sandboxes (beyond max age) to pick up image changes
+    3. Replenish the pool to maintain target size
+
+    The schedule is derived from cli_warm_pool_refresh_interval setting.
+    """
+    if not _settings.enable_cli_warm_pool:
+        return {"status": "disabled"}
+
+    _logger.info("Running CLI warm pool maintenance")
+
+    # Step 1: Find live pool sandboxes via Modal API
+    live_sandbox_ids: set[str] = set()
+    try:
+        for sb in modal.Sandbox.list(tags={"pool": "cli"}):
+            # Verify sandbox is still running
+            if sb.poll() is None:
+                live_sandbox_ids.add(sb.object_id)
+            else:
+                # Sandbox has exited, remove from pool
+                remove_from_cli_pool(sb.object_id)
+    except Exception:
+        _logger.warning("Failed to list CLI pool sandboxes", exc_info=True)
+
+    # Step 2: Clean up stale entries (entries for sandboxes that no longer exist)
+    stale_removed = cleanup_stale_cli_pool_entries(live_sandbox_ids)
+    if stale_removed > 0:
+        _logger.info("Removed stale CLI pool entries", extra={"count": stale_removed})
+
+    # Step 3: Expire old sandboxes
+    expired_entries = get_expired_cli_pool_entries(_settings.cli_warm_pool_sandbox_max_age)
+    expired_count = 0
+    for entry in expired_entries:
+        sandbox_id = entry.get("sandbox_id")
+        if sandbox_id:
+            try:
+                sb = modal.Sandbox.from_id(sandbox_id)
+                sb.terminate()
+                _logger.info(
+                    "Terminated expired CLI pool sandbox", extra={"sandbox_id": sandbox_id}
+                )
+            except Exception:
+                pass
+            remove_from_cli_pool(sandbox_id)
+            expired_count += 1
+    if expired_count > 0:
+        _logger.info("Expired old CLI pool sandboxes", extra={"count": expired_count})
+
+    # Step 4: Replenish pool
+    replenish_result = replenish_cli_warm_pool.local()
+
+    pool_status = get_cli_warm_pool_status()
     return {
         "status": "ok",
         "stale_removed": stale_removed,
@@ -2462,6 +2709,11 @@ def get_or_start_cli_sandbox(
     Returns:
         A pair of `(sandbox, service_url)`.
 
+    Warm Pool:
+        When enabled, the function first tries to claim a pre-warmed CLI sandbox
+        from the pool. Pool sandboxes have uvicorn already running and
+        health-checked, eliminating cold-start latency.
+
     CLI Job Snapshot Restoration:
         When resuming a job after sandbox timeout, pass the job_id to
         check for stored snapshots. If a snapshot exists:
@@ -2495,6 +2747,8 @@ def get_or_start_cli_sandbox(
     # -------------------------------------------------------------------------
     sandbox_image = claude_cli_image
     restored_from_snapshot = False
+    use_cli_warm_pool = _settings.enable_cli_warm_pool
+
     if job_id and _settings.enable_cli_job_snapshots:
         snapshot = get_cli_job_snapshot(job_id)
         if snapshot and snapshot.get("image_id"):
@@ -2502,6 +2756,8 @@ def get_or_start_cli_sandbox(
                 snapshot_image = modal.Image.from_id(snapshot["image_id"])
                 sandbox_image = snapshot_image
                 restored_from_snapshot = True
+                # Don't use warm pool when restoring from snapshot - need specific image
+                use_cli_warm_pool = False
                 _logger.info(
                     "Restoring CLI sandbox from job snapshot",
                     extra={
@@ -2516,6 +2772,69 @@ def get_or_start_cli_sandbox(
                     exc_info=True,
                     extra={"job_id": job_id, "snapshot": snapshot},
                 )
+
+    # -------------------------------------------------------------------------
+    # Try to claim from CLI warm pool (if enabled and no snapshot)
+    # -------------------------------------------------------------------------
+    # The CLI warm pool contains pre-created sandboxes with uvicorn already running
+    # and health-checked. Claiming from pool avoids sandbox creation overhead.
+    # Pool is only used when not restoring from snapshot (need base image).
+    # -------------------------------------------------------------------------
+    if use_cli_warm_pool:
+        try:
+            claimed = claim_cli_warm_sandbox(job_id=job_id)
+            if claimed:
+                sandbox_id = claimed.get("sandbox_id")
+                sandbox_name = claimed.get("sandbox_name")
+                if sandbox_id:
+                    try:
+                        pool_sb = modal.Sandbox.from_id(sandbox_id)
+                        # Verify sandbox is still running
+                        if pool_sb.poll() is None:
+                            # Get tunnel URL
+                            tunnels = pool_sb.tunnels()
+                            if CLI_SERVICE_PORT in tunnels and getattr(
+                                tunnels[CLI_SERVICE_PORT], "url", None
+                            ):
+                                pool_url = tunnels[CLI_SERVICE_PORT].url
+                                # Verify health
+                                _wait_for_service(pool_url)
+                                CLI_SANDBOX = pool_sb
+                                CLI_SERVICE_URL = pool_url
+                                _logger.info(
+                                    "Claimed CLI sandbox from warm pool",
+                                    extra={
+                                        "sandbox_id": sandbox_id,
+                                        "sandbox_name": sandbox_name,
+                                        "job_id": job_id,
+                                    },
+                                )
+                                # Update tags to reflect active use
+                                pool_sb.set_tags(
+                                    {
+                                        "pool": "cli",
+                                        "status": "claimed",
+                                        "role": "claude-cli-service",
+                                        "app": "test-sandbox",
+                                        "port": str(CLI_SERVICE_PORT),
+                                    }
+                                )
+                                # Trigger async pool replenishment
+                                try:
+                                    replenish_cli_warm_pool.spawn()
+                                except Exception:
+                                    pass  # Non-critical: pool will be replenished by maintainer
+                                return CLI_SANDBOX, CLI_SERVICE_URL
+                    except Exception:
+                        _logger.warning(
+                            "Failed to use claimed CLI pool sandbox, will create new",
+                            exc_info=True,
+                            extra={"sandbox_id": sandbox_id},
+                        )
+                        # Remove the bad entry from pool
+                        remove_from_cli_pool(sandbox_id)
+        except Exception:
+            _logger.warning("Error checking CLI warm pool, will create new sandbox", exc_info=True)
 
     cli_vol = _get_claude_cli_volume()
     try:
@@ -2630,6 +2949,8 @@ async def get_or_start_cli_sandbox_aio(
     # Determine image for new sandbox (snapshot restoration)
     sandbox_image = claude_cli_image
     restored_from_snapshot = False
+    use_cli_warm_pool = _settings.enable_cli_warm_pool
+
     if job_id and _settings.enable_cli_job_snapshots:
         snapshot = get_cli_job_snapshot(job_id)
         if snapshot and snapshot.get("image_id"):
@@ -2637,6 +2958,8 @@ async def get_or_start_cli_sandbox_aio(
                 snapshot_image = modal.Image.from_id(snapshot["image_id"])
                 sandbox_image = snapshot_image
                 restored_from_snapshot = True
+                # Don't use warm pool when restoring from snapshot - need specific image
+                use_cli_warm_pool = False
                 _logger.info(
                     "Restoring CLI sandbox from job snapshot (async)",
                     extra={
@@ -2651,6 +2974,72 @@ async def get_or_start_cli_sandbox_aio(
                     exc_info=True,
                     extra={"job_id": job_id, "snapshot": snapshot},
                 )
+
+    # -------------------------------------------------------------------------
+    # Try to claim from CLI warm pool (if enabled and no snapshot)
+    # -------------------------------------------------------------------------
+    if use_cli_warm_pool:
+        try:
+            claimed = claim_cli_warm_sandbox(job_id=job_id)
+            if claimed:
+                sandbox_id = claimed.get("sandbox_id")
+                sandbox_name = claimed.get("sandbox_name")
+                if sandbox_id:
+                    try:
+                        pool_sb = modal.Sandbox.from_id(sandbox_id)
+                        # Verify sandbox is still running
+                        if pool_sb.poll() is None:
+                            # Get tunnel URL
+                            deadline = anyio.current_time() + 5
+                            pool_url = None
+                            while anyio.current_time() < deadline:
+                                tunnels = await pool_sb.tunnels.aio()
+                                if CLI_SERVICE_PORT in tunnels and getattr(
+                                    tunnels[CLI_SERVICE_PORT], "url", None
+                                ):
+                                    pool_url = tunnels[CLI_SERVICE_PORT].url
+                                    break
+                                await anyio.sleep(0.25)
+                            if pool_url:
+                                # Verify health
+                                await _wait_for_service_aio(pool_url)
+                                CLI_SANDBOX = pool_sb
+                                CLI_SERVICE_URL = pool_url
+                                _logger.info(
+                                    "Claimed CLI sandbox from warm pool (async)",
+                                    extra={
+                                        "sandbox_id": sandbox_id,
+                                        "sandbox_name": sandbox_name,
+                                        "job_id": job_id,
+                                    },
+                                )
+                                # Update tags to reflect active use
+                                await pool_sb.set_tags.aio(
+                                    {
+                                        "pool": "cli",
+                                        "status": "claimed",
+                                        "role": "claude-cli-service",
+                                        "app": "test-sandbox",
+                                        "port": str(CLI_SERVICE_PORT),
+                                    }
+                                )
+                                # Trigger async pool replenishment
+                                try:
+                                    replenish_cli_warm_pool.spawn()
+                                except Exception:
+                                    pass
+                                return CLI_SANDBOX, CLI_SERVICE_URL
+                    except Exception:
+                        _logger.warning(
+                            "Failed to use claimed CLI pool sandbox (async), will create new",
+                            exc_info=True,
+                            extra={"sandbox_id": sandbox_id},
+                        )
+                        remove_from_cli_pool(sandbox_id)
+        except Exception:
+            _logger.warning(
+                "Error checking CLI warm pool (async), will create new sandbox", exc_info=True
+            )
 
     cli_vol = _get_claude_cli_volume()
     try:

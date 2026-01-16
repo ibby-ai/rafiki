@@ -1619,3 +1619,326 @@ def cleanup_stale_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
             if remove_from_pool(sandbox_id):
                 removed += 1
     return removed
+
+
+# =============================================================================
+# CLI WARM POOL MANAGEMENT
+# =============================================================================
+# Functions for managing a pool of pre-warmed CLI sandboxes.
+# The pool reduces cold-start latency by keeping CLI sandboxes ready for use.
+# Pool entries are stored in a Modal Dict keyed by sandbox object_id.
+#
+# Pool Entry Structure:
+#   CLI_WARM_POOL[sandbox_id] = {
+#       "sandbox_id": "sb-xxx",           # Modal sandbox object_id
+#       "status": "warm" | "claimed",      # Current status
+#       "created_at": 1704067200,          # Unix timestamp when added to pool
+#       "claimed_at": None | 1704067300,   # Unix timestamp when claimed
+#       "claimed_by": None | "job_id",     # Job that claimed this sandbox
+#       "sandbox_name": "cli-pool-xxx",    # Unique name for this sandbox
+#   }
+#
+# The pool uses optimistic locking via status transitions:
+#   - Only "warm" sandboxes can be claimed
+#   - Claiming atomically updates status to "claimed"
+#   - Multiple callers may race; only one succeeds per sandbox
+
+CLI_WARM_POOL = modal.Dict.from_name(_settings.cli_warm_pool_store_name, create_if_missing=True)
+
+
+def generate_cli_pool_sandbox_name() -> str:
+    """Generate a unique name for a CLI pool sandbox.
+
+    Returns:
+        A name like "cli-pool-abc12345" that can be used to identify
+        CLI pool sandboxes via Sandbox.from_name().
+    """
+    suffix = uuid.uuid4().hex[:8]
+    return f"cli-pool-{suffix}"
+
+
+def register_cli_warm_sandbox(
+    sandbox_id: str,
+    sandbox_name: str,
+) -> dict[str, Any]:
+    """Register a new CLI sandbox in the warm pool.
+
+    Adds a CLI sandbox to the pool with "warm" status, making it available
+    for claiming by incoming requests.
+
+    Args:
+        sandbox_id: Modal sandbox object_id from sandbox.object_id.
+        sandbox_name: Unique name assigned to this sandbox.
+
+    Returns:
+        Dict with pool entry metadata.
+
+    Usage:
+        ```python
+        sb = modal.Sandbox.create(name=pool_name, ...)
+        register_cli_warm_sandbox(sb.object_id, pool_name)
+        ```
+
+    Note:
+        Call this after successfully creating a warm CLI sandbox and
+        verifying it's healthy (e.g., after health check passes).
+    """
+    now = int(time.time())
+    entry = {
+        "sandbox_id": sandbox_id,
+        "sandbox_name": sandbox_name,
+        "status": "warm",
+        "created_at": now,
+        "claimed_at": None,
+        "claimed_by": None,
+    }
+    CLI_WARM_POOL[sandbox_id] = entry
+    return entry
+
+
+def claim_cli_warm_sandbox(
+    job_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Attempt to claim a warm CLI sandbox from the pool.
+
+    Iterates through warm CLI sandboxes and attempts to atomically claim one.
+    Uses optimistic locking by checking status before updating.
+
+    Args:
+        job_id: Optional job ID to associate with the claim.
+            Used for debugging and tracking which job owns which sandbox.
+
+    Returns:
+        Pool entry dict if a sandbox was successfully claimed, containing:
+        - sandbox_id: Modal sandbox object_id for retrieval
+        - sandbox_name: Name for Sandbox.from_name()
+        - status: "claimed"
+        - claimed_at: Claim timestamp
+        - claimed_by: The job_id
+
+        None if no warm CLI sandboxes are available.
+
+    Race Condition Handling:
+        Multiple callers may attempt to claim the same sandbox.
+        This function handles races by:
+        1. Fetching entry and checking status == "warm"
+        2. Updating status to "claimed"
+        3. If another caller claimed it first, trying the next sandbox
+
+        The window between fetch and update is small, so most races
+        resolve naturally. For high-contention scenarios, consider
+        increasing pool size.
+
+    Usage:
+        ```python
+        claim = claim_cli_warm_sandbox(job_id="550e8400-...")
+        if claim:
+            sb = modal.Sandbox.from_id(claim["sandbox_id"])
+            # Use sandbox...
+        ```
+    """
+    now = int(time.time())
+
+    # Get all pool entries
+    # Note: Modal Dict doesn't support atomic iteration with updates,
+    # so we iterate over keys and handle races
+    try:
+        all_entries = list(CLI_WARM_POOL.items())
+    except Exception:
+        return None
+
+    for sandbox_id, entry in all_entries:
+        if entry.get("status") != "warm":
+            continue
+
+        # Attempt to claim this sandbox
+        # Re-fetch to minimize race window
+        current = CLI_WARM_POOL.get(sandbox_id)
+        if not current or current.get("status") != "warm":
+            continue
+
+        # Update to claimed status
+        claimed_entry = {
+            **current,
+            "status": "claimed",
+            "claimed_at": now,
+            "claimed_by": job_id,
+        }
+        CLI_WARM_POOL[sandbox_id] = claimed_entry
+        return claimed_entry
+
+    return None
+
+
+def release_cli_warm_sandbox(sandbox_id: str) -> bool:
+    """Return a claimed CLI sandbox to the warm pool.
+
+    Resets a CLI sandbox's status from "claimed" back to "warm",
+    making it available for future requests.
+
+    Args:
+        sandbox_id: The Modal sandbox object_id to release.
+
+    Returns:
+        True if the sandbox was found and released, False otherwise.
+
+    Usage:
+        Called when a job ends but the sandbox is still healthy
+        and can be reused:
+        ```python
+        release_cli_warm_sandbox(sandbox_id)
+        ```
+
+    Note:
+        Only call this if the sandbox is still running and healthy.
+        If the sandbox terminated or had errors, use remove_from_cli_pool()
+        instead to clean up the pool entry.
+    """
+    entry = CLI_WARM_POOL.get(sandbox_id)
+    if not entry:
+        return False
+
+    updated = {
+        **entry,
+        "status": "warm",
+        "claimed_at": None,
+        "claimed_by": None,
+    }
+    CLI_WARM_POOL[sandbox_id] = updated
+    return True
+
+
+def remove_from_cli_pool(sandbox_id: str) -> bool:
+    """Remove a CLI sandbox entry from the pool.
+
+    Deletes the pool entry for a CLI sandbox that is no longer usable
+    (terminated, errored, or expired).
+
+    Args:
+        sandbox_id: The Modal sandbox object_id to remove.
+
+    Returns:
+        True if an entry was removed, False if not found.
+
+    Usage:
+        ```python
+        # After sandbox terminates or times out
+        remove_from_cli_pool(sandbox_id)
+        ```
+    """
+    try:
+        del CLI_WARM_POOL[sandbox_id]
+        return True
+    except KeyError:
+        return False
+
+
+def get_cli_warm_pool_entries() -> list[dict[str, Any]]:
+    """Get all entries in the CLI warm pool.
+
+    Returns:
+        List of pool entry dicts with sandbox metadata.
+
+    Usage:
+        ```python
+        entries = get_cli_warm_pool_entries()
+        warm_count = sum(1 for e in entries if e["status"] == "warm")
+        ```
+    """
+    try:
+        return [entry for _, entry in CLI_WARM_POOL.items()]
+    except Exception:
+        return []
+
+
+def get_cli_warm_pool_status() -> dict[str, Any]:
+    """Get current status of the CLI warm pool.
+
+    Returns:
+        Dict with pool statistics:
+        - total: Total sandboxes in pool (warm + claimed)
+        - warm: Available warm sandboxes
+        - claimed: Currently claimed sandboxes
+        - entries: List of pool entries with metadata
+
+    Usage:
+        ```python
+        status = get_cli_warm_pool_status()
+        if status["warm"] < settings.cli_warm_pool_size:
+            # Replenish pool
+        ```
+    """
+    entries = get_cli_warm_pool_entries()
+    warm = sum(1 for e in entries if e.get("status") == "warm")
+    claimed = sum(1 for e in entries if e.get("status") == "claimed")
+
+    return {
+        "total": len(entries),
+        "warm": warm,
+        "claimed": claimed,
+        "entries": entries,
+    }
+
+
+def get_expired_cli_pool_entries(max_age_seconds: int = 3600) -> list[dict[str, Any]]:
+    """Get CLI pool entries older than the specified max age.
+
+    Returns CLI sandboxes that should be recycled due to age. This ensures
+    pool sandboxes pick up image changes and don't accumulate state.
+
+    Args:
+        max_age_seconds: Maximum age before a sandbox is considered expired.
+            Default 3600 seconds (1 hour).
+
+    Returns:
+        List of expired pool entries that should be removed.
+
+    Usage:
+        ```python
+        expired = get_expired_cli_pool_entries(max_age_seconds=3600)
+        for entry in expired:
+            # Terminate sandbox and remove from pool
+            sb = modal.Sandbox.from_id(entry["sandbox_id"])
+            sb.terminate()
+            remove_from_cli_pool(entry["sandbox_id"])
+        ```
+    """
+    now = int(time.time())
+    entries = get_cli_warm_pool_entries()
+    cutoff = now - max_age_seconds
+
+    return [
+        entry
+        for entry in entries
+        if entry.get("created_at", now) < cutoff and entry.get("status") == "warm"
+    ]
+
+
+def cleanup_stale_cli_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
+    """Remove CLI pool entries for sandboxes that no longer exist.
+
+    Used by the CLI pool maintainer to clean up entries for sandboxes
+    that have terminated unexpectedly.
+
+    Args:
+        sandbox_ids_to_keep: Set of sandbox_ids that are known to still exist.
+            Any entry not in this set will be removed.
+
+    Returns:
+        Number of stale entries removed.
+
+    Usage:
+        ```python
+        # Get list of live sandboxes from Modal
+        live_ids = {sb.object_id for sb in modal.Sandbox.list(tags={"pool": "cli"})}
+        removed = cleanup_stale_cli_pool_entries(live_ids)
+        ```
+    """
+    entries = get_cli_warm_pool_entries()
+    removed = 0
+    for entry in entries:
+        sandbox_id = entry.get("sandbox_id")
+        if sandbox_id and sandbox_id not in sandbox_ids_to_keep:
+            if remove_from_cli_pool(sandbox_id):
+                removed += 1
+    return removed
