@@ -40,6 +40,7 @@ from agent_sandbox.jobs import (
 from agent_sandbox.ralph.loop import resume_ralph_loop, run_ralph_loop, run_ralph_loop_streaming
 from agent_sandbox.ralph.schemas import RalphCheckpoint, RalphExecuteRequest, RalphStreamEvent
 from agent_sandbox.schemas import ClaudeCliRequest
+from agent_sandbox.tools.session_tools import set_parent_context
 from agent_sandbox.utils.cli import (
     CLAUDE_CLI_APP_ROOT,
     claude_cli_env,
@@ -187,6 +188,7 @@ async def execute_claude_cli(body: ClaudeCliRequest, request: Request) -> JSONRe
     payload: dict[str, Any] = {}
     status_code = 200
     try:
+        set_parent_context(normalized_job_id)
         result = await anyio.to_thread.run_sync(_run)
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
@@ -270,6 +272,7 @@ async def execute_claude_cli(body: ClaudeCliRequest, request: Request) -> JSONRe
             "exit_code": 1,
         }
     finally:
+        set_parent_context(None)
         if body.debug:
             payload.update(
                 {
@@ -370,6 +373,7 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
             )
 
     try:
+        set_parent_context(normalized_job_id)
         result = await anyio.to_thread.run_sync(_run)
         payload = result.model_dump()
         status_code = 200
@@ -377,6 +381,7 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
         payload = {"ok": False, "error": str(exc)}
         status_code = 500
     finally:
+        set_parent_context(None)
         _commit_cli_volume()
 
         # Record artifact manifest after execution
@@ -432,6 +437,7 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
         """Generator that runs Ralph loop and yields SSE-formatted events."""
         job_status = "running"
         try:
+            set_parent_context(normalized_job_id)
             gen = run_ralph_loop_streaming(
                 job_id=normalized_job_id,
                 prd=body.prd,
@@ -464,6 +470,7 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
         else:
             job_status = "complete"
         finally:
+            set_parent_context(None)
             _commit_cli_volume()
             # Record artifact manifest after streaming completes
             try:

@@ -35,6 +35,7 @@ from agent_sandbox.schemas.jobs import (
 
 _settings = get_settings()
 
+
 # Distributed queue for pending job payloads. Workers call JOB_QUEUE.get() to
 # receive {"job_id": str, "question": str} messages.
 JOB_QUEUE = modal.Queue.from_name(_settings.job_queue_name, create_if_missing=True)

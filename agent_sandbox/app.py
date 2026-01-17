@@ -1241,9 +1241,20 @@ async def query_proxy(request: Request, body: QueryBody):
                 },
             )
 
+    sb = None
+    url = None
+    if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
+        try:
+            sb = modal.Sandbox.from_id(prewarm_claimed["sandbox_id"])
+            url = prewarm_claimed["sandbox_url"]
+            await _wait_for_service_aio(url)
+        except Exception:
+            sb = None
+            url = None
+
     # Use async getter with session_id for potential snapshot restoration
-    # If pre-warm was claimed, the sandbox should already be ready in globals
-    sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
+    if sb is None or url is None:
+        sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     # Optional: per-request connect token (verified in sandbox service)
     headers = {}
@@ -1272,7 +1283,7 @@ async def query_proxy(request: Request, body: QueryBody):
         ):
             try:
                 # Fire-and-forget: spawn snapshot in background
-                snapshot_session_state.spawn(result_session_id)
+                snapshot_session_state.spawn(result_session_id, sb.object_id)
                 _logger.debug(
                     "Spawned session snapshot",
                     extra={"session_id": result_session_id},
@@ -1309,9 +1320,20 @@ async def query_stream(request: Request, body: QueryBody):
                 },
             )
 
+    sb = None
+    url = None
+    if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
+        try:
+            sb = modal.Sandbox.from_id(prewarm_claimed["sandbox_id"])
+            url = prewarm_claimed["sandbox_url"]
+            await _wait_for_service_aio(url)
+        except Exception:
+            sb = None
+            url = None
+
     # Use async getter with session_id for potential snapshot restoration
-    # If pre-warm was claimed, the sandbox should already be ready in globals
-    sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
+    if sb is None or url is None:
+        sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     headers = {}
     if settings.enforce_connect_token:
@@ -1352,7 +1374,7 @@ async def query_stream(request: Request, body: QueryBody):
         if settings.enable_session_snapshots and captured_session_id:
             if should_snapshot_session(captured_session_id, settings.snapshot_min_interval_seconds):
                 try:
-                    snapshot_session_state.spawn(captured_session_id)
+                    snapshot_session_state.spawn(captured_session_id, sb.object_id)
                     _logger.debug(
                         "Spawned session snapshot after stream",
                         extra={"session_id": captured_session_id},
@@ -3162,11 +3184,17 @@ async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     from collections import deque
 
     buf = deque(maxlen=n)
-    async with anyio.move_on_after(timeout):
-        async for msg in sb.stdout.aio():
+
+    def _read() -> list[str]:
+        deadline = time.time() + timeout
+        for msg in sb.stdout:
             for line in str(msg).splitlines():
                 buf.append(line)
-    return list(buf)
+            if time.time() > deadline:
+                break
+        return list(buf)
+
+    return await anyio.to_thread.run_sync(_read)
 
 
 # Persistent registry for sandbox metadata (survives sandbox restarts).
@@ -4816,7 +4844,7 @@ def run_claude_cli_remote(
         and should_snapshot_cli_job(normalized_job_id, settings.cli_snapshot_min_interval_seconds)
     ):
         try:
-            snapshot_cli_job_state.spawn(normalized_job_id)
+            snapshot_cli_job_state.spawn(normalized_job_id, sb.object_id)
         except Exception:
             _logger.debug(
                 "Failed to spawn CLI job snapshot",
@@ -4939,7 +4967,7 @@ def run_ralph_remote(
         normalized_job_id, settings.cli_snapshot_min_interval_seconds
     ):
         try:
-            snapshot_cli_job_state.spawn(normalized_job_id)
+            snapshot_cli_job_state.spawn(normalized_job_id, sb.object_id)
         except Exception:
             _logger.debug(
                 "Failed to spawn CLI job snapshot for Ralph",
@@ -5056,6 +5084,10 @@ def process_job_queue() -> None:
         attempt = bump_attempts(job_id)
         started_at = int(time.time())
         record = get_job_record(job_id) or {}
+        spawn_context = (record.get("metadata") or {}).get("spawn_context") or {}
+        sandbox_type = spawn_context.get("sandbox_type", "agent_sdk")
+        allowed_tools = spawn_context.get("allowed_tools")
+        timeout_seconds = spawn_context.get("timeout_seconds")
         created_at = record.get("created_at")
         queue_latency_ms = None
         if created_at is not None:
@@ -5069,22 +5101,57 @@ def process_job_queue() -> None:
             },
         )
         try:
-            sb, url = get_or_start_background_sandbox()
-            update_job(job_id, {"sandbox_id": sb.object_id})
-            _logger.info(
-                "job.start",
-                extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
-            )
-            headers = {}
-            if settings.enforce_connect_token:
-                creds = sb.create_connect_token(user_metadata={"job_id": job_id})
-                headers = {"Authorization": f"Bearer {creds.token}"}
-            r = httpx.post(
-                f"{url.rstrip('/')}/query",
-                json={"question": question, "job_id": job_id},
-                headers=headers,
-                timeout=httpx.Timeout(120.0, connect=30.0),
-            )
+            if sandbox_type == "cli":
+                cli_sb, cli_url = get_or_start_cli_sandbox(job_id=job_id)
+                update_job(job_id, {"sandbox_id": cli_sb.object_id})
+                _logger.info(
+                    "job.start",
+                    extra={
+                        "job_id": job_id,
+                        "attempt": attempt,
+                        "sandbox_id": cli_sb.object_id,
+                        "sandbox_type": "cli",
+                    },
+                )
+                headers = {}
+                if settings.enforce_connect_token:
+                    creds = cli_sb.create_connect_token(user_metadata={"job_id": job_id})
+                    headers = {"Authorization": f"Bearer {creds.token}"}
+                cli_allowed_tools = None
+                if isinstance(allowed_tools, str):
+                    cli_allowed_tools = [t.strip() for t in allowed_tools.split(",") if t.strip()]
+                elif isinstance(allowed_tools, list):
+                    cli_allowed_tools = allowed_tools
+                cli_payload = {
+                    "prompt": question,
+                    "job_id": job_id,
+                    "allowed_tools": cli_allowed_tools,
+                }
+                if timeout_seconds:
+                    cli_payload["timeout_seconds"] = timeout_seconds
+                r = httpx.post(
+                    f"{cli_url.rstrip('/')}/execute",
+                    json=cli_payload,
+                    headers=headers,
+                    timeout=httpx.Timeout(120.0, connect=30.0),
+                )
+            else:
+                sb, url = get_or_start_background_sandbox()
+                update_job(job_id, {"sandbox_id": sb.object_id})
+                _logger.info(
+                    "job.start",
+                    extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
+                )
+                headers = {}
+                if settings.enforce_connect_token:
+                    creds = sb.create_connect_token(user_metadata={"job_id": job_id})
+                    headers = {"Authorization": f"Bearer {creds.token}"}
+                r = httpx.post(
+                    f"{url.rstrip('/')}/query",
+                    json={"question": question, "job_id": job_id},
+                    headers=headers,
+                    timeout=httpx.Timeout(120.0, connect=30.0),
+                )
             r.raise_for_status()
             result = r.json()
             _reload_persist_volume()
@@ -5418,7 +5485,7 @@ def snapshot_service() -> dict:
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
-def snapshot_session_state(session_id: str) -> dict:
+def snapshot_session_state(session_id: str, sandbox_id: str | None = None) -> dict:
     """Capture sandbox filesystem state for a specific agent session.
 
     Creates a snapshot tied to a session_id, enabling session restoration when
@@ -5469,7 +5536,10 @@ def snapshot_session_state(session_id: str) -> dict:
         }
 
     try:
-        sb, _ = get_or_start_background_sandbox()
+        if sandbox_id:
+            sb = modal.Sandbox.from_id(sandbox_id)
+        else:
+            sb, _ = get_or_start_background_sandbox()
         img = sb.snapshot_filesystem()
         snapshot_info = store_session_snapshot(
             session_id=session_id,
@@ -5498,7 +5568,7 @@ def snapshot_session_state(session_id: str) -> dict:
 
 
 @app.function(image=claude_cli_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
-def snapshot_cli_job_state(job_id: str) -> dict:
+def snapshot_cli_job_state(job_id: str, sandbox_id: str | None = None) -> dict:
     """Capture CLI sandbox filesystem state for a specific job.
 
     Creates a snapshot tied to a job_id, enabling job state restoration when
@@ -5525,7 +5595,7 @@ def snapshot_cli_job_state(job_id: str) -> dict:
         Called after CLI job completes when job snapshots are enabled:
         ```python
         if should_snapshot_cli_job(job_id, min_interval_seconds=60):
-            result = snapshot_cli_job_state.spawn(job_id)
+            result = snapshot_cli_job_state.spawn(job_id, sb.object_id)
         ```
 
     Restoration:
@@ -5549,7 +5619,10 @@ def snapshot_cli_job_state(job_id: str) -> dict:
         }
 
     try:
-        sb, _ = get_or_start_cli_sandbox()
+        if sandbox_id:
+            sb = modal.Sandbox.from_id(sandbox_id)
+        else:
+            sb, _ = get_or_start_cli_sandbox()
         img = sb.snapshot_filesystem()
         snapshot_info = store_cli_job_snapshot(
             job_id=job_id,

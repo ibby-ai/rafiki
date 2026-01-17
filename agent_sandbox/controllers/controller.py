@@ -64,6 +64,7 @@ from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import ClaudeCliRequest, QueryBody
 from agent_sandbox.schemas.responses import ClaudeCliResponse, ErrorResponse, QueryResponse
 from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+from agent_sandbox.tools.session_tools import set_parent_context
 from agent_sandbox.utils.cli import (
     CLAUDE_CLI_HOME,
     claude_cli_env,
@@ -582,6 +583,8 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         mark_session_executing(resolved_session_id)
 
     try:
+        # Enable child-session tools for this parent context
+        set_parent_context(body.job_id or resolved_session_id)
         messages: list[Message] = []
         result_message: ResultMessage | None = None
         async with ClaudeSDKClient(
@@ -651,6 +654,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             "session_id": final_session_id,
         }
     finally:
+        set_parent_context(None)
         # Record session end for statistics tracking
         duration_ms = int((time.time() - start_time) * 1000)
         record_session_end(
@@ -715,6 +719,8 @@ async def query_agent_stream(body: QueryBody, request: Request):
             mark_session_executing(resolved_session_id)
 
         try:
+            # Enable child-session tools for this parent context
+            set_parent_context(body.job_id or resolved_session_id)
             async with ClaudeSDKClient(
                 options=_options(
                     session_id=resolved_session_id,
@@ -779,6 +785,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
             final_status = "complete"
             yield _format_sse("done", summary)
         finally:
+            set_parent_context(None)
             # Record session end for statistics tracking
             duration_ms = int((time.time() - start_time) * 1000)
             record_session_end(

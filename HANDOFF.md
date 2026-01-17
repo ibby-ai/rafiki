@@ -1457,3 +1457,99 @@ Implement automatic image rebuilds (every 30 min as Ramp does) to:
 - Pick up dependency updates
 - Ensure fresh base images
 - Invalidate warm pool sandboxes on rebuild
+
+---
+
+## Session Report (2026-01-17)
+
+### Summary
+This session focused on validating and fixing the Claude Agent SDK improvements, especially child-session tooling, warm pools, snapshots, prewarm flow, and in-sandbox Modal auth. We resolved several correctness bugs, restored functionality, and added a robust secret-based auth path so sandboxes can use Modal Dict/Volume APIs without crashing. We also re-ran child-session tests and stats/retention checks to confirm behavior.
+
+### Key Fixes Implemented
+
+1) **Child-session tools wired into controllers**
+- Issue: `spawn_session` and related tools always failed with “No parent session context available.”
+- Fix: Added `set_parent_context()` to both Agent SDK and CLI controllers and cleared it after completion.
+- Files:  
+  - `agent_sandbox/controllers/controller.py`  
+  - `agent_sandbox/controllers/cli_controller.py`
+
+2) **CLI child sessions routed to the CLI sandbox**
+- Issue: child jobs with `sandbox_type="cli"` were still routed through `/query` (Agent SDK), ignoring sandbox type.
+- Fix: `process_job_queue()` now inspects `spawn_context.sandbox_type` and sends CLI jobs to `/execute` on the CLI sandbox (propagates `allowed_tools` and `timeout_seconds` when provided).
+- File: `agent_sandbox/app.py`
+
+3) **Snapshots now target the correct sandbox instance**
+- Issue: snapshot functions called `get_or_start_*` and could snapshot the wrong sandbox (especially with warm pools).
+- Fix: `snapshot_session_state` / `snapshot_cli_job_state` now accept `sandbox_id`, and callers pass the actual sandbox ID used for the request.
+- File: `agent_sandbox/app.py`
+
+4) **Pre-warm now actually uses the claimed sandbox**
+- Issue: `POST /warm` claims were logged but ignored; proxies always called `get_or_start_*`.
+- Fix: when a prewarm entry is ready, `query_proxy` and `query_stream` use the claimed `sandbox_id` and `sandbox_url`.
+- File: `agent_sandbox/app.py`
+
+5) **tail_logs fixed**
+- Issue: `tail_logs` used an async context on `move_on_after` and tried `sb.stdout.aio()` (not available).
+- Fix: reads stdout synchronously in a thread.
+- File: `agent_sandbox/app.py`
+
+6) **Modal auth for sandboxes (new secret wiring)**
+- Root issue: sandboxes were missing Modal auth, causing Dict/Volume access to raise `AuthError`, producing 500s.
+- Fix: created `modal-auth-secret` and added a new settings path to inject it. To avoid Modal stripping env vars that look like credentials, we switched to `SANDBOX_MODAL_TOKEN_ID`/`SANDBOX_MODAL_TOKEN_SECRET`, then map to `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` at runtime.
+- Files:
+  - `agent_sandbox/config/settings.py` (new `modal_auth_secret_name`, `enable_modal_auth_secret`, `_hydrate_modal_token_env`)
+
+7) **Safe no-op guards removed after auth fixed**
+- We temporarily added safe Dict access helpers to prevent crashes when auth was missing.
+- After secrets were wired and validated, we removed all safe helpers and restored strict Dict/Volume access.
+- File: `agent_sandbox/jobs.py`
+
+### Obstacles Encountered & Resolutions
+
+- **Modal AuthError inside sandboxes**:  
+  The Agent SDK `/query` handler crashed on `record_session_start` due to Modal token missing inside the sandbox. Similar AuthErrors appeared for workspace retention, prompt queues, and multiplayer metadata. We first added safe no-op guards, then properly fixed auth via secrets.
+
+- **Modal secret keys were not surfacing inside sandbox**:  
+  Using `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` directly in secrets resulted in empty env vars in sandboxes (Modal strips sensitive env names). We fixed this by renaming secret keys to `SANDBOX_MODAL_TOKEN_ID`/`SANDBOX_MODAL_TOKEN_SECRET` and then mapping to `MODAL_TOKEN_*` at runtime using `_hydrate_modal_token_env()`.
+
+- **tail_logs utility broken**:  
+  `anyio.move_on_after` used incorrectly and `sb.stdout.aio()` doesn’t exist. Rewrote to thread-based sync read.
+
+- **Child sessions missing context**:  
+  MCP tools needed parent context but controllers never set it.
+
+### Tests/Verification Executed
+
+- **Child session routing**:
+  - Verified Agent SDK and CLI jobs route correctly.
+  - CLI child job completed with CLI sandbox and correct output.
+  - Agent SDK child job failed before auth fix, then succeeded after auth wiring.
+
+- **Stats**:
+  - `get_stats(period_hours=1, include_time_series=True)` returned non-zero counts (agent_sdk total_sessions=2, completed=2).
+
+- **Workspace retention**:
+  - `maintain_workspace_retention()` ran successfully; `get_workspace_retention_status()` returned enabled stats (no AuthErrors).
+
+### Commands Used (Not Exhaustive)
+
+- `modal secret create modal-auth-secret SANDBOX_MODAL_TOKEN_ID=... SANDBOX_MODAL_TOKEN_SECRET=...`
+- `modal run -m agent_sandbox.app::process_job_queue`
+- `modal run -m agent_sandbox.app::maintain_workspace_retention`
+- `uv run ruff check --fix .`
+- `uv run ruff format .`
+
+### Current State / Notes for Next Agent
+
+- Modal auth secret is **required** for Dict/Volume usage inside sandboxes; ensure `modal-auth-secret` exists with keys:
+  - `SANDBOX_MODAL_TOKEN_ID`
+  - `SANDBOX_MODAL_TOKEN_SECRET`
+- `_hydrate_modal_token_env()` in `agent_sandbox/config/settings.py` maps those to `MODAL_TOKEN_ID/SECRET`.
+- Stats, multiplayer metadata, prompt queue, and volume commit/reload all work with auth; strict access is restored.
+
+### Suggested Follow-ups
+
+- Re-test: `/stats` endpoint via HTTP proxy to validate external aggregation.
+- Run a CLI job to populate workspace retention metadata and confirm non-zero counts.
+- Consider periodic image rebuilds and GitHub App integration per roadmap.

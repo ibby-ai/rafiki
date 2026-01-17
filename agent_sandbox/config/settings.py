@@ -7,6 +7,7 @@ All settings can be configured via environment variables (case-insensitive).
 See CLAUDE.md and docs/configuration.md for usage guidance.
 """
 
+import os
 from functools import lru_cache
 from typing import Self
 
@@ -95,6 +96,17 @@ class Settings(BaseSettings):
     admin_secret_name: str = Field(
         default="admin-secret",
         description="Modal secret name for admin operations (terminate, snapshot)",
+    )
+    modal_auth_secret_name: str = Field(
+        default="modal-auth-secret",
+        description=(
+            "Modal secret name that provides SANDBOX_MODAL_TOKEN_ID and SANDBOX_MODAL_TOKEN_SECRET "
+            "for in-sandbox Modal API access."
+        ),
+    )
+    enable_modal_auth_secret: bool = Field(
+        default=True,
+        description="Include the modal auth secret in sandbox/function secrets.",
     )
 
     # Security settings
@@ -664,6 +676,14 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
         # Admin secret is optional - use required_keys=[] to avoid failure if not set
         secrets.append(modal.Secret.from_name(settings.admin_secret_name))
 
+    if settings.enable_modal_auth_secret:
+        secrets.append(
+            modal.Secret.from_name(
+                settings.modal_auth_secret_name,
+                required_keys=["SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET"],
+            )
+        )
+
     return secrets
 
 
@@ -675,3 +695,20 @@ def get_settings() -> Settings:
         Cached Settings instance.
     """
     return Settings()
+
+
+def _hydrate_modal_token_env() -> None:
+    """Populate MODAL_TOKEN_ID/SECRET from auth secret env vars if needed."""
+    token_id = (os.getenv("MODAL_TOKEN_ID") or "").strip()
+    token_secret = (os.getenv("MODAL_TOKEN_SECRET") or "").strip()
+    if token_id and token_secret:
+        return
+
+    alt_id = (os.getenv("SANDBOX_MODAL_TOKEN_ID") or "").strip()
+    alt_secret = (os.getenv("SANDBOX_MODAL_TOKEN_SECRET") or "").strip()
+    if alt_id and alt_secret:
+        os.environ["MODAL_TOKEN_ID"] = alt_id
+        os.environ["MODAL_TOKEN_SECRET"] = alt_secret
+
+
+_hydrate_modal_token_env()
