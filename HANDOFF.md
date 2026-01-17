@@ -1461,6 +1461,7 @@ Implement automatic image rebuilds (every 30 min as Ramp does) to:
 ---
 
 ## Session Report (2026-01-17)
+**Commit:** 5ea45ff85fe1f760e6cf82ecaa7d1afffe81b277
 
 ### Summary
 This session focused on validating and fixing the Claude Agent SDK improvements, especially child-session tooling, warm pools, snapshots, prewarm flow, and in-sandbox Modal auth. We resolved several correctness bugs, restored functionality, and added a robust secret-based auth path so sandboxes can use Modal Dict/Volume APIs without crashing. We also re-ran child-session tests and stats/retention checks to confirm behavior.
