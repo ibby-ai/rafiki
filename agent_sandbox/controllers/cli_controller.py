@@ -14,6 +14,7 @@ The sandbox is created with a dedicated CLI image and volume mounted at
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -435,6 +436,7 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
 
     def _run_streaming():
         """Generator that runs Ralph loop and yields SSE-formatted events."""
+        _logger.debug("Starting Ralph streaming for job %s", normalized_job_id)
         job_status = "running"
         try:
             set_parent_context(normalized_job_id)
@@ -456,6 +458,7 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
 
             # Iterate through all events
             for event in gen:
+                _logger.debug("Yielding SSE event: %s", event.event_type)
                 yield _format_sse(event)
 
         except Exception as exc:
@@ -485,10 +488,44 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
                 )
 
     async def sse_generator():
-        """Async wrapper for the streaming generator."""
-        # Run the synchronous generator in a thread
-        gen = await anyio.to_thread.run_sync(lambda: list(_run_streaming()))
-        for item in gen:
+        """Async wrapper that streams events as they are produced.
+
+        Uses a queue to bridge the synchronous generator running in a thread
+        with the async generator that yields to the HTTP response.
+        """
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        exception_holder: list[Exception] = []
+
+        # Capture the event loop before entering the thread
+        loop = asyncio.get_running_loop()
+
+        def _run_streaming_to_queue():
+            """Run the synchronous generator and push events to queue."""
+            _logger.debug("Thread started for Ralph streaming job %s", normalized_job_id)
+            try:
+                for event in _run_streaming():
+                    _logger.debug("Queueing SSE event to async bridge")
+                    # Use call_soon_threadsafe to safely put items from thread
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except Exception as exc:
+                exception_holder.append(exc)
+            finally:
+                # Signal completion
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        # Start the synchronous generator in a thread pool
+        task = loop.run_in_executor(None, _run_streaming_to_queue)
+
+        # Yield events as they arrive in the queue
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
             yield item
+
+        # Wait for the thread to complete and propagate any exception
+        await task
+        if exception_holder:
+            raise exception_holder[0]
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")

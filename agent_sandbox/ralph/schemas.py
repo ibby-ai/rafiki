@@ -257,7 +257,7 @@ class RalphRollbackResponse(BaseModel):
 class RalphStreamEvent(BaseModel):
     """Event sent during Ralph SSE streaming."""
 
-    event_type: str  # "iteration_start", "iteration_complete", "iteration_failed", "done", "error"
+    event_type: str  # "started", "iteration_start", "iteration_complete", "iteration_failed", "done", "error"
     job_id: str
     iteration: int | None = None
     task_id: str | None = None

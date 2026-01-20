@@ -510,6 +510,7 @@ def run_ralph_loop_streaming(
 
     Yields:
         RalphStreamEvent for each significant event:
+        - started: Immediately when streaming begins (before initialization)
         - iteration_start: Beginning of an iteration
         - iteration_complete: Successful iteration completion
         - iteration_failed: Failed iteration
@@ -528,6 +529,13 @@ def run_ralph_loop_streaming(
     """
     # Import pause check function here to avoid circular imports
     from agent_sandbox.jobs import is_ralph_paused, mark_ralph_paused
+
+    # Immediately yield a "started" event so clients know streaming is working
+    yield RalphStreamEvent(
+        event_type="started",
+        job_id=job_id,
+        status="initializing",
+    )
 
     prompt_template = prompt_template or RALPH_PROMPT_TEMPLATE
     allowed_tools = allowed_tools or ["Read", "Write", "Bash", "Glob", "Grep"]
