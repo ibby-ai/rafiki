@@ -59,6 +59,7 @@ from agent_sandbox.jobs import (
     claim_warm_sandbox,
     cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
+    clear_ralph_pause,
     clear_session_queue,
     create_session_metadata,
     enqueue_job,
@@ -99,6 +100,7 @@ from agent_sandbox.jobs import (
     job_workspace_root,
     list_ralph_iteration_snapshots,
     list_workspaces_for_cleanup,
+    mark_prewarm_failed,
     mark_ralph_resumed,
     mark_workspace_deleted,
     normalize_job_id,
@@ -309,11 +311,23 @@ def _autoscale_kwargs() -> dict[str, int]:
 
 
 def _function_call_id(call: object) -> str | None:
-    """Return a stable call identifier for Modal function calls."""
+    """Return a stable call identifier for Modal function calls.
+
+    Validates that the returned ID is a real value and not a placeholder
+    like "null", "none", or empty string.
+    """
     for attr in ("object_id", "call_id", "id"):
         value = getattr(call, attr, None)
         if value:
-            return str(value)
+            str_val = str(value)
+            # Filter out invalid/placeholder values
+            lower_val = str_val.lower()
+            if lower_val in ("null", "none", ""):
+                continue
+            # Also reject values that look like null representations
+            if str_val.startswith("nul") and len(str_val) <= 5:
+                continue
+            return str_val
     return None
 
 
@@ -1231,7 +1245,7 @@ async def query_proxy(request: Request, body: QueryBody):
     prewarm_claimed = None
     if body.warm_id and settings.enable_prewarm:
         prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
-        if prewarm_claimed:
+        if prewarm_claimed and prewarm_claimed.get("claimed"):
             _logger.info(
                 "Query using pre-warmed sandbox",
                 extra={
@@ -1240,6 +1254,17 @@ async def query_proxy(request: Request, body: QueryBody):
                     "prewarm_status": prewarm_claimed.get("status"),
                 },
             )
+        elif prewarm_claimed:
+            # Claim failed - log reason and fall back to new sandbox
+            _logger.info(
+                "Pre-warm claim failed, falling back to new sandbox",
+                extra={
+                    "warm_id": body.warm_id,
+                    "reason": prewarm_claimed.get("reason"),
+                    "failure_reason": prewarm_claimed.get("failure_reason"),
+                },
+            )
+            prewarm_claimed = None  # Clear so we don't try to use it
 
     sb = None
     url = None
@@ -1271,7 +1296,15 @@ async def query_proxy(request: Request, body: QueryBody):
             headers=headers,
             timeout=httpx.Timeout(120.0, connect=30.0),
         )
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text or "Background sandbox request failed"
+            _logger.error(
+                "Background sandbox /query failed",
+                extra={"status_code": exc.response.status_code, "detail": detail},
+            )
+            raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
         result = r.json()
 
     # Trigger session snapshot asynchronously after successful query
@@ -1310,7 +1343,7 @@ async def query_stream(request: Request, body: QueryBody):
     prewarm_claimed = None
     if body.warm_id and settings.enable_prewarm:
         prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
-        if prewarm_claimed:
+        if prewarm_claimed and prewarm_claimed.get("claimed"):
             _logger.info(
                 "Query stream using pre-warmed sandbox",
                 extra={
@@ -1319,6 +1352,17 @@ async def query_stream(request: Request, body: QueryBody):
                     "prewarm_status": prewarm_claimed.get("status"),
                 },
             )
+        elif prewarm_claimed:
+            # Claim failed - log reason and fall back to new sandbox
+            _logger.info(
+                "Pre-warm claim failed for stream, falling back to new sandbox",
+                extra={
+                    "warm_id": body.warm_id,
+                    "reason": prewarm_claimed.get("reason"),
+                    "failure_reason": prewarm_claimed.get("failure_reason"),
+                },
+            )
+            prewarm_claimed = None  # Clear so we don't try to use it
 
     sb = None
     url = None
@@ -1846,6 +1890,39 @@ async def start_ralph(body: RalphStartRequest) -> RalphStartResponse:
     return RalphStartResponse(job_id=job_id, call_id=call_id)
 
 
+@web_app.post("/ralph/execute_stream")
+async def execute_ralph_stream_proxy(request: Request, body: RalphExecuteRequest):
+    """Proxy Ralph SSE streaming execution to the CLI sandbox."""
+    settings = Settings()
+
+    cli_sb, cli_url = await get_or_start_cli_sandbox_aio(job_id=body.job_id)
+    headers: dict[str, str] = {}
+    if settings.enforce_connect_token:
+        creds = await cli_sb.create_connect_token.aio(user_metadata={"job_id": body.job_id})
+        headers = {"Authorization": f"Bearer {creds.token}"}
+
+    async def sse_proxy():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                f"{cli_url.rstrip('/')}/ralph/execute_stream",
+                json=body.model_dump(),
+                headers=headers,
+            ) as response:
+                if response.status_code >= 400:
+                    detail = (await response.aread()).decode("utf-8", errors="ignore")
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=detail or "Ralph streaming request failed",
+                    )
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(
+        sse_proxy(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+    )
+
+
 @web_app.get("/ralph/{job_id}", response_model=RalphStatusResponse)
 async def get_ralph_status(job_id: str, call_id: str) -> RalphStatusResponse:
     """Get Ralph loop status by job_id.
@@ -1981,14 +2058,36 @@ async def resume_ralph(job_id: str, body: RalphResumeRequest) -> RalphResumeResp
             message="Ralph control is not enabled",
         )
 
-    # Get checkpoint
-    checkpoint = get_ralph_checkpoint(job_id)
-    if not checkpoint:
+    # Get checkpoint info (now returns {status, checkpoint} dict)
+    checkpoint_info = get_ralph_checkpoint(job_id)
+    if not checkpoint_info:
         return RalphResumeResponse(
             ok=False,
             job_id=job_id,
             status="not_paused",
             message="Ralph loop is not paused or checkpoint expired",
+        )
+
+    # Handle pause_requested state - pause hasn't been processed yet
+    if checkpoint_info.get("status") == "pause_requested":
+        # Cancel the pause request - loop continues normally
+        clear_ralph_pause(job_id)
+        return RalphResumeResponse(
+            ok=True,
+            job_id=job_id,
+            status="resumed",
+            call_id=None,  # No new call needed - original loop continues
+            message="Pause request cancelled - loop continues normally",
+        )
+
+    # Get checkpoint from paused state
+    checkpoint = checkpoint_info.get("checkpoint")
+    if not checkpoint:
+        return RalphResumeResponse(
+            ok=False,
+            job_id=job_id,
+            status="not_paused",
+            message="Ralph loop is paused but no checkpoint found",
         )
 
     # Mark as resumed
@@ -3122,11 +3221,15 @@ def prewarm_agent_sdk_sandbox(warm_id: str, session_id: str | None = None):
                 },
             )
         else:
+            # Entry expired or missing - mark as failed so it's not stuck at "warming"
+            mark_prewarm_failed(warm_id, "Entry expired before sandbox ready")
             _logger.warning(
                 "Pre-warm expired before sandbox ready",
-                extra={"warm_id": warm_id},
+                extra={"warm_id": warm_id, "sandbox_id": sb.object_id},
             )
     except Exception as exc:
+        # Mark as failed so the entry doesn't stay stuck at "warming"
+        mark_prewarm_failed(warm_id, str(exc))
         _logger.error(
             "Pre-warm failed (agent_sdk)",
             exc_info=True,
@@ -3157,11 +3260,15 @@ def prewarm_cli_sandbox(warm_id: str, job_id: str | None = None):
                 },
             )
         else:
+            # Entry expired or missing - mark as failed so it's not stuck at "warming"
+            mark_prewarm_failed(warm_id, "Entry expired before sandbox ready")
             _logger.warning(
                 "Pre-warm expired before sandbox ready",
-                extra={"warm_id": warm_id},
+                extra={"warm_id": warm_id, "sandbox_id": sb.object_id},
             )
     except Exception as exc:
+        # Mark as failed so the entry doesn't stay stuck at "warming"
+        mark_prewarm_failed(warm_id, str(exc))
         _logger.error(
             "Pre-warm failed (cli)",
             exc_info=True,

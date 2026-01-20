@@ -2094,6 +2094,43 @@ def update_prewarm_ready(
     return updated
 
 
+def mark_prewarm_failed(warm_id: str, reason: str) -> dict[str, Any] | None:
+    """Mark a pre-warm entry as failed.
+
+    Called when pre-warming fails due to an error or when the entry expires
+    before the sandbox is ready. This provides visibility into failed pre-warms
+    rather than leaving them stuck in "warming" state.
+
+    Args:
+        warm_id: The pre-warm request ID.
+        reason: Description of why the pre-warm failed.
+
+    Returns:
+        Updated entry dict if found, None otherwise.
+
+    Usage:
+        ```python
+        # When pre-warm fails
+        mark_prewarm_failed(warm_id, "Entry expired before sandbox ready")
+
+        # When sandbox creation errors
+        mark_prewarm_failed(warm_id, str(exc))
+        ```
+    """
+    entry = PREWARM_STORE.get(warm_id)
+    if not entry:
+        return None
+
+    updated = {
+        **entry,
+        "status": "failed",
+        "failed_at": int(time.time()),
+        "failure_reason": reason,
+    }
+    PREWARM_STORE[warm_id] = updated
+    return updated
+
+
 def get_prewarm(warm_id: str) -> dict[str, Any] | None:
     """Get a pre-warm entry by warm_id.
 
@@ -2140,29 +2177,45 @@ def claim_prewarm(
         claimed_by: session_id or job_id claiming the pre-warm.
 
     Returns:
-        Claimed entry dict with sandbox details if successful, None otherwise.
-        Returns None if:
-        - Pre-warm not found
-        - Pre-warm expired
-        - Pre-warm not ready (still warming)
-        - Pre-warm already claimed
+        Dict with claim result. Always includes "claimed" bool key.
+        On success (claimed=True):
+        - sandbox_id, sandbox_url, status="claimed", claimed_by, claimed_at
+        On failure (claimed=False):
+        - reason: "not_found", "still_warming", "failed", or "invalid_status:{status}"
+        - entry: Original prewarm entry (for debugging)
+        - failure_reason: If status was "failed"
 
     Usage:
         ```python
         # In query handler
         if warm_id:
-            claimed = claim_prewarm(warm_id, session_id)
-            if claimed:
-                # Use claimed["sandbox_id"] and claimed["sandbox_url"]
+            result = claim_prewarm(warm_id, session_id)
+            if result and result.get("claimed"):
+                # Use result["sandbox_id"] and result["sandbox_url"]
+            elif result:
+                # Log reason: result.get("reason")
         ```
     """
     entry = get_prewarm(warm_id)
     if not entry:
-        return None
+        return {"claimed": False, "reason": "not_found"}
+
+    status = entry.get("status")
 
     # Can only claim ready pre-warms
-    if entry.get("status") != "ready":
-        return None
+    if status == "warming":
+        return {"claimed": False, "reason": "still_warming", "entry": entry}
+
+    if status == "failed":
+        return {
+            "claimed": False,
+            "reason": "failed",
+            "failure_reason": entry.get("failure_reason"),
+            "entry": entry,
+        }
+
+    if status != "ready":
+        return {"claimed": False, "reason": f"invalid_status:{status}", "entry": entry}
 
     now = int(time.time())
     updated = {
@@ -2170,6 +2223,7 @@ def claim_prewarm(
         "status": "claimed",
         "claimed_by": claimed_by,
         "claimed_at": now,
+        "claimed": True,
     }
     PREWARM_STORE[warm_id] = updated
     return updated
@@ -3078,14 +3132,35 @@ def get_prompt_queue_status() -> dict[str, Any]:
 #   ```
 # =============================================================================
 
-# Modal Dict for storing session metadata
-try:
-    SESSION_METADATA = modal.Dict.from_name(
-        _settings.session_metadata_store_name, create_if_missing=True
-    )
-except Exception:
-    # Fallback for testing without Modal
-    SESSION_METADATA = {}  # type: ignore[assignment]
+# Modal Dict for storing session metadata (lazy initialization)
+# We use lazy initialization to ensure Modal auth credentials are hydrated before Dict access
+_SESSION_METADATA: modal.Dict | dict[str, Any] | None = None
+
+
+def _get_session_metadata_dict() -> modal.Dict | dict[str, Any]:
+    """Lazy initialization of SESSION_METADATA with auth hydration.
+
+    This ensures Modal auth credentials (MODAL_TOKEN_ID, MODAL_TOKEN_SECRET) are set
+    before attempting to access the distributed Dict. Inside sandboxes, credentials
+    come from secrets as SANDBOX_MODAL_TOKEN_* and must be converted.
+
+    Returns:
+        Modal Dict for session metadata, or fallback dict for testing.
+    """
+    global _SESSION_METADATA
+    if _SESSION_METADATA is None:
+        # Ensure Modal auth credentials are hydrated before Dict access
+        from agent_sandbox.config.settings import _hydrate_modal_token_env
+
+        _hydrate_modal_token_env()
+        try:
+            _SESSION_METADATA = modal.Dict.from_name(
+                _settings.session_metadata_store_name, create_if_missing=True
+            )
+        except Exception:
+            # Fallback for testing without Modal
+            _SESSION_METADATA = {}
+    return _SESSION_METADATA
 
 
 def create_session_metadata(
@@ -3118,7 +3193,8 @@ def create_session_metadata(
         ```
     """
     # Check if already exists
-    existing = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    existing = store.get(session_id)
     if existing:
         return existing
 
@@ -3133,7 +3209,7 @@ def create_session_metadata(
         "authorized_users": [],
         "messages": [],
     }
-    SESSION_METADATA[session_id] = metadata
+    store[session_id] = metadata
     return metadata
 
 
@@ -3154,7 +3230,7 @@ def get_session_metadata(session_id: str) -> dict[str, Any] | None:
             print(f"Users: {metadata['authorized_users']}")
         ```
     """
-    return SESSION_METADATA.get(session_id)
+    return _get_session_metadata_dict().get(session_id)
 
 
 def update_session_metadata(
@@ -3172,7 +3248,8 @@ def update_session_metadata(
     Returns:
         Updated metadata if session exists, None otherwise.
     """
-    metadata = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    metadata = store.get(session_id)
     if not metadata:
         return None
 
@@ -3182,7 +3259,7 @@ def update_session_metadata(
         metadata["description"] = description
 
     metadata["updated_at"] = int(time.time())
-    SESSION_METADATA[session_id] = metadata
+    store[session_id] = metadata
     return metadata
 
 
@@ -3213,7 +3290,8 @@ def authorize_session_user(
             print(f"Authorized users: {result['authorized_users']}")
         ```
     """
-    metadata = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    metadata = store.get(session_id)
     if not metadata:
         return None
 
@@ -3225,7 +3303,7 @@ def authorize_session_user(
     if user_id not in metadata["authorized_users"] and user_id != metadata.get("owner_id"):
         metadata["authorized_users"].append(user_id)
         metadata["updated_at"] = int(time.time())
-        SESSION_METADATA[session_id] = metadata
+        store[session_id] = metadata
 
     return metadata
 
@@ -3247,14 +3325,15 @@ def revoke_session_user(
     Returns:
         Updated metadata if session exists and user was removed, None otherwise.
     """
-    metadata = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    metadata = store.get(session_id)
     if not metadata:
         return None
 
     if user_id in metadata["authorized_users"]:
         metadata["authorized_users"].remove(user_id)
         metadata["updated_at"] = int(time.time())
-        SESSION_METADATA[session_id] = metadata
+        store[session_id] = metadata
 
     return metadata
 
@@ -3285,7 +3364,7 @@ def is_user_authorized(session_id: str, user_id: str | None) -> bool:
     if user_id is None:
         return True
 
-    metadata = SESSION_METADATA.get(session_id)
+    metadata = _get_session_metadata_dict().get(session_id)
 
     # No metadata = no access control enforced
     if not metadata:
@@ -3308,7 +3387,7 @@ def get_session_users(session_id: str) -> dict[str, Any] | None:
     Returns:
         Dict with owner_id and authorized_users, or None if session not found.
     """
-    metadata = SESSION_METADATA.get(session_id)
+    metadata = _get_session_metadata_dict().get(session_id)
     if not metadata:
         return None
 
@@ -3358,7 +3437,8 @@ def add_message_to_history(
         )
         ```
     """
-    metadata = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    metadata = store.get(session_id)
     if not metadata:
         # Auto-create metadata if it doesn't exist
         metadata = create_session_metadata(session_id, owner_id=user_id)
@@ -3388,7 +3468,7 @@ def add_message_to_history(
         metadata["messages"] = metadata["messages"][-max_history:]
 
     metadata["updated_at"] = now
-    SESSION_METADATA[session_id] = metadata
+    store[session_id] = metadata
 
     return message
 
@@ -3416,7 +3496,7 @@ def get_session_history(
             print(f"{msg['role']}: {msg['content'][:50]}...")
         ```
     """
-    metadata = SESSION_METADATA.get(session_id)
+    metadata = _get_session_metadata_dict().get(session_id)
     if not metadata:
         return []
 
@@ -3442,7 +3522,7 @@ def get_session_message_count(session_id: str) -> int:
     Returns:
         Number of messages in history.
     """
-    metadata = SESSION_METADATA.get(session_id)
+    metadata = _get_session_metadata_dict().get(session_id)
     if not metadata:
         return 0
     return len(metadata.get("messages", []))
@@ -3457,14 +3537,15 @@ def clear_session_history(session_id: str) -> int:
     Returns:
         Number of messages that were cleared.
     """
-    metadata = SESSION_METADATA.get(session_id)
+    store = _get_session_metadata_dict()
+    metadata = store.get(session_id)
     if not metadata:
         return 0
 
     count = len(metadata.get("messages", []))
     metadata["messages"] = []
     metadata["updated_at"] = int(time.time())
-    SESSION_METADATA[session_id] = metadata
+    store[session_id] = metadata
     return count
 
 
@@ -3478,9 +3559,10 @@ def delete_session_metadata(session_id: str) -> bool:
         True if session was found and deleted, False otherwise.
     """
     try:
-        existing = SESSION_METADATA.get(session_id)
+        store = _get_session_metadata_dict()
+        existing = store.get(session_id)
         if existing:
-            del SESSION_METADATA[session_id]
+            del store[session_id]
             return True
     except KeyError:
         pass
@@ -3502,7 +3584,8 @@ def get_multiplayer_status() -> dict[str, Any]:
     total_messages = 0
 
     try:
-        for _, metadata in SESSION_METADATA.items():
+        store = _get_session_metadata_dict()
+        for _, metadata in store.items():
             total_sessions += 1
             if metadata.get("authorized_users"):
                 shared_sessions += 1
@@ -3680,12 +3763,26 @@ def get_ralph_checkpoint(job_id: str) -> dict[str, Any] | None:
         job_id: The Ralph job ID.
 
     Returns:
-        Checkpoint data if loop is paused with checkpoint, None otherwise.
+        Dict with status and checkpoint info:
+        - {"status": "paused", "checkpoint": {...}} for paused loops
+        - {"status": "pause_requested", "checkpoint": None} for pending pause
+        - None if not paused or pause_requested
     """
     entry = RALPH_CONTROL.get(job_id)
-    if not entry or entry.get("status") != "paused":
+    if not entry:
         return None
-    return entry.get("checkpoint")
+
+    status = entry.get("status")
+
+    # Pause requested but loop hasn't processed it yet
+    if status == "pause_requested":
+        return {"status": "pause_requested", "checkpoint": None}
+
+    # Only return checkpoint for actually paused state
+    if status != "paused":
+        return None
+
+    return {"status": "paused", "checkpoint": entry.get("checkpoint")}
 
 
 def mark_ralph_resumed(job_id: str, requested_by: str | None = None) -> dict[str, Any] | None:
@@ -3714,6 +3811,29 @@ def mark_ralph_resumed(job_id: str, requested_by: str | None = None) -> dict[str
     )
     RALPH_CONTROL[job_id] = entry
     return entry
+
+
+def clear_ralph_pause(job_id: str) -> bool:
+    """Cancel a pending pause request before it takes effect.
+
+    Called when resuming while status is still "pause_requested" (before the
+    loop has processed the pause). This allows cancelling a pause before it
+    takes effect.
+
+    Args:
+        job_id: The Ralph job ID.
+
+    Returns:
+        True if pause was cleared, False if not in pause_requested state.
+    """
+    entry = RALPH_CONTROL.get(job_id)
+    if not entry or entry.get("status") != "pause_requested":
+        return False
+    try:
+        del RALPH_CONTROL[job_id]
+        return True
+    except KeyError:
+        return False
 
 
 def clear_ralph_control(job_id: str) -> bool:

@@ -41,6 +41,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
+from agent_sandbox.agents.loop import build_agent_options
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.controllers.middleware import RequestIdMiddleware
 from agent_sandbox.controllers.serialization import (
@@ -458,6 +459,65 @@ async def allow_web_only(
     return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
 
+def _is_session_resume_error(result_message: ResultMessage | None) -> bool:
+    """Check if a result indicates a failed session resume attempt.
+
+    The Claude SDK returns error_during_execution with num_turns=0 when
+    trying to resume a session that doesn't exist. This helper detects
+    that specific failure mode.
+
+    Args:
+        result_message: The ResultMessage from the SDK response.
+
+    Returns:
+        True if this looks like a session resume failure.
+    """
+    if not result_message:
+        return False
+    # Check for error_during_execution at turn 0 (failed before starting)
+    return (
+        getattr(result_message, "subtype", None) == "error_during_execution"
+        and getattr(result_message, "num_turns", -1) == 0
+        and getattr(result_message, "is_error", False) is True
+    )
+
+
+async def _execute_agent_query(
+    question: str,
+    session_id: str | None,
+    fork_session: bool,
+    job_root: Path | None,
+) -> tuple[list[Message], ResultMessage | None]:
+    """Execute an agent query and return messages.
+
+    Args:
+        question: The question to ask the agent.
+        session_id: Optional session ID to resume.
+        fork_session: Whether to fork the session.
+        job_root: Optional job workspace root.
+
+    Returns:
+        Tuple of (messages list, result_message or None).
+    """
+    messages: list[Message] = []
+    result_message: ResultMessage | None = None
+
+    async with ClaudeSDKClient(
+        options=_options(
+            session_id=session_id,
+            fork_session=fork_session,
+            job_root=job_root,
+        )
+    ) as client:
+        await client.query(question)
+        async for msg in client.receive_response():
+            messages.append(msg)
+            if isinstance(msg, ResultMessage):
+                result_message = msg
+
+    return messages, result_message
+
+
 def _options(
     session_id: str | None = None,
     fork_session: bool = False,
@@ -484,19 +544,17 @@ def _options(
             "This is a background job."
             f" Write all created files under {job_root} so they are persisted."
         )
-    return ClaudeAgentOptions(
-        system_prompt=system_prompt,
-        mcp_servers=get_mcp_servers(),
-        allowed_tools=get_allowed_tools(),
-        # Use the factory to create a handler with cancellation support
-        can_use_tool=_make_can_use_tool_handler(session_id=session_id),
-        # acceptEdits: Auto-approve file operations, but still check tools via can_use_tool.
-        # bypassPermissions would skip all checks but isn't allowed with root access.
-        permission_mode="acceptEdits",
+    options = build_agent_options(
+        get_mcp_servers(),
+        get_allowed_tools(),
+        system_prompt,
         resume=session_id,
         fork_session=fork_session,
         max_turns=_settings.agent_max_turns,
     )
+    # NOTE: claude_agent_sdk.query() requires AsyncIterable prompts when using can_use_tool.
+    # For now, keep can_use_tool unset to avoid errors on string prompts.
+    return options
 
 
 @app.exception_handler(Exception)
@@ -511,6 +569,10 @@ async def generic_exception_handler(request: Request, exc: Exception):
         JSONResponse with error details and request ID.
     """
     request_id = getattr(request.state, "request_id", None)
+    _logger.exception(
+        "Uncaught exception in controller",
+        extra={"request_id": request_id, "error_type": type(exc).__name__},
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -585,20 +647,31 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     try:
         # Enable child-session tools for this parent context
         set_parent_context(body.job_id or resolved_session_id)
-        messages: list[Message] = []
-        result_message: ResultMessage | None = None
-        async with ClaudeSDKClient(
-            options=_options(
-                session_id=resolved_session_id,
-                fork_session=body.fork_session,
+
+        # Execute query, potentially with session resume
+        messages, result_message = await _execute_agent_query(
+            question=body.question,
+            session_id=resolved_session_id,
+            fork_session=body.fork_session,
+            job_root=job_root,
+        )
+
+        # Check if session resume failed - retry without session_id
+        if resolved_session_id and _is_session_resume_error(result_message):
+            _logger.warning(
+                "Session resume failed, retrying with new session",
+                extra={
+                    "original_session_id": resolved_session_id,
+                    "request_id": request_id,
+                },
+            )
+            # Retry without session_id (creates new session)
+            messages, result_message = await _execute_agent_query(
+                question=body.question,
+                session_id=None,  # Don't try to resume
+                fork_session=False,
                 job_root=job_root,
             )
-        ) as client:
-            await client.query(body.question)
-            async for msg in client.receive_response():
-                messages.append(msg)
-                if isinstance(msg, ResultMessage):
-                    result_message = msg
 
         text_blocks = iter_text_blocks(messages)
         final_text = None
@@ -613,28 +686,35 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
 
         # Track message history for multiplayer sessions
         if _settings.enable_multiplayer_sessions and final_session_id:
-            # Create/update session metadata with owner if this is a new session
-            if not resolved_session_id and body.user_id:
-                create_session_metadata(final_session_id, owner_id=body.user_id)
+            try:
+                # Create/update session metadata with owner if this is a new session
+                if not resolved_session_id and body.user_id:
+                    create_session_metadata(final_session_id, owner_id=body.user_id)
 
-            # Record user message with attribution
-            add_message_to_history(
-                session_id=final_session_id,
-                role="user",
-                content=body.question,
-                user_id=body.user_id,
-                turn_number=summary.get("num_turns"),
-            )
-
-            # Record assistant response
-            if final_text:
+                # Record user message with attribution
                 add_message_to_history(
                     session_id=final_session_id,
-                    role="assistant",
-                    content=final_text,
+                    role="user",
+                    content=body.question,
+                    user_id=body.user_id,
                     turn_number=summary.get("num_turns"),
-                    tokens_used=summary.get("tokens_used"),
                 )
+
+                # Record assistant response
+                if final_text:
+                    add_message_to_history(
+                        session_id=final_session_id,
+                        role="assistant",
+                        content=final_text,
+                        turn_number=summary.get("num_turns"),
+                        tokens_used=summary.get("tokens_used"),
+                    )
+            except Exception as e:
+                _logger.warning(
+                    "Session metadata operation failed - continuing without history",
+                    extra={"session_id": final_session_id, "error": str(e)},
+                )
+                # Don't fail the query - metadata is optional
 
         _logger.info(
             "agent.query.complete",
@@ -721,9 +801,14 @@ async def query_agent_stream(body: QueryBody, request: Request):
         try:
             # Enable child-session tools for this parent context
             set_parent_context(body.job_id or resolved_session_id)
+
+            # Track if we need to retry due to session resume failure
+            session_to_use = resolved_session_id
+            retry_needed = False
+
             async with ClaudeSDKClient(
                 options=_options(
-                    session_id=resolved_session_id,
+                    session_id=session_to_use,
                     fork_session=body.fork_session,
                     job_root=job_root,
                 )
@@ -733,8 +818,40 @@ async def query_agent_stream(body: QueryBody, request: Request):
                     messages.append(msg)
                     if isinstance(msg, ResultMessage):
                         result_message = msg
-                    serialized = serialize_message(msg)
-                    yield _format_sse(serialized["type"], serialized)
+                        # Check if this is a session resume error before yielding
+                        if session_to_use and _is_session_resume_error(result_message):
+                            retry_needed = True
+                            break  # Don't yield error, we'll retry
+                    if not retry_needed:
+                        serialized = serialize_message(msg)
+                        yield _format_sse(serialized["type"], serialized)
+
+            # If session resume failed, retry with new session
+            if retry_needed:
+                _logger.warning(
+                    "Session resume failed in stream, retrying with new session",
+                    extra={
+                        "original_session_id": session_to_use,
+                        "request_id": request_id,
+                    },
+                )
+                # Clear and retry
+                messages = []
+                result_message = None
+                async with ClaudeSDKClient(
+                    options=_options(
+                        session_id=None,  # New session
+                        fork_session=False,
+                        job_root=job_root,
+                    )
+                ) as client:
+                    await client.query(body.question)
+                    async for msg in client.receive_response():
+                        messages.append(msg)
+                        if isinstance(msg, ResultMessage):
+                            result_message = msg
+                        serialized = serialize_message(msg)
+                        yield _format_sse(serialized["type"], serialized)
 
             text_blocks = iter_text_blocks(messages)
             final_text = None
@@ -749,28 +866,35 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
             # Track message history for multiplayer sessions
             if _settings.enable_multiplayer_sessions and final_session_id:
-                # Create/update session metadata with owner if this is a new session
-                if not resolved_session_id and body.user_id:
-                    create_session_metadata(final_session_id, owner_id=body.user_id)
+                try:
+                    # Create/update session metadata with owner if this is a new session
+                    if not resolved_session_id and body.user_id:
+                        create_session_metadata(final_session_id, owner_id=body.user_id)
 
-                # Record user message with attribution
-                add_message_to_history(
-                    session_id=final_session_id,
-                    role="user",
-                    content=body.question,
-                    user_id=body.user_id,
-                    turn_number=summary.get("num_turns"),
-                )
-
-                # Record assistant response
-                if final_text:
+                    # Record user message with attribution
                     add_message_to_history(
                         session_id=final_session_id,
-                        role="assistant",
-                        content=final_text,
+                        role="user",
+                        content=body.question,
+                        user_id=body.user_id,
                         turn_number=summary.get("num_turns"),
-                        tokens_used=summary.get("tokens_used"),
                     )
+
+                    # Record assistant response
+                    if final_text:
+                        add_message_to_history(
+                            session_id=final_session_id,
+                            role="assistant",
+                            content=final_text,
+                            turn_number=summary.get("num_turns"),
+                            tokens_used=summary.get("tokens_used"),
+                        )
+                except Exception as e:
+                    _logger.warning(
+                        "Session metadata operation failed - continuing without history",
+                        extra={"session_id": final_session_id, "error": str(e)},
+                    )
+                    # Don't fail the query - metadata is optional
 
             _logger.info(
                 "agent.query_stream.complete",
