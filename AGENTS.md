@@ -76,6 +76,17 @@ Existing commits use short, present-tense statements (`making sandbox persistent
 
 Never hardcode API keys. All Anthropic credentials must stay in the `anthropic-secret` Modal secret with key `ANTHROPIC_API_KEY`. When adding new secrets, update `agent_sandbox/config/settings.py` and document required setup steps in `README.md`. Avoid committing generated artifacts that might expose credentials or user data.
 
+## Browser Automation
+
+Use `agent-browser` for web automation. Run `agent-browser --help` for all commands.
+
+Core workflow:
+
+1. `agent-browser open <url>` - Navigate to page
+2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
+3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
+4. Re-snapshot after page changes
+
 ## ExecPlans
 
 When writing complex features or refactoring, you should create an ExecPlan as described in the .agent/plans/Plan.md file. This plan should be stored in the `.agent/plans/{feature_name}/` directory and it should be accompanied by a task list in the `.agent/tasks/{feature_name}/` directory. Place any temporary research, clones, etc., in the .gitignored subdirectory of the .agent/ directory.
