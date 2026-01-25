@@ -19,7 +19,13 @@ from agent_sandbox.prompts.prompts import RALPH_PROMPT_TEMPLATE
 from agent_sandbox.utils.cli import claude_cli_env, demote_to_claude
 
 from .feedback import run_feedback_loops
-from .git import commit_changes, init_git
+from .git import (
+    commit_changes,
+    configure_remote,
+    get_authenticated_url,
+    init_git,
+    push_to_remote,
+)
 from .prd import (
     all_tasks_complete,
     get_next_task,
@@ -117,6 +123,50 @@ def run_cli(
         return str(e), 1
 
 
+def _handle_push_on_complete(
+    workspace: Path,
+    push_on_complete: bool,
+    remote_url: str | None,
+    target_branch: str,
+    force_push: bool,
+) -> tuple[bool, str | None, str | None]:
+    """Handle pushing to remote after completion.
+
+    Args:
+        workspace: Path to the workspace directory.
+        push_on_complete: Whether push was requested.
+        remote_url: The remote repository URL.
+        target_branch: Branch name to push to.
+        force_push: Whether to force push.
+
+    Returns:
+        Tuple of (pushed, pushed_to, push_error).
+    """
+    if not push_on_complete or not remote_url:
+        return False, None, None
+
+    import os
+
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return False, None, "GITHUB_TOKEN not set in environment"
+
+    try:
+        auth_url = get_authenticated_url(remote_url, token)
+        configure_remote(workspace, auth_url)
+        push_to_remote(workspace, branch=target_branch, force=force_push)
+        return True, target_branch, None
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr or "")
+        # Sanitize stderr to remove any token that might have leaked
+        if token and token in stderr:
+            stderr = stderr.replace(token, "[REDACTED]")
+        # Never log auth_url - it contains the token
+        return False, None, f"Git push failed: {stderr}"
+    except Exception as e:
+        return False, None, str(e)
+
+
 def run_ralph_loop(
     job_id: str,
     prd: Prd,
@@ -131,6 +181,12 @@ def run_ralph_loop(
     feedback_timeout: int = 120,
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
+    # Push options
+    push_on_complete: bool = False,
+    remote_url: str | None = None,
+    target_branch: str = "ralph-output",
+    force_push: bool = False,
+    # Internal params
     _start_iteration: int = 1,
     _prior_results: list[IterationResult] | None = None,
     _skip_workspace_init: bool = False,
@@ -151,6 +207,10 @@ def run_ralph_loop(
         feedback_timeout: Timeout for feedback commands.
         auto_commit: Whether to auto-commit after each successful iteration.
         max_consecutive_failures: Stop after this many consecutive CLI failures.
+        push_on_complete: Push commits to remote after successful completion.
+        remote_url: GitHub repository URL for push operations.
+        target_branch: Branch name to push to (default: ralph-output).
+        force_push: Whether to force push (use with caution).
         _start_iteration: Internal - iteration to start from (for resume).
         _prior_results: Internal - results from prior iterations (for resume).
         _skip_workspace_init: Internal - skip workspace initialization (for resume).
@@ -223,6 +283,12 @@ def run_ralph_loop(
         if all_tasks_complete(current_prd):
             tasks_completed = len([t for t in current_prd.userStories if t.passes])
             tasks_total = len(current_prd.userStories)
+
+            # Handle push
+            pushed, pushed_to, push_error = _handle_push_on_complete(
+                workspace, push_on_complete, remote_url, target_branch, force_push
+            )
+
             write_status(
                 workspace,
                 status=RalphLoopStatus.COMPLETE.value,
@@ -242,6 +308,9 @@ def run_ralph_loop(
                 iteration_results=iteration_results,
                 final_prd=current_prd,
                 error=None,
+                pushed=pushed,
+                pushed_to=pushed_to,
+                push_error=push_error,
             )
 
         # Get next task
@@ -330,6 +399,12 @@ def run_ralph_loop(
             current_prd = read_prd(workspace)
             tasks_completed = len([t for t in current_prd.userStories if t.passes])
             tasks_total = len(current_prd.userStories)
+
+            # Handle push
+            pushed, pushed_to, push_error = _handle_push_on_complete(
+                workspace, push_on_complete, remote_url, target_branch, force_push
+            )
+
             write_status(
                 workspace,
                 status=RalphLoopStatus.COMPLETE.value,
@@ -349,6 +424,9 @@ def run_ralph_loop(
                 iteration_results=iteration_results,
                 final_prd=current_prd,
                 error=None,
+                pushed=pushed,
+                pushed_to=pushed_to,
+                push_error=push_error,
             )
 
         # Verify task completion - check if agent updated prd.json
@@ -400,6 +478,12 @@ def run_ralph_loop(
     current_prd = read_prd(workspace)
     tasks_completed = len([t for t in current_prd.userStories if t.passes])
     tasks_total = len(current_prd.userStories)
+
+    # Handle push
+    pushed, pushed_to, push_error = _handle_push_on_complete(
+        workspace, push_on_complete, remote_url, target_branch, force_push
+    )
+
     write_status(
         workspace,
         status=RalphLoopStatus.MAX_ITERATIONS.value,
@@ -419,6 +503,9 @@ def run_ralph_loop(
         iteration_results=iteration_results,
         final_prd=current_prd,
         error=None,
+        pushed=pushed,
+        pushed_to=pushed_to,
+        push_error=push_error,
     )
 
 
@@ -481,6 +568,12 @@ def run_ralph_loop_streaming(
     feedback_timeout: int = 120,
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
+    # Push options
+    push_on_complete: bool = False,
+    remote_url: str | None = None,
+    target_branch: str = "ralph-output",
+    force_push: bool = False,
+    # Resume options
     start_iteration: int = 1,
     prior_results: list[IterationResult] | None = None,
     skip_workspace_init: bool = False,
@@ -504,6 +597,10 @@ def run_ralph_loop_streaming(
         feedback_timeout: Timeout for feedback commands.
         auto_commit: Whether to auto-commit after each successful iteration.
         max_consecutive_failures: Stop after this many consecutive CLI failures.
+        push_on_complete: Push commits to remote after successful completion.
+        remote_url: GitHub repository URL for push operations.
+        target_branch: Branch name to push to (default: ralph-output).
+        force_push: Whether to force push (use with caution).
         start_iteration: Iteration to start from (for resume).
         prior_results: Results from prior iterations (for resume).
         skip_workspace_init: Skip workspace initialization (for resume).
@@ -607,6 +704,12 @@ def run_ralph_loop_streaming(
         if all_tasks_complete(current_prd):
             tasks_completed = len([t for t in current_prd.userStories if t.passes])
             tasks_total = len(current_prd.userStories)
+
+            # Handle push
+            pushed, pushed_to, push_error = _handle_push_on_complete(
+                workspace, push_on_complete, remote_url, target_branch, force_push
+            )
+
             write_status(
                 workspace,
                 status=RalphLoopStatus.COMPLETE.value,
@@ -627,6 +730,9 @@ def run_ralph_loop_streaming(
                 iteration_results=iteration_results,
                 final_prd=current_prd,
                 error=None,
+                pushed=pushed,
+                pushed_to=pushed_to,
+                push_error=push_error,
             )
 
             yield RalphStreamEvent(
@@ -760,6 +866,12 @@ def run_ralph_loop_streaming(
             current_prd = read_prd(workspace)
             tasks_completed = len([t for t in current_prd.userStories if t.passes])
             tasks_total = len(current_prd.userStories)
+
+            # Handle push
+            pushed, pushed_to, push_error = _handle_push_on_complete(
+                workspace, push_on_complete, remote_url, target_branch, force_push
+            )
+
             write_status(
                 workspace,
                 status=RalphLoopStatus.COMPLETE.value,
@@ -780,6 +892,9 @@ def run_ralph_loop_streaming(
                 iteration_results=iteration_results,
                 final_prd=current_prd,
                 error=None,
+                pushed=pushed,
+                pushed_to=pushed_to,
+                push_error=push_error,
             )
 
             yield RalphStreamEvent(
@@ -854,6 +969,12 @@ def run_ralph_loop_streaming(
     current_prd = read_prd(workspace)
     tasks_completed = len([t for t in current_prd.userStories if t.passes])
     tasks_total = len(current_prd.userStories)
+
+    # Handle push
+    pushed, pushed_to, push_error = _handle_push_on_complete(
+        workspace, push_on_complete, remote_url, target_branch, force_push
+    )
+
     write_status(
         workspace,
         status=RalphLoopStatus.MAX_ITERATIONS.value,
@@ -874,6 +995,9 @@ def run_ralph_loop_streaming(
         iteration_results=iteration_results,
         final_prd=current_prd,
         error=None,
+        pushed=pushed,
+        pushed_to=pushed_to,
+        push_error=push_error,
     )
 
     yield RalphStreamEvent(
@@ -900,6 +1024,11 @@ def resume_ralph_loop(
     feedback_timeout: int = 120,
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
+    # Push options
+    push_on_complete: bool = False,
+    remote_url: str | None = None,
+    target_branch: str = "ralph-output",
+    force_push: bool = False,
 ) -> RalphLoopResult:
     """Resume a paused Ralph loop from a checkpoint.
 
@@ -916,6 +1045,10 @@ def resume_ralph_loop(
         feedback_timeout: Timeout for feedback commands.
         auto_commit: Whether to auto-commit.
         max_consecutive_failures: Stop after this many consecutive CLI failures.
+        push_on_complete: Push commits to remote after successful completion.
+        remote_url: GitHub repository URL for push operations.
+        target_branch: Branch name to push to (default: ralph-output).
+        force_push: Whether to force push (use with caution).
 
     Returns:
         RalphLoopResult with final status.
@@ -952,6 +1085,10 @@ def resume_ralph_loop(
         feedback_timeout=feedback_timeout,
         auto_commit=auto_commit,
         max_consecutive_failures=max_consecutive_failures,
+        push_on_complete=push_on_complete,
+        remote_url=remote_url,
+        target_branch=target_branch,
+        force_push=force_push,
         _start_iteration=checkpoint.iteration,
         _prior_results=prior_results,
         _skip_workspace_init=True,

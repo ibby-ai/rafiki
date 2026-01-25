@@ -1,15 +1,12 @@
 """Git operations for Ralph loops.
 
-Handles git initialization, commits, and log retrieval.
-
-TODO: Add remote push support. See .agent/git-remote-push-guide.md for
-implementation details including authentication options (SSH keys, PATs,
-GitHub Apps), secret management, and branch strategy considerations.
+Handles git initialization, commits, log retrieval, and remote push operations.
 """
 
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from agent_sandbox.utils.cli import claude_cli_env, demote_to_claude
 
@@ -130,3 +127,93 @@ def get_git_log(workspace: Path, n: int = 10) -> str:
         **_git_subprocess_kwargs(),
     )
     return result.stdout
+
+
+def get_authenticated_url(repo_url: str, token: str) -> str:
+    """Convert GitHub HTTPS URL to use token authentication.
+
+    Example:
+        https://github.com/user/repo.git
+        -> https://x-access-token:TOKEN@github.com/user/repo.git
+
+    Args:
+        repo_url: The GitHub repository HTTPS URL.
+        token: The GitHub Personal Access Token.
+
+    Returns:
+        URL with embedded token authentication.
+
+    Raises:
+        ValueError: If the URL does not use HTTPS.
+    """
+    parsed = urlparse(repo_url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Remote URL must use HTTPS, got: {parsed.scheme}")
+    # Use x-access-token format for GitHub PAT
+    auth_netloc = f"x-access-token:{token}@{parsed.netloc}"
+    return urlunparse(parsed._replace(netloc=auth_netloc))
+
+
+def configure_remote(workspace: Path, remote_url: str, remote_name: str = "origin") -> None:
+    """Add or update a git remote.
+
+    Args:
+        workspace: Path to the workspace directory.
+        remote_url: The remote URL to set.
+        remote_name: Name of the remote (default: "origin").
+    """
+    # Check if remote exists
+    result = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        **_git_subprocess_kwargs(),
+    )
+    if result.returncode == 0:
+        # Update existing remote
+        subprocess.run(
+            ["git", "remote", "set-url", remote_name, remote_url],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            **_git_subprocess_kwargs(),
+        )
+    else:
+        # Add new remote
+        subprocess.run(
+            ["git", "remote", "add", remote_name, remote_url],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            **_git_subprocess_kwargs(),
+        )
+
+
+def push_to_remote(
+    workspace: Path,
+    branch: str = "main",
+    remote_name: str = "origin",
+    force: bool = False,
+) -> None:
+    """Push commits to remote.
+
+    Args:
+        workspace: Path to the workspace directory.
+        branch: Branch name to push (default: "main").
+        remote_name: Name of the remote (default: "origin").
+        force: Whether to force push (default: False).
+
+    Raises:
+        subprocess.CalledProcessError: If the push fails.
+    """
+    cmd = ["git", "push", remote_name, branch]
+    if force:
+        cmd.insert(2, "--force")
+    subprocess.run(
+        cmd,
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        **_git_subprocess_kwargs(),
+    )

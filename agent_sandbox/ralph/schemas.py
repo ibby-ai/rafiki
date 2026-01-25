@@ -83,6 +83,10 @@ class RalphLoopResult(BaseModel):
     iteration_results: list[IterationResult] = Field(default_factory=list)
     final_prd: Prd | None = None
     error: str | None = None
+    # Push result fields
+    pushed: bool = False
+    pushed_to: str | None = None
+    push_error: str | None = None
 
 
 class RalphStartRequest(BaseModel):
@@ -103,6 +107,23 @@ class RalphStartRequest(BaseModel):
     feedback_timeout: int = Field(default=120, ge=10, le=600)
     auto_commit: bool = True
     max_consecutive_failures: int = Field(default=3, ge=1, le=10)
+    # Remote push options
+    push_on_complete: bool = Field(
+        default=False,
+        description="Push commits to remote repository after successful completion",
+    )
+    remote_url: str | None = Field(
+        default=None,
+        description="GitHub repository URL (e.g., https://github.com/user/repo.git)",
+    )
+    target_branch: str = Field(
+        default="ralph-output",
+        description="Branch name to push to",
+    )
+    force_push: bool = Field(
+        default=False,
+        description="Force push (use with caution)",
+    )
 
 
 class RalphExecuteRequest(BaseModel):
@@ -126,6 +147,23 @@ class RalphExecuteRequest(BaseModel):
     resume_checkpoint: dict | None = Field(
         default=None,
         description="Checkpoint data from a paused loop for resuming execution",
+    )
+    # Remote push options
+    push_on_complete: bool = Field(
+        default=False,
+        description="Push commits to remote repository after successful completion",
+    )
+    remote_url: str | None = Field(
+        default=None,
+        description="GitHub repository URL (e.g., https://github.com/user/repo.git)",
+    )
+    target_branch: str = Field(
+        default="ralph-output",
+        description="Branch name to push to",
+    )
+    force_push: bool = Field(
+        default=False,
+        description="Force push (use with caution)",
     )
 
 

@@ -205,3 +205,80 @@ workspace_source = WorkspaceSource(
 ```
 
 The cloned repository's `.git` directory is preserved, and `init_git()` skips re-initialization when it detects an existing git repo.
+
+## GitHub Remote Push
+
+Ralph can push completed work to a remote GitHub repository after successful completion.
+
+### Setup: Create Modal Secret
+
+```bash
+modal secret create github-token GITHUB_TOKEN=github_pat_xxxxx
+```
+
+### Token Requirements
+
+**Use a Fine-grained Personal Access Token (recommended):**
+- Created at: https://github.com/settings/personal-access-tokens/new
+- Repository access: "Only select repositories" → select target repo(s)
+- Permissions: Repository permissions → Contents → Read and write
+- Fine-grained PATs are scoped to specific repos, limiting blast radius if leaked
+
+**Classic PATs also work** but grant access to ALL repos the user can access (less secure).
+
+### Request Fields
+
+```python
+push_on_complete: bool = False  # Enable push after completion
+remote_url: str | None = None   # e.g., "https://github.com/user/repo.git"
+target_branch: str = "ralph-output"  # Branch to push to
+force_push: bool = False  # Use with caution
+```
+
+### Response Fields
+
+```python
+pushed: bool = False  # Whether push succeeded
+pushed_to: str | None = None  # Branch name if successful
+push_error: str | None = None  # Error message if failed
+```
+
+### How It Works
+
+1. Ralph clones source repo (if using `git_clone` workspace source)
+2. Creates commits for each completed task
+3. On successful completion, `configure_remote()` sets/updates the "origin" remote with the authenticated URL
+4. Pushes to `target_branch` (default: `ralph-output`)
+
+### Security Notes
+
+- **HTTPS only**: SSH URLs are rejected (no SSH key management in sandbox)
+- **Token never logged**: Authenticated URLs are never written to logs
+- **Token redaction**: If token appears in stderr, it's replaced with `[REDACTED]`
+
+### Example Usage
+
+```bash
+curl -X POST 'https://<url>/ralph/start' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prd": {"name": "test", "userStories": [...]},
+    "workspace_source": {
+      "type": "git_clone",
+      "git_url": "https://github.com/user/repo.git"
+    },
+    "push_on_complete": true,
+    "remote_url": "https://github.com/user/repo.git",
+    "target_branch": "ralph-output"
+  }'
+```
+
+### Push Only Happens On
+
+- `RalphLoopStatus.COMPLETE` (all tasks done)
+- `RalphLoopStatus.COMPLETE` (STOP_SIGNAL detected)
+- `RalphLoopStatus.MAX_ITERATIONS` (ran out of iterations)
+
+Push is **NOT** attempted on:
+- `RalphLoopStatus.PAUSED` (incomplete work)
+- `RalphLoopStatus.FAILED` (consecutive failures)

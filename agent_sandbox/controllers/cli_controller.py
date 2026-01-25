@@ -355,6 +355,10 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
                 feedback_timeout=body.feedback_timeout,
                 auto_commit=body.auto_commit,
                 max_consecutive_failures=body.max_consecutive_failures,
+                push_on_complete=body.push_on_complete,
+                remote_url=body.remote_url,
+                target_branch=body.target_branch,
+                force_push=body.force_push,
             )
         else:
             return run_ralph_loop(
@@ -371,6 +375,10 @@ async def execute_ralph(body: RalphExecuteRequest, request: Request) -> JSONResp
                 feedback_timeout=body.feedback_timeout,
                 auto_commit=body.auto_commit,
                 max_consecutive_failures=body.max_consecutive_failures,
+                push_on_complete=body.push_on_complete,
+                remote_url=body.remote_url,
+                target_branch=body.target_branch,
+                force_push=body.force_push,
             )
 
     try:
@@ -454,6 +462,10 @@ async def execute_ralph_stream(body: RalphExecuteRequest, request: Request):
                 feedback_timeout=body.feedback_timeout,
                 auto_commit=body.auto_commit,
                 max_consecutive_failures=body.max_consecutive_failures,
+                push_on_complete=body.push_on_complete,
+                remote_url=body.remote_url,
+                target_branch=body.target_branch,
+                force_push=body.force_push,
             )
 
             # Iterate through all events

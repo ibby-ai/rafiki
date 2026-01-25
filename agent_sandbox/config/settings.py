@@ -481,6 +481,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # GitHub push settings
+    github_token_secret_name: str = Field(
+        default="github-token",
+        description=(
+            "Modal secret name that provides GITHUB_TOKEN for push operations. "
+            "Create with: modal secret create github-token GITHUB_TOKEN=github_pat_xxx. "
+            "Recommended: Use a fine-grained PAT (https://github.com/settings/personal-access-tokens/new) "
+            "scoped to specific repositories with 'Contents: Read and write' permission only."
+        ),
+    )
+    enable_github_push: bool = Field(
+        default=True,
+        description="Enable GitHub push operations in Ralph loops",
+    )
+
     # Ralph iteration snapshot settings (rollback support)
     ralph_iteration_snapshot_store_name: str = Field(
         default="ralph-iteration-snapshots",
@@ -691,6 +706,14 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
             modal.Secret.from_name(
                 settings.modal_auth_secret_name,
                 required_keys=["SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET"],
+            )
+        )
+
+    if settings.enable_github_push:
+        secrets.append(
+            modal.Secret.from_name(
+                settings.github_token_secret_name,
+                required_keys=["GITHUB_TOKEN"],
             )
         )
 
