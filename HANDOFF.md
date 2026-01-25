@@ -201,6 +201,124 @@ All 136 Ralph tests pass after implementation.
 
 ---
 
+## Session Update (2026-01-25) - Ralph Push Feature Testing & Bug Fixes
+
+### Summary
+
+Tested the Ralph GitHub Push feature end-to-end using the test plan. Discovered and fixed four bugs that prevented push from working in production.
+
+### Test Scenario
+
+- **Source Repo**: `https://github.com/Saidiibrahim/maze-escape.git`
+- **Target Branch**: `ralph-test`
+- **Task**: Create CHANGELOG.md documenting major features
+- **Endpoint**: `POST /ralph/start` with `push_on_complete: true`
+
+### Issues Discovered & Fixed
+
+#### Issue 1: Schema Validation Error (422)
+
+**Symptom**: Request rejected with "field required" error.
+
+**Cause**: `PrdItem` schema requires a `category` field that wasn't documented in the test plan.
+
+**Fix**: Added `"category": "functional"` to test request body.
+
+#### Issue 2: Git Commit Exit Code 128
+
+**Symptom**: Ralph loop failed at commit step with exit code 128.
+
+**Cause**: `init_git()` in `agent_sandbox/ralph/git.py` only configured user identity when creating a new `.git` directory. For cloned repos (which already have `.git`), user identity was never set.
+
+**Fix**: Modified `init_git()` to always configure user identity after checking for git init:
+
+```python
+def init_git(workspace: Path) -> None:
+    # Only run git init if not already a git repo
+    git_dir = workspace / ".git"
+    if not git_dir.exists():
+        subprocess.run(["git", "init"], cwd=workspace, ...)
+
+    # Always configure user identity for commits (needed for both new and cloned repos)
+    subprocess.run(["git", "config", "user.email", "ibrahim.aka.ajax@gmail.com"], cwd=workspace, ...)
+    subprocess.run(["git", "config", "user.name", "Ibrahim Saidi"], cwd=workspace, ...)
+```
+
+#### Issue 3: Push Parameters Not Passed to Ralph Loop
+
+**Symptom**: Ralph completed tasks but `pushed: false` with no error message.
+
+**Cause**: `/ralph/start` endpoint in `agent_sandbox/app.py` wasn't passing push parameters (`push_on_complete`, `remote_url`, `target_branch`, `force_push`, `first_iteration_timeout`) to `run_ralph_remote.spawn()`.
+
+**Fix**: Updated `run_ralph_remote()` function signature and `/ralph/start` endpoint to include all push parameters:
+
+```python
+# In run_ralph_remote() signature
+push_on_complete: bool = False,
+remote_url: str | None = None,
+target_branch: str = "ralph-output",
+force_push: bool = False,
+
+# In /ralph/start endpoint spawn call
+call = run_ralph_remote.spawn(
+    ...
+    push_on_complete=body.push_on_complete,
+    remote_url=body.remote_url,
+    target_branch=body.target_branch,
+    force_push=body.force_push,
+)
+```
+
+#### Issue 4: Git Push Refspec Error
+
+**Symptom**: Push failed with `error: src refspec ralph-test does not match any`.
+
+**Cause**: `push_to_remote()` used `git push origin ralph-test` which requires a local branch named `ralph-test`. Since work was done on `main` (from the clone), no such local branch existed.
+
+**Fix**: Changed to use `HEAD:refs/heads/{branch}` refspec format which pushes current HEAD to the remote branch regardless of local branch name:
+
+```python
+def push_to_remote(workspace: Path, branch: str = "main", ...) -> None:
+    # Use HEAD:branch to push current HEAD to the specified remote branch
+    refspec = f"HEAD:refs/heads/{branch}"
+    cmd = ["git", "push", remote_name, refspec]
+    ...
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `agent_sandbox/ralph/git.py` | Fixed `init_git()` to always configure user identity; fixed `push_to_remote()` refspec format |
+| `agent_sandbox/app.py` | Added push parameters to `run_ralph_remote()` and `/ralph/start` endpoint |
+| `agent_sandbox/deploy.py` | Added cache-busting timestamp to force image rebuild |
+
+### Modal Image Caching Note
+
+Modal caches container images aggressively. When testing changes that affect code inside the sandbox (like git.py), `modal serve` hot-reload may not pick up changes. Solutions:
+
+1. Add a cache-busting comment to `deploy.py` (e.g., timestamp in docstring)
+2. Use `modal deploy -m agent_sandbox.deploy` instead of `modal serve`
+
+### Verification Results
+
+| Check | Result |
+|-------|--------|
+| Ralph starts successfully | ✅ `status: "started"` with job_id and call_id |
+| Ralph completes task | ✅ `tasks_completed: 1`, `tasks_total: 1` |
+| Push succeeds | ✅ `pushed: true`, `pushed_to: "ralph-test"` |
+| No push errors | ✅ `push_error: null` |
+| Branch visible on GitHub | ✅ Commit `1781d3c6` on `ralph-test` branch |
+| Correct author | ✅ Ibrahim Saidi <ibrahim.aka.ajax@gmail.com> |
+
+### Commit
+
+```
+50b6ef7 fix(ralph): enable GitHub push after successful completion
+```
+
+---
+
 ## Session Update (2026-01-20) - Validation Matrix Test Fixes
 
 ### Summary
