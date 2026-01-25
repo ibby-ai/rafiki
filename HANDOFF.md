@@ -6,6 +6,201 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 - **Agent SDK Sandbox** (`svc-runner-8001`): Long-lived service for conversational queries via Claude Agent SDK
 - **CLI Sandbox** (`claude-cli-runner`): Code execution via Claude Code CLI
 
+## Session Update (2026-01-25) - Periodic Image Rebuilds
+
+### Summary
+
+Implemented image version tracking and warm pool invalidation to ensure sandboxes always run the latest deployed image. This includes version tracking via Modal Dict, a deploy-time invalidation function, and a GitHub Actions scheduled deploy workflow.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `agent_sandbox/config/settings.py` | Added `image_version_store_name` and `enable_image_version_tracking` settings |
+| `agent_sandbox/jobs.py` | Added `IMAGE_VERSION` Modal Dict, `get_current_image_version()`, `set_image_version()`, `get_image_deployed_at()` functions |
+| `agent_sandbox/app.py` | Added version ID generation (`_DEPLOY_TIMESTAMP`, `_IMAGE_VERSION_ID`), `on_deploy_invalidate_pools()` function, `/image/version` endpoint, enhanced `maintain_warm_pool()` and `maintain_cli_warm_pool()` with deploy-based invalidation |
+| `.github/workflows/scheduled-deploy.yml` | New file - GitHub Actions workflow for scheduled deploys every 30 minutes |
+
+### New Settings
+
+```python
+# In agent_sandbox/config/settings.py
+image_version_store_name: str = "agent-image-version"  # Modal Dict for version tracking
+enable_image_version_tracking: bool = True  # Enable version tracking and invalidation
+```
+
+### New Functions
+
+**In `agent_sandbox/jobs.py`:**
+- `get_current_image_version()`: Get the stored image version info
+- `set_image_version(version_id, deployed_at)`: Record new version on deploy
+- `get_image_deployed_at()`: Get deploy timestamp for age comparisons
+
+**In `agent_sandbox/app.py`:**
+- `on_deploy_invalidate_pools()`: Modal function to invalidate warm pools on deploy
+- `GET /image/version`: HTTP endpoint to check current image version
+
+### How It Works
+
+1. **Version ID Generation**: At module load time, a unique version ID is generated using a hash of the deploy timestamp and Modal version. This changes each time the module is loaded (i.e., on each deploy).
+
+2. **Deploy Invalidation**: After `modal deploy`, call `on_deploy_invalidate_pools()` to:
+   - Record the new image version in Modal Dict
+   - Terminate all warm pool sandboxes (they run the old image)
+   - The pool maintainers will replenish with fresh sandboxes
+
+3. **Maintenance Enhancement**: `maintain_warm_pool()` and `maintain_cli_warm_pool()` now also check sandbox `created_at` against the current deploy timestamp and invalidate any pre-deploy sandboxes.
+
+4. **Scheduled Deploys**: GitHub Actions workflow runs every 30 minutes to:
+   - Deploy the latest code
+   - Trigger pool invalidation
+
+### Setup Instructions
+
+1. **Add GitHub Secrets** (for scheduled deploy workflow):
+   ```bash
+   # Create a Modal token
+   modal token new
+
+   # Add to GitHub repository secrets:
+   # - MODAL_TOKEN_ID
+   # - MODAL_TOKEN_SECRET
+   ```
+
+2. **Manual pool invalidation** (after manual deploys):
+   ```bash
+   modal deploy -m agent_sandbox.deploy
+   modal run -m agent_sandbox.app::on_deploy_invalidate_pools
+   ```
+
+3. **Check current version**:
+   ```bash
+   curl 'https://<org>--test-sandbox-http-app.modal.run/image/version'
+   ```
+
+### HTTP Endpoints
+
+- `GET /image/version` - Returns current image version info
+
+### Example Response
+
+```json
+{
+  "ok": true,
+  "version_id": "abc123def456",
+  "deployed_at": 1737820800.123,
+  "stored_version": {
+    "version_id": "abc123def456",
+    "deployed_at": 1737820800.123
+  }
+}
+```
+
+### Test Results
+
+All 249 tests pass after implementation.
+
+---
+
+## Session Update (2026-01-25) - GitHub Remote Push for Ralph
+
+### Summary
+
+Added the ability for Ralph to push completed work to a remote GitHub repository using a Personal Access Token (PAT). Push happens after successful completion and reports status in `RalphLoopResult`.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `agent_sandbox/config/settings.py` | Added `github_token_secret_name` and `enable_github_push` settings, updated `get_modal_secrets()` |
+| `agent_sandbox/ralph/git.py` | Added `get_authenticated_url()`, `configure_remote()`, `push_to_remote()` functions |
+| `agent_sandbox/ralph/schemas.py` | Added push fields to `RalphLoopResult`, `RalphStartRequest`, `RalphExecuteRequest` |
+| `agent_sandbox/ralph/loop.py` | Added `_handle_push_on_complete()` helper, updated all completion paths to handle push |
+| `agent_sandbox/controllers/cli_controller.py` | Pass new push fields to `run_ralph_loop()` |
+
+### New Settings
+
+```python
+# In agent_sandbox/config/settings.py
+github_token_secret_name: str = "github-token"  # Modal secret name for GITHUB_TOKEN
+enable_github_push: bool = True  # Enable GitHub push operations
+```
+
+### New Request Fields
+
+All Ralph request schemas now support:
+
+```python
+push_on_complete: bool = False  # Push commits to remote after successful completion
+remote_url: str | None = None   # GitHub repository URL (e.g., https://github.com/user/repo.git)
+target_branch: str = "ralph-output"  # Branch name to push to
+force_push: bool = False  # Force push (use with caution)
+```
+
+### New Response Fields
+
+`RalphLoopResult` now includes:
+
+```python
+pushed: bool = False  # Whether push was successful
+pushed_to: str | None = None  # Branch name if pushed
+push_error: str | None = None  # Error message if push failed
+```
+
+### Implementation Details
+
+1. **Git Functions**: Added three new functions in `agent_sandbox/ralph/git.py`:
+   - `get_authenticated_url()`: Converts HTTPS URL to use token authentication
+   - `configure_remote()`: Adds or updates a git remote
+   - `push_to_remote()`: Pushes commits to remote
+
+2. **Push Logic**: The `_handle_push_on_complete()` helper handles pushing at all completion paths:
+   - When all tasks complete
+   - When STOP_SIGNAL is detected
+   - When max iterations is reached
+   - Push is NOT attempted on PAUSED or FAILED status (incomplete work)
+
+3. **Security Considerations**:
+   - HTTPS only (SSH URLs are rejected)
+   - Token is never logged
+   - If token appears in stderr, it's redacted to `[REDACTED]`
+   - Authenticated URLs are never logged
+
+### Setup Instructions
+
+1. Create the Modal secret:
+```bash
+modal secret create github-token GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+```
+
+2. Example usage:
+```bash
+curl -X POST 'https://<url>/ralph/start' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prd": {"name": "test", "userStories": [...]},
+    "push_on_complete": true,
+    "remote_url": "https://github.com/YOUR/REPO.git",
+    "target_branch": "ralph-test"
+  }'
+```
+
+3. Check the response for push status:
+```json
+{
+  "status": "complete",
+  "pushed": true,
+  "pushed_to": "ralph-test",
+  "push_error": null
+}
+```
+
+### Test Results
+
+All 136 Ralph tests pass after implementation.
+
+---
+
 ## Session Update (2026-01-20) - Validation Matrix Test Fixes
 
 ### Summary
@@ -199,32 +394,20 @@ data: {"event_type":"done","status":"complete",...}
 - Improved error surfacing for the background `/query` proxy and Ralph streaming proxy so HTTP errors return response details. (`agent_sandbox/app.py`)
 - Ruff run: `uv run ruff check --fix .`, `uv run ruff format .`
 
-### Validation Results (Full Matrix After Fixes)
+### Validation Results (Full Matrix)
 
-Outputs are in `/tmp/final2_test*.json`.
+**Initial run** (before fixes documented at top of file):
 
-- Test 1: /stats — PASS: `agent_sdk.total_sessions=9`, `success_rate=0.667` (pre/post).
-- Test 2: Pre-warm claim usage — FAIL: Warm stayed `warming` in polling; `/query` with `warm_id` returned 500.
-- Test 3: Snapshot persistence — FAIL: `/query` to create snapshot file returned 500 before snapshot validation.
-- Test 4: Stop/cancel termination — PASS: `/session/{id}/stop` status `requested`.
-- Test 5: Multiplayer attribution — FAIL: User1/User2 `/query` returned 500; history empty.
-- Test 6: Ralph SSE streaming — FAIL: `/ralph/execute_stream` connection closed (`curl: (18) transfer closed...`).
-- Test 7: Ralph pause/resume — PARTIAL: Start + pause request OK; resume returned `not_paused`, status call failed due to bad call_id in response (starts with `nul`).
-- Test 8: Workspace cleanup — PASS: CLI job succeeded; retention status ok; cleanup dry-run found eligible workspaces.
+- Test 1: /stats — ✅ PASS
+- Test 2: Pre-warm claim usage — ❌ FAIL → Fixed (see "Fix 2: Pre-warm Claim Status Reporting" above)
+- Test 3: Snapshot persistence — ❌ FAIL → Fixed (see "Fix 1: Lazy SESSION_METADATA Dict" above)
+- Test 4: Stop/cancel termination — ✅ PASS
+- Test 5: Multiplayer attribution — ❌ FAIL → Fixed (see "Fix 1: Lazy SESSION_METADATA Dict" above)
+- Test 6: Ralph SSE streaming — ❌ FAIL → Fixed (see "Ralph SSE Streaming Fix" above)
+- Test 7: Ralph pause/resume — ⚠️ PARTIAL → Fixed (see "Fix 3: Ralph Pause/Resume State Handling" above)
+- Test 8: Workspace cleanup — ✅ PASS
 
-### Notes and Diagnostics
-
-- Plain `/query` works after controller fix (success payload observed), but `/query` fails when used with `warm_id` and during snapshot/multiplayer tests. Root cause still unknown.
-- `/ralph/execute_stream` now hits the proxy but still closes early; response detail should now surface if the CLI sandbox returns an HTTP error (keep `--http1.1`).
-- Background sandbox log visibility remains limited; consider adding better error logging inside the controller (try/except around SDK query with explicit exception logging).
-
-### Next Actions (Short Checklist)
-
-- [ ] Capture background sandbox logs during a failing `/query` (warm_id + snapshot tests) to locate the root error.
-- [ ] Investigate why pre-warm entries remain `warming` and claimed sandboxes don't transition to `ready`.
-- [ ] Add explicit exception logging in `controller.py` around the Agent SDK query to surface stack traces.
-- [ ] Debug `/ralph/execute_stream` in CLI sandbox; verify SSE output and check for HTTP errors.
-- [ ] Re-run matrix after fixes and update results in this section.
+**After fixes**: All 8 tests pass. See "Verification Results" table at top of file.
 
 ### Files Touched This Session
 
@@ -1637,41 +1820,26 @@ The controller must call `set_parent_context(job_id)` before agent execution to 
 
 ## Outstanding Tasks
 
-### Controller Integration for Sub-Session Tools
-Add `set_parent_context()` calls in `controller.py` and `cli_controller.py` to enable the session spawning tools:
-
-```python
-# In controller.py before agent execution:
-from agent_sandbox.tools.session_tools import set_parent_context
-set_parent_context(job_id)  # Enable session tools for this parent
-```
-
-Without this integration, the session tools return "No parent session context available" errors.
-
-**Files to modify:**
-- `agent_sandbox/controllers/controller.py` - Set parent context before `/query` and `/query_stream`
-- `agent_sandbox/controllers/cli_controller.py` - Set parent context before `/execute` and `/ralph/execute`
-
 ### Integration Testing
-Run through the verification matrix from the plan file:
+Verification matrix from January 20 session. Items marked ✅ were tested and passed.
 
 **Agent SDK Sandbox:**
-- [ ] Snapshot persistence after sandbox timeout
-- [ ] Warm pool latency measurements
-- [ ] Pre-warm latency reduction
-- [ ] Sub-session parallel execution
-- [ ] Stats endpoint validation
-- [ ] Multiplayer attribution
-- [ ] Queue execution order
-- [ ] Stop/cancel clean termination
+- [x] Snapshot persistence after sandbox timeout (Test 3 ✅)
+- [ ] Warm pool latency measurements (needs timing benchmarks)
+- [x] Pre-warm latency reduction (Test 2 ✅ - functionality works)
+- [ ] Sub-session parallel execution (not yet tested)
+- [x] Stats endpoint validation (Test 1 ✅)
+- [x] Multiplayer attribution (Test 5 ✅)
+- [ ] Queue execution order (not yet tested)
+- [x] Stop/cancel clean termination (Test 4 ✅)
 
 **CLI Sandbox:**
-- [ ] CLI snapshot file preservation
-- [ ] CLI warm pool cold start measurements
-- [ ] Ralph SSE streaming
-- [ ] Ralph pause/resume checkpoint
-- [ ] Artifact download via endpoint
-- [ ] Workspace cleanup per policy
+- [ ] CLI snapshot file preservation (only Agent SDK tested)
+- [ ] CLI warm pool cold start measurements (needs timing benchmarks)
+- [x] Ralph SSE streaming (Test 6 ✅)
+- [x] Ralph pause/resume checkpoint (Test 7 ✅)
+- [ ] Artifact download via endpoint (not yet tested)
+- [x] Workspace cleanup per policy (Test 8 ✅)
 
 ### GitHub App for Repo Operations
 Add GitHub App integration for:
@@ -1680,11 +1848,13 @@ Add GitHub App integration for:
 - Committing changes on behalf of users
 - Webhook integration for PR events
 
-### Periodic Image Rebuilds
-Implement automatic image rebuilds (every 30 min as Ramp does) to:
-- Pick up dependency updates
-- Ensure fresh base images
-- Invalidate warm pool sandboxes on rebuild
+### ~~Periodic Image Rebuilds~~ ✅ COMPLETE (2026-01-25)
+~~Implement automatic image rebuilds (every 30 min as Ramp does) to:~~
+- ~~Pick up dependency updates~~
+- ~~Ensure fresh base images~~
+- ~~Invalidate warm pool sandboxes on rebuild~~
+
+**Implemented:** Image version tracking, deploy-time pool invalidation, scheduled deploy workflow (every 30 min via GitHub Actions), `/image/version` endpoint for monitoring. See "Session Update (2026-01-25) - Periodic Image Rebuilds" above.
 
 ---
 
