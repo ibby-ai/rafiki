@@ -27,33 +27,34 @@ def _git_subprocess_kwargs() -> dict[str, object]:
 def init_git(workspace: Path) -> None:
     """Initialize git repo in workspace.
 
-    Skips initialization if the workspace is already a git repository
-    (e.g., from git_clone initialization).
+    Skips git init if the workspace is already a git repository
+    (e.g., from git_clone initialization), but always configures
+    user identity for making commits.
 
     Args:
         workspace: Path to the workspace directory.
     """
-    # Skip if already a git repo (e.g., from git_clone)
+    # Only run git init if not already a git repo
     git_dir = workspace / ".git"
-    if git_dir.exists():
-        return
+    if not git_dir.exists():
+        subprocess.run(
+            ["git", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            **_git_subprocess_kwargs(),
+        )
 
+    # Always configure user identity for commits (needed for both new and cloned repos)
     subprocess.run(
-        ["git", "init"],
+        ["git", "config", "user.email", "ibrahim.aka.ajax@gmail.com"],
         cwd=workspace,
         check=True,
         capture_output=True,
         **_git_subprocess_kwargs(),
     )
     subprocess.run(
-        ["git", "config", "user.email", "ralph@modal.local"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-        **_git_subprocess_kwargs(),
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Ralph Wiggum"],
+        ["git", "config", "user.name", "Ibrahim Saidi"],
         cwd=workspace,
         check=True,
         capture_output=True,
@@ -70,14 +71,20 @@ def commit_changes(workspace: Path, message: str) -> str | None:
 
     Returns:
         Short commit SHA (8 chars) if commit was made, None if nothing to commit.
+
+    Raises:
+        RuntimeError: If git commands fail, with the actual git error message.
     """
-    subprocess.run(
+    # Stage all files
+    result = subprocess.run(
         ["git", "add", "-A"],
         cwd=workspace,
-        check=True,
         capture_output=True,
+        text=True,
         **_git_subprocess_kwargs(),
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"git add failed: {result.stderr.strip() or result.stdout.strip()}")
 
     # Check if there are changes to commit
     result = subprocess.run(
@@ -90,13 +97,16 @@ def commit_changes(workspace: Path, message: str) -> str | None:
     if not result.stdout.strip():
         return None
 
-    subprocess.run(
+    # Commit changes
+    result = subprocess.run(
         ["git", "commit", "-m", message],
         cwd=workspace,
-        check=True,
         capture_output=True,
+        text=True,
         **_git_subprocess_kwargs(),
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"git commit failed: {result.stderr.strip() or result.stdout.strip()}")
 
     # Get commit SHA
     result = subprocess.run(
@@ -196,24 +206,40 @@ def push_to_remote(
     remote_name: str = "origin",
     force: bool = False,
 ) -> None:
-    """Push commits to remote.
+    """Push current HEAD to remote branch.
+
+    Pushes the current HEAD to the specified remote branch. This allows
+    pushing work done on any local branch (e.g., main) to a different
+    remote branch name (e.g., ralph-output).
 
     Args:
         workspace: Path to the workspace directory.
-        branch: Branch name to push (default: "main").
+        branch: Remote branch name to push to (default: "main").
         remote_name: Name of the remote (default: "origin").
         force: Whether to force push (default: False).
 
     Raises:
         subprocess.CalledProcessError: If the push fails.
     """
-    cmd = ["git", "push", remote_name, branch]
+    # Use HEAD:branch to push current HEAD to the specified remote branch
+    # This avoids requiring a local branch with the same name
+    refspec = f"HEAD:refs/heads/{branch}"
+    cmd = ["git", "push", remote_name, refspec]
     if force:
         cmd.insert(2, "--force")
-    subprocess.run(
+    result = subprocess.run(
         cmd,
         cwd=workspace,
-        check=True,
         capture_output=True,
+        text=True,
         **_git_subprocess_kwargs(),
     )
+    if result.returncode != 0:
+        # Include the command in the error for debugging
+        cmd_str = " ".join(cmd)
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd_str,
+            output=result.stdout,
+            stderr=f"[cmd: {cmd_str}] {result.stderr}",
+        )

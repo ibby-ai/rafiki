@@ -1896,11 +1896,17 @@ async def start_ralph(body: RalphStartRequest) -> RalphStartResponse:
         prompt_template=body.prompt_template,
         max_iterations=body.max_iterations,
         timeout_per_iteration=body.timeout_per_iteration,
+        first_iteration_timeout=body.first_iteration_timeout,
         allowed_tools=",".join(body.allowed_tools),
         feedback_commands=",".join(body.feedback_commands),
         feedback_timeout=body.feedback_timeout,
         auto_commit=body.auto_commit,
         max_consecutive_failures=body.max_consecutive_failures,
+        # Push options
+        push_on_complete=body.push_on_complete,
+        remote_url=body.remote_url,
+        target_branch=body.target_branch,
+        force_push=body.force_push,
     )
 
     call_id = _function_call_id(call)
@@ -5160,12 +5166,18 @@ def run_ralph_remote(
     prompt_template: str | None = None,
     max_iterations: int = 10,
     timeout_per_iteration: int = 300,
+    first_iteration_timeout: int | None = None,
     allowed_tools: str = "Read,Write,Bash,Glob,Grep",
     feedback_commands: str = "",
     feedback_timeout: int = 120,
     auto_commit: bool = True,
     max_consecutive_failures: int = 3,
     resume_checkpoint_json: str | None = None,
+    # Push options
+    push_on_complete: bool = False,
+    remote_url: str | None = None,
+    target_branch: str = "ralph-output",
+    force_push: bool = False,
 ) -> dict:
     """Run Ralph autonomous coding loop inside a dedicated Claude CLI sandbox.
 
@@ -5176,12 +5188,17 @@ def run_ralph_remote(
         prompt_template: Custom prompt template.
         max_iterations: Maximum iterations.
         timeout_per_iteration: CLI timeout per iteration.
+        first_iteration_timeout: Longer timeout for first iteration (cold start).
         allowed_tools: Comma-separated list of allowed CLI tools.
         feedback_commands: Comma-separated list of feedback commands.
         feedback_timeout: Timeout for feedback commands.
         auto_commit: Whether to auto-commit changes.
         max_consecutive_failures: Max failures before stopping.
         resume_checkpoint_json: JSON-serialized checkpoint for resuming a paused loop.
+        push_on_complete: Push commits to remote after successful completion.
+        remote_url: GitHub repository URL for push operations.
+        target_branch: Branch name to push to (default: ralph-output).
+        force_push: Whether to force push (use with caution).
     """
     normalized_job_id = normalize_job_id(job_id)
     if not normalized_job_id:
@@ -5201,11 +5218,17 @@ def run_ralph_remote(
         "prompt_template": prompt_template,
         "max_iterations": max_iterations,
         "timeout_per_iteration": timeout_per_iteration,
+        "first_iteration_timeout": first_iteration_timeout,
         "allowed_tools": tools_list,
         "feedback_commands": feedback_list,
         "feedback_timeout": feedback_timeout,
         "auto_commit": auto_commit,
         "max_consecutive_failures": max_consecutive_failures,
+        # Push options
+        "push_on_complete": push_on_complete,
+        "remote_url": remote_url,
+        "target_branch": target_branch,
+        "force_push": force_push,
     }
 
     # Add resume checkpoint if provided

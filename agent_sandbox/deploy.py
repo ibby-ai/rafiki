@@ -4,6 +4,8 @@ Deployment composition for the full application.
 This module serves as the **production deployment entry point** for the agent sandbox.
 Use `modal deploy -m agent_sandbox.deploy` to deploy the complete application.
 
+Build timestamp: 2026-01-25T09:15:00Z - push refspec fix
+
 Why a separate deploy.py?
 -------------------------
 Modal's `App.include()` method enables composing multiple apps into a single
