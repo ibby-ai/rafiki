@@ -25,12 +25,14 @@ Prerequisite for curl testing:
   `https://<org>--test-sandbox-http-app-dev.modal.run`.
 """
 
+import hashlib
 import inspect
 import json
 import logging
 import mimetypes
 import re
 import time
+import time as _time
 import urllib.error
 import urllib.request
 import uuid
@@ -68,9 +70,13 @@ from agent_sandbox.jobs import (
     generate_warm_id,
     get_cancellation_status,
     get_cli_job_snapshot,
+    get_cli_warm_pool_entries,
     get_cli_warm_pool_status,
+    # Image version tracking functions
+    get_current_image_version,
     get_expired_cli_pool_entries,
     get_expired_pool_entries,
+    get_image_deployed_at,
     get_job_record,
     get_job_status,
     get_multiplayer_status,
@@ -91,6 +97,7 @@ from agent_sandbox.jobs import (
     get_session_snapshot,
     get_session_users,
     get_stats,
+    get_warm_pool_entries,
     get_warm_pool_status,
     # Workspace retention functions
     get_workspace_metadata,
@@ -114,6 +121,7 @@ from agent_sandbox.jobs import (
     request_ralph_pause,
     resolve_job_artifact,
     revoke_session_user,
+    set_image_version,
     should_skip_job,
     should_snapshot_cli_job,
     should_snapshot_session,
@@ -188,6 +196,18 @@ from agent_sandbox.utils.cli import (
     maybe_chown_for_claude,
     require_claude_cli_auth,
 )
+
+# =============================================================================
+# Image Version Tracking
+# =============================================================================
+# Generate unique version ID at module load time (i.e., on each deploy).
+# This is used to track which image version sandboxes are running and
+# invalidate warm pools when a new image is deployed.
+
+_DEPLOY_TIMESTAMP = _time.time()
+_IMAGE_VERSION_ID = hashlib.sha256(f"{_DEPLOY_TIMESTAMP}:{modal.__version__}".encode()).hexdigest()[
+    :12
+]
 
 app = modal.App("test-sandbox")
 _settings = Settings()
@@ -2346,6 +2366,32 @@ async def cli_pool_status_endpoint():
     }
 
 
+@web_app.get("/image/version")
+async def get_image_version_endpoint():
+    """Return current image version info.
+
+    Provides visibility into which image version is currently deployed
+    and running. Useful for debugging and verifying deploys.
+
+    Returns:
+        - version_id: Short hash identifying this deploy
+        - deployed_at: Unix timestamp when this module was loaded
+        - stored_version: Last recorded version from deploy invalidation
+
+    Example:
+        ```
+        curl 'https://<org>--test-sandbox-http-app-dev.modal.run/image/version'
+        ```
+    """
+    stored_version = get_current_image_version()
+    return {
+        "ok": True,
+        "version_id": _IMAGE_VERSION_ID,
+        "deployed_at": _DEPLOY_TIMESTAMP,
+        "stored_version": stored_version,
+    }
+
+
 # =============================================================================
 # Pre-warm API Endpoints
 # =============================================================================
@@ -3593,6 +3639,30 @@ def maintain_warm_pool():
     if expired_count > 0:
         _logger.info("Expired old pool sandboxes", extra={"count": expired_count})
 
+    # Step 3b: Invalidate sandboxes created before current deploy
+    deploy_invalidated = 0
+    if _settings.enable_image_version_tracking:
+        current_deploy_time = get_image_deployed_at()
+        if current_deploy_time:
+            for entry in get_warm_pool_entries():
+                if entry.get("status") == "warm":
+                    created_at = entry.get("created_at", 0)
+                    if created_at < current_deploy_time:
+                        sandbox_id = entry.get("sandbox_id")
+                        if sandbox_id:
+                            try:
+                                sb = modal.Sandbox.from_id(sandbox_id)
+                                sb.terminate()
+                            except Exception:
+                                pass
+                            remove_from_pool(sandbox_id)
+                            deploy_invalidated += 1
+            if deploy_invalidated > 0:
+                _logger.info(
+                    "Invalidated pre-deploy pool sandboxes",
+                    extra={"count": deploy_invalidated},
+                )
+
     # Step 4: Replenish pool
     replenish_result = replenish_warm_pool.local()
 
@@ -3601,6 +3671,7 @@ def maintain_warm_pool():
         "status": "ok",
         "stale_removed": stale_removed,
         "expired_terminated": expired_count,
+        "deploy_invalidated": deploy_invalidated,
         "replenished": replenish_result.get("created", 0),
         "pool_warm": pool_status["warm"],
         "pool_claimed": pool_status["claimed"],
@@ -3798,6 +3869,30 @@ def maintain_cli_warm_pool():
     if expired_count > 0:
         _logger.info("Expired old CLI pool sandboxes", extra={"count": expired_count})
 
+    # Step 3b: Invalidate sandboxes created before current deploy
+    deploy_invalidated = 0
+    if _settings.enable_image_version_tracking:
+        current_deploy_time = get_image_deployed_at()
+        if current_deploy_time:
+            for entry in get_cli_warm_pool_entries():
+                if entry.get("status") == "warm":
+                    created_at = entry.get("created_at", 0)
+                    if created_at < current_deploy_time:
+                        sandbox_id = entry.get("sandbox_id")
+                        if sandbox_id:
+                            try:
+                                sb = modal.Sandbox.from_id(sandbox_id)
+                                sb.terminate()
+                            except Exception:
+                                pass
+                            remove_from_cli_pool(sandbox_id)
+                            deploy_invalidated += 1
+            if deploy_invalidated > 0:
+                _logger.info(
+                    "Invalidated pre-deploy CLI pool sandboxes",
+                    extra={"count": deploy_invalidated},
+                )
+
     # Step 4: Replenish pool
     replenish_result = replenish_cli_warm_pool.local()
 
@@ -3806,10 +3901,89 @@ def maintain_cli_warm_pool():
         "status": "ok",
         "stale_removed": stale_removed,
         "expired_terminated": expired_count,
+        "deploy_invalidated": deploy_invalidated,
         "replenished": replenish_result.get("created", 0),
         "pool_warm": pool_status["warm"],
         "pool_claimed": pool_status["claimed"],
         "pool_total": pool_status["total"],
+    }
+
+
+# =============================================================================
+# DEPLOY INVALIDATION
+# =============================================================================
+# This function records the new image version and invalidates warm pool
+# sandboxes running old images. Call it from CI/CD after `modal deploy`.
+
+
+@app.function(
+    secrets=agent_sdk_secrets,
+    timeout=120,
+)
+def on_deploy_invalidate_pools():
+    """Record new image version and invalidate old warm pool sandboxes.
+
+    Called after deploy to record the current image version and terminate
+    all warm pool sandboxes that were created with the previous image.
+    This ensures sandboxes always run the latest deployed code.
+
+    Should be invoked from CI/CD after `modal deploy` completes:
+        modal run -m agent_sandbox.app::on_deploy_invalidate_pools
+
+    Returns:
+        Dict with status, version_id, deployed_at, and invalidated count.
+
+    Example CI/CD step:
+        ```bash
+        modal deploy -m agent_sandbox.deploy
+        modal run -m agent_sandbox.app::on_deploy_invalidate_pools
+        ```
+    """
+    if not _settings.enable_image_version_tracking:
+        return {"status": "disabled", "version_id": _IMAGE_VERSION_ID}
+
+    # Record this deploy
+    set_image_version(_IMAGE_VERSION_ID, _DEPLOY_TIMESTAMP)
+
+    # Invalidate all existing warm pool entries (they run old image)
+    invalidated = 0
+
+    # Agent SDK pool
+    for entry in get_warm_pool_entries():
+        if entry.get("status") == "warm":
+            sandbox_id = entry.get("sandbox_id")
+            if sandbox_id:
+                try:
+                    sb = modal.Sandbox.from_id(sandbox_id)
+                    sb.terminate()
+                except Exception:
+                    pass
+                remove_from_pool(sandbox_id)
+                invalidated += 1
+
+    # CLI pool
+    for entry in get_cli_warm_pool_entries():
+        if entry.get("status") == "warm":
+            sandbox_id = entry.get("sandbox_id")
+            if sandbox_id:
+                try:
+                    sb = modal.Sandbox.from_id(sandbox_id)
+                    sb.terminate()
+                except Exception:
+                    pass
+                remove_from_cli_pool(sandbox_id)
+                invalidated += 1
+
+    _logger.info(
+        "Deploy invalidation complete",
+        extra={"version_id": _IMAGE_VERSION_ID, "invalidated": invalidated},
+    )
+
+    return {
+        "status": "ok",
+        "version_id": _IMAGE_VERSION_ID,
+        "deployed_at": _DEPLOY_TIMESTAMP,
+        "invalidated": invalidated,
     }
 
 

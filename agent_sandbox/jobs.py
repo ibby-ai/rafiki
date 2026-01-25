@@ -1959,6 +1959,86 @@ def cleanup_stale_cli_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
 
 
 # =============================================================================
+# Image Version Tracking
+# =============================================================================
+# These functions track deployed image versions to enable warm pool invalidation
+# when a new image is deployed. On each deploy, the image version is recorded
+# and existing warm pool sandboxes running old images are terminated.
+#
+# Version Entry Structure:
+# {
+#     "version_id": str,           # Short hash identifying this deploy
+#     "deployed_at": float,        # Unix timestamp when deployed
+# }
+# =============================================================================
+
+IMAGE_VERSION = modal.Dict.from_name(_settings.image_version_store_name, create_if_missing=True)
+
+
+def get_current_image_version() -> dict[str, Any] | None:
+    """Get the current deployed image version info.
+
+    Returns:
+        Dict with version_id and deployed_at, or None if not set.
+
+    Usage:
+        ```python
+        version = get_current_image_version()
+        if version:
+            print(f"Running image {version['version_id']}")
+        ```
+    """
+    try:
+        return IMAGE_VERSION.get("current")
+    except KeyError:
+        return None
+
+
+def set_image_version(version_id: str, deployed_at: float) -> None:
+    """Record new image version on deploy.
+
+    Called by the deploy invalidation function to record the current
+    image version. This allows maintenance functions to detect and
+    invalidate sandboxes running older images.
+
+    Args:
+        version_id: Short hash identifying this deploy.
+        deployed_at: Unix timestamp when deployed.
+
+    Usage:
+        ```python
+        set_image_version("abc123def456", time.time())
+        ```
+    """
+    IMAGE_VERSION["current"] = {
+        "version_id": version_id,
+        "deployed_at": deployed_at,
+    }
+    # Keep history for debugging
+    IMAGE_VERSION[f"history:{version_id}"] = {
+        "version_id": version_id,
+        "deployed_at": deployed_at,
+    }
+
+
+def get_image_deployed_at() -> float | None:
+    """Get timestamp when current image was deployed.
+
+    Returns:
+        Unix timestamp of current deploy, or None if not tracked.
+
+    Usage:
+        ```python
+        deployed_at = get_image_deployed_at()
+        if deployed_at and sandbox_created_at < deployed_at:
+            # Sandbox is running old image
+        ```
+    """
+    version = get_current_image_version()
+    return version["deployed_at"] if version else None
+
+
+# =============================================================================
 # Pre-warm API Tracking
 # =============================================================================
 # These functions manage speculative sandbox pre-warming. When a client calls

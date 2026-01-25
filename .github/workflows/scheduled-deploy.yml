@@ -1,0 +1,38 @@
+name: Scheduled Deploy
+
+# To run manually: gh workflow run "Scheduled Deploy"
+# To enable automatic deploys: uncomment the schedule section below
+
+on:
+  # Schedule disabled for now - uncomment to enable automatic deploys
+  # schedule:
+  #   # Every 30 minutes
+  #   - cron: '*/30 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Deploy to Modal
+        run: uv run modal deploy -m agent_sandbox.deploy
+
+      - name: Trigger pool invalidation
+        run: uv run modal run -m agent_sandbox.app::on_deploy_invalidate_pools

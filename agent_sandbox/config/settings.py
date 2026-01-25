@@ -358,6 +358,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Image version tracking settings
+    image_version_store_name: str = Field(
+        default="agent-image-version",
+        description="Modal Dict name for storing image version metadata",
+    )
+    enable_image_version_tracking: bool = Field(
+        default=True,
+        description="Track image versions to invalidate old warm pool sandboxes on deploy",
+    )
+
     # Session cancellation settings (stop/cancel mid-execution)
     session_cancellation_store_name: str = Field(
         default="agent-session-cancellations",
