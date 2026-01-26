@@ -12,16 +12,11 @@ from agent_sandbox.schemas.jobs import (
     WorkspaceRetentionStatusResponse,
 )
 from agent_sandbox.schemas.responses import (
-    ClaudeCliCancelResponse,
-    ClaudeCliPollResponse,
-    ClaudeCliResponse,
-    ClaudeCliSubmitResponse,
     ErrorResponse,
     QueryResponse,
     SummarySchema,
 )
 from agent_sandbox.schemas.sandbox import (
-    ClaudeCliRequest,
     MessageHistoryEntry,
     MultiplayerStatusResponse,
     PromptQueueClearResponse,
@@ -60,11 +55,6 @@ __all__ = [
     "QueryResponse",
     "ErrorResponse",
     "SummarySchema",
-    "ClaudeCliRequest",
-    "ClaudeCliResponse",
-    "ClaudeCliSubmitResponse",
-    "ClaudeCliPollResponse",
-    "ClaudeCliCancelResponse",
     "JobSubmitRequest",
     "JobSubmitResponse",
     "JobStatusResponse",

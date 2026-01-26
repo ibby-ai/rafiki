@@ -12,8 +12,6 @@ Key Concepts:
 Sandbox Types:
     - agent_sdk: Uses Claude Agent SDK for conversational research tasks.
                  Good for: research, analysis, information gathering
-    - cli: Uses Claude Code CLI for code execution tasks.
-           Good for: code writing, file manipulation, running scripts
 
 Usage Flow:
     1. Parent calls spawn_session tool with task description
@@ -41,19 +39,17 @@ class SpawnSessionRequest(BaseSchema):
               Should be clear and specific for best results.
         sandbox_type: Type of sandbox to use for the child.
                      "agent_sdk" for research/conversation tasks.
-                     "cli" for code execution tasks.
         context: Optional additional context or instructions for the child.
                  Useful for providing relevant background information.
         timeout_seconds: Maximum time the child session can run.
                         Prevents runaway sessions from consuming resources.
         allowed_tools: Comma-separated list of tools the child can use.
-                      Only applies to "cli" sandbox type.
     """
 
     task: str = Field(description="Description of what the child session should accomplish")
-    sandbox_type: Literal["agent_sdk", "cli"] = Field(
+    sandbox_type: Literal["agent_sdk"] = Field(
         default="agent_sdk",
-        description="Type of sandbox: 'agent_sdk' for research, 'cli' for code execution",
+        description="Type of sandbox: 'agent_sdk' for research tasks",
     )
     context: str | None = Field(
         default=None,
@@ -67,7 +63,7 @@ class SpawnSessionRequest(BaseSchema):
     )
     allowed_tools: str | None = Field(
         default=None,
-        description="Comma-separated list of allowed tools (CLI sandbox only)",
+        description="Comma-separated list of allowed tools",
     )
 
 
@@ -111,7 +107,7 @@ class ChildSessionStatus(BaseSchema):
         description="Current status of the child session"
     )
     task: str | None = Field(default=None, description="Original task description")
-    sandbox_type: Literal["agent_sdk", "cli"] | None = Field(
+    sandbox_type: Literal["agent_sdk"] | None = Field(
         default=None, description="Type of sandbox being used"
     )
     created_at: int | None = Field(
@@ -167,7 +163,7 @@ class ChildSessionEntry(BaseSchema):
 
     child_id: str = Field(description="UUID of the child session")
     task: str = Field(description="Original task description")
-    sandbox_type: Literal["agent_sdk", "cli"] = Field(description="Type of sandbox being used")
+    sandbox_type: Literal["agent_sdk"] = Field(description="Type of sandbox being used")
     status: Literal["queued", "running", "complete", "failed", "canceled"] = Field(
         description="Current status of the child session"
     )

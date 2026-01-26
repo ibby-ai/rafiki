@@ -1,8 +1,8 @@
 """Session spawning tools for parallel work delegation.
 
 This module provides MCP tools that allow a parent agent to spawn and manage
-child sessions for parallel work. Children execute independently and can use
-either the Agent SDK (for research/conversation) or CLI (for code execution).
+child sessions for parallel work. Children execute independently using the
+Agent SDK for research and conversation tasks.
 
 Tools:
     - spawn_session: Create a new child session for a delegated task
@@ -100,10 +100,10 @@ async def spawn_session(args: dict[str, Any]) -> dict[str, Any]:
     Args:
         args: Dict with keys:
             - task (required): Description of what the child should do
-            - sandbox_type (optional): "agent_sdk" (default) or "cli"
+            - sandbox_type (optional): "agent_sdk" (default)
             - context (optional): Additional context for the child
             - timeout_seconds (optional): Max time for child (default 300)
-            - allowed_tools (optional): Comma-separated tools (CLI only)
+            - allowed_tools (optional): Comma-separated tools allowed
 
     Returns:
         Tool result with child_id and initial status.
@@ -155,10 +155,8 @@ async def spawn_session(args: dict[str, Any]) -> dict[str, Any]:
             ]
         }
 
-    # Extract parameters
-    sandbox_type = args.get("sandbox_type", "agent_sdk")
-    if sandbox_type not in ("agent_sdk", "cli"):
-        sandbox_type = "agent_sdk"
+    # Extract parameters - only agent_sdk is supported
+    sandbox_type = "agent_sdk"
 
     context = args.get("context")
     timeout_seconds = args.get("timeout_seconds", _settings.child_session_default_timeout)

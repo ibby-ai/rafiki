@@ -6,7 +6,6 @@ which provides visibility into agent effectiveness and usage patterns.
 Key Metrics:
     - Total sessions/jobs started, completed, failed
     - Average duration and error rates
-    - Usage by sandbox type (Agent SDK vs CLI)
     - Time-series data for trend analysis
 
 See: agent_sandbox.jobs for metrics collection implementation.
@@ -20,7 +19,7 @@ from agent_sandbox.schemas.base import BaseSchema
 
 
 class SandboxTypeStats(BaseSchema):
-    """Statistics for a specific sandbox type (Agent SDK or CLI)."""
+    """Statistics for a specific sandbox type."""
 
     total_sessions: int = Field(default=0, description="Total sessions started")
     completed_sessions: int = Field(default=0, description="Sessions completed successfully")
@@ -56,7 +55,7 @@ class SandboxTypeStats(BaseSchema):
 class StatsResponse(BaseSchema):
     """Response body for statistics endpoint.
 
-    Provides comprehensive usage statistics for both Agent SDK and CLI sandboxes,
+    Provides comprehensive usage statistics for Agent SDK sandboxes,
     along with aggregate totals and time-series data when available.
 
     Example Response:
@@ -73,18 +72,11 @@ class StatsResponse(BaseSchema):
                 "avg_duration_ms": 5000,
                 "success_rate": 0.946
             },
-            "cli": {
-                "total_sessions": 50,
-                "completed_sessions": 48,
-                "failed_sessions": 2,
-                "avg_duration_ms": 15000,
-                "success_rate": 0.96
-            },
             "totals": {
-                "total_sessions": 200,
-                "completed_sessions": 188,
-                "failed_sessions": 10,
-                "success_rate": 0.949
+                "total_sessions": 150,
+                "completed_sessions": 140,
+                "failed_sessions": 8,
+                "success_rate": 0.946
             }
         }
         ```
@@ -102,17 +94,9 @@ class StatsResponse(BaseSchema):
         default_factory=SandboxTypeStats,
         description="Statistics for Agent SDK sandbox",
     )
-    cli: SandboxTypeStats = Field(
-        default_factory=SandboxTypeStats,
-        description="Statistics for CLI sandbox",
-    )
-    ralph: SandboxTypeStats = Field(
-        default_factory=SandboxTypeStats,
-        description="Statistics for Ralph autonomous coding loops",
-    )
     totals: SandboxTypeStats = Field(
         default_factory=SandboxTypeStats,
-        description="Aggregate statistics across all sandbox types",
+        description="Aggregate statistics across all sessions",
     )
 
     # Time-series data for trend analysis
@@ -147,5 +131,5 @@ class StatsQueryParams(BaseSchema):
     )
     sandbox_type: str | None = Field(
         default=None,
-        description="Filter by sandbox type: 'agent_sdk', 'cli', 'ralph'",
+        description="Filter by sandbox type: 'agent_sdk'",
     )
