@@ -1689,29 +1689,29 @@ async def stop_session(
 ) -> SessionStopResponse:
     """Stop an agent session mid-execution.
 
-    Requests graceful termination of an active agent session. The agent will
-    finish its current tool call, then be denied further tool calls, causing
-    it to stop execution and return a summary.
+    Requests termination of an active agent session. Supports two modes:
+    - "graceful" (default): Sets cancellation flag, agent stops at next tool call
+    - "immediate": Calls client.interrupt() for near-instant termination
 
     This is a "soft" stop - it doesn't forcibly terminate the sandbox, but
     signals to the agent that it should stop working.
 
     Args:
         session_id: The Claude Agent SDK session ID to stop.
-        body: Optional request body with reason and requester info.
+        body: Optional request body with mode, reason and requester info.
 
     Returns:
         SessionStopResponse with cancellation details and status.
 
     Example:
         ```bash
-        # Basic stop
+        # Basic stop (graceful)
         curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop'
 
-        # With reason
+        # Immediate stop
         curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/stop' \\
           -H 'Content-Type: application/json' \\
-          -d '{"reason": "User requested stop", "requested_by": "user_123"}'
+          -d '{"mode": "immediate", "reason": "User requested stop"}'
         ```
     """
     if not _settings.enable_session_cancellation:
@@ -1722,38 +1722,58 @@ async def stop_session(
             message="Session cancellation is disabled in settings",
         )
 
-    # Check if session is already cancelled
-    existing = get_session_cancellation(session_id)
-    if existing:
-        return SessionStopResponse(
-            ok=True,
-            session_id=session_id,
-            status=existing.get("status", "requested"),
-            requested_at=existing.get("requested_at"),
-            expires_at=existing.get("expires_at"),
-            reason=existing.get("reason"),
-            requested_by=existing.get("requested_by"),
-            message="Session stop already requested",
-        )
-
-    # Request cancellation
+    mode = body.mode if body else "graceful"
     reason = body.reason if body else None
     requested_by = body.requested_by if body else None
-    entry = cancel_session(
-        session_id=session_id,
-        requested_by=requested_by,
-        reason=reason,
-    )
+
+    # Always set cancellation in persistent store (for graceful fallback)
+    existing = get_session_cancellation(session_id)
+    if not existing:
+        entry = cancel_session(
+            session_id=session_id,
+            requested_by=requested_by,
+            reason=reason,
+        )
+    else:
+        entry = existing
+
+    # For immediate mode, also call the controller's internal stop endpoint
+    controller_response = None
+    if mode == "immediate":
+        try:
+            _, service_url = await get_or_start_background_sandbox_aio()
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                r = await client.post(
+                    f"{service_url.rstrip('/')}/session/{session_id}/stop",
+                    json={"mode": "immediate", "reason": reason, "requested_by": requested_by},
+                )
+                if r.status_code == 200:
+                    controller_response = r.json()
+        except Exception as e:
+            _logger.warning(
+                "Failed to call controller stop endpoint",
+                extra={"session_id": session_id, "error": str(e)},
+            )
+
+    # Build response message
+    if mode == "immediate" and controller_response and controller_response.get("interrupted"):
+        message = "Session interrupted immediately."
+    elif mode == "immediate" and controller_response and controller_response.get("stop_event_set"):
+        message = "Session stop signaled. Agent will stop at next opportunity."
+    elif existing:
+        message = "Session stop already requested."
+    else:
+        message = "Session stop requested. Agent will stop after current tool call."
 
     return SessionStopResponse(
         ok=True,
         session_id=session_id,
-        status=entry["status"],
-        requested_at=entry["requested_at"],
-        expires_at=entry["expires_at"],
+        status=entry.get("status", "requested"),
+        requested_at=entry.get("requested_at"),
+        expires_at=entry.get("expires_at"),
         reason=entry.get("reason"),
         requested_by=entry.get("requested_by"),
-        message="Session stop requested. Agent will stop after current tool call.",
+        message=message,
     )
 
 
