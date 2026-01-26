@@ -5,7 +5,6 @@ environment and exposing lightweight HTTP endpoints.
 Quickstart (CLI):
 - run local_entrypoint: `modal run -m agent_sandbox.app` (runs the agent once in a short-lived Modal function)
 - run run_agent_remote: `modal run -m agent_sandbox.app::run_agent_remote --question "..."`
-- run run_claude_cli_remote: `modal run -m agent_sandbox.app::run_claude_cli_remote --prompt "..."`
 - keep dev deployment running: `modal serve -m agent_sandbox.app`
 - deploy to production: `modal deploy -m agent_sandbox.deploy`
 
@@ -35,7 +34,6 @@ import time
 import time as _time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 from urllib.parse import quote
 
@@ -56,25 +54,17 @@ from agent_sandbox.jobs import (
     bump_attempts,
     cancel_job,
     cancel_session,
-    claim_cli_warm_sandbox,
     claim_prewarm,
     claim_warm_sandbox,
-    cleanup_stale_cli_pool_entries,
     cleanup_stale_pool_entries,
-    clear_ralph_pause,
     clear_session_queue,
     create_session_metadata,
     enqueue_job,
-    generate_cli_pool_sandbox_name,
     generate_pool_sandbox_name,
     generate_warm_id,
     get_cancellation_status,
-    get_cli_job_snapshot,
-    get_cli_warm_pool_entries,
-    get_cli_warm_pool_status,
     # Image version tracking functions
     get_current_image_version,
-    get_expired_cli_pool_entries,
     get_expired_pool_entries,
     get_image_deployed_at,
     get_job_record,
@@ -84,11 +74,6 @@ from agent_sandbox.jobs import (
     get_prewarm_status,
     get_prompt_queue_status,
     get_queue_size,
-    # Ralph control functions
-    get_ralph_checkpoint,
-    get_ralph_control_status,
-    get_ralph_iteration_snapshot,
-    get_ralph_snapshot_status,
     get_session_cancellation,
     get_session_history,
     get_session_message_count,
@@ -100,60 +85,31 @@ from agent_sandbox.jobs import (
     get_warm_pool_entries,
     get_warm_pool_status,
     # Workspace retention functions
-    get_workspace_metadata,
     get_workspace_retention_status,
     is_job_due,
     is_session_executing,
     job_workspace_root,
-    list_ralph_iteration_snapshots,
     list_workspaces_for_cleanup,
     mark_prewarm_failed,
-    mark_ralph_resumed,
     mark_workspace_deleted,
     normalize_job_id,
     queue_prompt,
-    register_cli_warm_sandbox,
     register_prewarm,
     register_warm_sandbox,
-    remove_from_cli_pool,
     remove_from_pool,
     remove_queued_prompt,
-    request_ralph_pause,
     resolve_job_artifact,
     revoke_session_user,
     set_image_version,
     should_skip_job,
-    should_snapshot_cli_job,
     should_snapshot_session,
-    store_cli_job_snapshot,
     store_session_snapshot,
     update_job,
     update_prewarm_ready,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
-from agent_sandbox.ralph.feedback import validate_feedback_commands
-from agent_sandbox.ralph.schemas import (
-    RalphExecuteRequest,
-    RalphIterationSnapshotEntry,
-    RalphLoopResult,
-    RalphPauseRequest,
-    RalphPauseResponse,
-    RalphResumeRequest,
-    RalphResumeResponse,
-    RalphRollbackRequest,
-    RalphRollbackResponse,
-    RalphSnapshotListResponse,
-    RalphStartRequest,
-    RalphStartResponse,
-    RalphStatusResponse,
-)
-from agent_sandbox.ralph.status import read_status
 from agent_sandbox.schemas import (
     ArtifactListResponse,
-    ClaudeCliCancelResponse,
-    ClaudeCliPollResponse,
-    ClaudeCliRequest,
-    ClaudeCliResponse,
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
@@ -187,15 +143,7 @@ from agent_sandbox.schemas import (
     WorkspaceRetentionStatusResponse,
 )
 from agent_sandbox.schemas.jobs import ArtifactEntry, ArtifactManifest
-from agent_sandbox.schemas.responses import ClaudeCliSubmitResponse
 from agent_sandbox.services.webhooks import build_headers, build_webhook_payload, serialize_payload
-from agent_sandbox.utils.cli import (
-    CLAUDE_CLI_APP_ROOT,
-    CLAUDE_CLI_USER,
-    claude_cli_env,
-    maybe_chown_for_claude,
-    require_claude_cli_auth,
-)
 
 # =============================================================================
 # Image Version Tracking
@@ -263,50 +211,6 @@ def _base_anthropic_sdk_image() -> modal.Image:
     )
 
 
-def _claude_cli_image() -> modal.Image:
-    """Build a dedicated image for running the Claude Code CLI."""
-    return (
-        modal.Image.debian_slim(python_version="3.11")
-        .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
-        .pip_install("uv")
-        .apt_install("curl", "git")
-        .run_commands(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
-            "apt-get install -y nodejs",
-            "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
-            "useradd -m -s /bin/bash -U claude",
-            "su -l claude -c 'curl -fsSL https://claude.ai/install.sh | bash'",
-            (
-                "su -l claude -c "
-                "'export PATH=/home/claude/.local/bin:/home/claude/.claude/bin:$PATH "
-                "&& command -v claude'"
-            ),
-        )
-        .env(
-            {
-                "AGENT_FS_ROOT": _settings.claude_cli_fs_root,
-                "CLAUDE_CLI_FS_ROOT": _settings.claude_cli_fs_root,
-                "PATH": (
-                    "/root/.local/bin:/root/.claude/bin:"
-                    "/home/claude/.local/bin:/home/claude/.claude/bin:"
-                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                ),
-            }
-        )
-        .workdir(str(CLAUDE_CLI_APP_ROOT))
-        .add_local_dir(
-            ".",
-            remote_path=str(CLAUDE_CLI_APP_ROOT),
-            copy=True,
-            ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
-        )
-        .run_commands(
-            f"chown -R {CLAUDE_CLI_USER}:{CLAUDE_CLI_USER} {CLAUDE_CLI_APP_ROOT}",
-            f"cd {CLAUDE_CLI_APP_ROOT} && uv pip install -e . --system --no-cache",
-        )
-    )
-
-
 def _autoscale_kwargs() -> dict[str, int]:
     """Build autoscaling kwargs for Modal functions when configured.
 
@@ -351,27 +255,6 @@ def _function_call_id(call: object) -> str | None:
     return None
 
 
-def _write_claude_cli_result(
-    write_result_path: str | None,
-    payload: dict,
-    job_root: Path | None,
-    job_id: str | None = None,
-) -> None:
-    if not write_result_path:
-        return
-    path = Path(write_result_path)
-    if not path.is_absolute():
-        job_token = job_id or (job_root.name if job_root is not None else None)
-        if job_token and path.parts[:2] == ("jobs", job_token):
-            path = Path(_settings.claude_cli_fs_root) / path
-        else:
-            base = job_root if job_root is not None else Path(_settings.claude_cli_fs_root)
-            path = base / path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    maybe_chown_for_claude(path)
-
-
 def _function_resource_kwargs() -> dict[str, object]:
     """Build resource kwargs for Modal functions."""
     kwargs: dict[str, object] = {}
@@ -409,31 +292,6 @@ def _sandbox_resource_kwargs() -> dict[str, object]:
     return kwargs
 
 
-def _cli_sandbox_resource_kwargs() -> dict[str, object]:
-    """Build resource kwargs for Claude CLI sandboxes."""
-    kwargs: dict[str, object] = {}
-    if _settings.claude_cli_sandbox_cpu_limit is not None:
-        kwargs["cpu"] = (
-            _settings.claude_cli_sandbox_cpu,
-            _settings.claude_cli_sandbox_cpu_limit,
-        )
-    else:
-        kwargs["cpu"] = _settings.claude_cli_sandbox_cpu
-
-    if _settings.claude_cli_sandbox_memory_limit is not None:
-        kwargs["memory"] = (
-            _settings.claude_cli_sandbox_memory,
-            _settings.claude_cli_sandbox_memory_limit,
-        )
-    else:
-        kwargs["memory"] = _settings.claude_cli_sandbox_memory
-
-    ephemeral_disk = _validated_cli_ephemeral_disk()
-    if ephemeral_disk is not None and _sandbox_supports_ephemeral_disk():
-        kwargs["ephemeral_disk"] = ephemeral_disk
-    return kwargs
-
-
 def _sandbox_supports_ephemeral_disk() -> bool:
     """Return True if modal.Sandbox.create accepts ephemeral_disk."""
     try:
@@ -463,27 +321,6 @@ def _validated_ephemeral_disk() -> int | None:
     return _settings.sandbox_ephemeral_disk
 
 
-def _validated_cli_ephemeral_disk() -> int | None:
-    """Validate Claude CLI ephemeral disk size against Modal limits."""
-    if _settings.claude_cli_sandbox_ephemeral_disk is None:
-        return None
-    max_mib = 3145728
-    if _settings.claude_cli_sandbox_ephemeral_disk <= 0:
-        logging.getLogger(__name__).warning(
-            "claude_cli_sandbox_ephemeral_disk=%s MiB must be positive; skipping",
-            _settings.claude_cli_sandbox_ephemeral_disk,
-        )
-        return None
-    if _settings.claude_cli_sandbox_ephemeral_disk > max_mib:
-        logging.getLogger(__name__).warning(
-            "claude_cli_sandbox_ephemeral_disk=%s MiB exceeds Modal maximum %s; skipping",
-            _settings.claude_cli_sandbox_ephemeral_disk,
-            max_mib,
-        )
-        return None
-    return _settings.claude_cli_sandbox_ephemeral_disk
-
-
 def _function_runtime_kwargs(
     *, include_retries: bool = True, include_autoscale: bool = True
 ) -> dict[str, object]:
@@ -495,60 +332,6 @@ def _function_runtime_kwargs(
     if include_retries:
         kwargs.update(_retry_kwargs())
     return kwargs
-
-
-def _cli_sandbox_timeout(timeout_seconds: int | None) -> int:
-    """Return a sandbox timeout with a small buffer over CLI execution."""
-    if timeout_seconds is None:
-        return _settings.claude_cli_sandbox_timeout
-    return min(_settings.claude_cli_sandbox_timeout, timeout_seconds + 300)
-
-
-def _build_cli_sandbox_name(suffix: str | None) -> str:
-    base = _settings.claude_cli_sandbox_name
-    token = suffix or uuid.uuid4().hex[:8]
-    name = f"{base}-{token}"
-    return name[:63]
-
-
-def _create_claude_cli_sandbox(
-    *,
-    job_id: str | None = None,
-    timeout_seconds: int | None = None,
-) -> modal.Sandbox:
-    """Create a dedicated sandbox for Claude CLI execution."""
-    kwargs: dict[str, object] = {
-        "app": app,
-        "image": claude_cli_image,
-        "secrets": agent_sdk_secrets,
-        "workdir": str(CLAUDE_CLI_APP_ROOT),
-        "volumes": {_settings.claude_cli_fs_root: _get_claude_cli_volume()},
-        "timeout": _cli_sandbox_timeout(timeout_seconds),
-        "idle_timeout": _settings.claude_cli_sandbox_idle_timeout,
-        "verbose": True,
-    }
-    kwargs.update(_cli_sandbox_resource_kwargs())
-
-    name = _build_cli_sandbox_name(job_id) if _settings.claude_cli_sandbox_name else None
-    if name:
-        kwargs["name"] = name
-
-    try:
-        sb = modal.Sandbox.create(**kwargs)
-    except modal_exc.AlreadyExistsError:
-        if "name" not in kwargs:
-            raise
-        kwargs["name"] = _build_cli_sandbox_name(uuid.uuid4().hex[:12])
-        sb = modal.Sandbox.create(**kwargs)
-
-    try:
-        tags = {"role": "claude-cli", "app": "test-sandbox"}
-        if job_id:
-            tags["job_id"] = job_id
-        sb.set_tags(tags)
-    except Exception:
-        _logger.debug("Failed to set Claude CLI sandbox tags", exc_info=True)
-    return sb
 
 
 def _maybe_concurrent():
@@ -605,14 +388,6 @@ def _get_persist_volume() -> modal.Volume:
     return modal.Volume.from_name(_settings.persist_vol_name, **kwargs)
 
 
-def _get_claude_cli_volume() -> modal.Volume:
-    """Return the configured persistent volume handle for Claude CLI."""
-    kwargs: dict[str, object] = {"create_if_missing": True}
-    if _settings.persist_vol_version is not None:
-        kwargs["version"] = _settings.persist_vol_version
-    return modal.Volume.from_name(_settings.claude_cli_persist_vol_name, **kwargs)
-
-
 def _reload_persist_volume(max_retries: int = 3) -> None:
     """Reload the persistent volume to see latest committed writes.
 
@@ -651,37 +426,6 @@ def _commit_persist_volume() -> None:
         logging.getLogger(__name__).warning("Failed to commit persistent volume: %s", message)
     except Exception:
         logging.getLogger(__name__).warning("Failed to commit persistent volume", exc_info=True)
-
-
-def _reload_claude_cli_volume(max_retries: int = 3) -> None:
-    """Reload the Claude CLI volume to see latest committed writes."""
-    logger = logging.getLogger(__name__)
-    for attempt in range(max_retries):
-        try:
-            _get_claude_cli_volume().reload()
-            return
-        except Exception:
-            if attempt == max_retries - 1:
-                logger.warning(
-                    "Failed to reload Claude CLI volume after %d attempts",
-                    max_retries,
-                    exc_info=True,
-                )
-                return
-            time.sleep(0.5 * (attempt + 1))
-
-
-def _commit_claude_cli_volume() -> None:
-    """Commit pending writes to the Claude CLI volume."""
-    try:
-        _get_claude_cli_volume().commit()
-    except RuntimeError as exc:
-        message = str(exc)
-        if "commit() can only be called" in message:
-            return
-        logging.getLogger(__name__).warning("Failed to commit Claude CLI volume: %s", message)
-    except Exception:
-        logging.getLogger(__name__).warning("Failed to commit Claude CLI volume", exc_info=True)
 
 
 def _job_artifacts_root(job_id: str) -> Path:
@@ -1213,16 +957,12 @@ def _maybe_trigger_webhook(job_id: str, event: str) -> None:
 
 # Create image and secrets
 agent_sdk_image = _base_anthropic_sdk_image()
-claude_cli_image = _claude_cli_image()
 agent_sdk_secrets = get_modal_secrets()
 
 
 def _http_app_volumes() -> dict[str, modal.Volume]:
-    """Mount agent and CLI volumes for HTTP endpoints that access artifacts."""
-    volumes: dict[str, modal.Volume] = {_settings.agent_fs_root: _get_persist_volume()}
-    if _settings.claude_cli_fs_root != _settings.agent_fs_root:
-        volumes[_settings.claude_cli_fs_root] = _get_claude_cli_volume()
-    return volumes
+    """Mount agent volume for HTTP endpoints that access artifacts."""
+    return {_settings.agent_fs_root: _get_persist_volume()}
 
 
 @app.function(
@@ -1455,153 +1195,6 @@ async def query_stream(request: Request, body: QueryBody):
     )
 
 
-@web_app.post("/claude_cli", response_model=ClaudeCliResponse)
-async def claude_cli_proxy(request: Request, body: ClaudeCliRequest):
-    """Run Claude Code CLI in the dedicated CLI environment."""
-    allowed_tools = None
-    if body.allowed_tools:
-        allowed_tools = ",".join(body.allowed_tools)
-
-    def _run():
-        return run_claude_cli_remote.remote(
-            prompt=body.prompt,
-            allowed_tools=allowed_tools,
-            dangerously_skip_permissions=body.dangerously_skip_permissions,
-            output_format=body.output_format,
-            timeout_seconds=body.timeout_seconds,
-            max_turns=body.max_turns,
-            job_id=body.job_id,
-            debug=body.debug,
-            probe=body.probe,
-            write_result_path=body.write_result_path,
-            warm_id=body.warm_id,
-        )
-
-    return await anyio.to_thread.run_sync(_run)
-
-
-@web_app.post("/claude_cli/submit", response_model=ClaudeCliSubmitResponse)
-async def claude_cli_submit(body: ClaudeCliRequest) -> ClaudeCliSubmitResponse:
-    """Start a Claude CLI run asynchronously and return a call id for polling."""
-    allowed_tools = None
-    if body.allowed_tools:
-        allowed_tools = ",".join(body.allowed_tools)
-
-    def _spawn():
-        return run_claude_cli_remote.spawn(
-            prompt=body.prompt,
-            allowed_tools=allowed_tools,
-            dangerously_skip_permissions=body.dangerously_skip_permissions,
-            output_format=body.output_format,
-            timeout_seconds=body.timeout_seconds,
-            max_turns=body.max_turns,
-            job_id=body.job_id,
-            debug=body.debug,
-            probe=body.probe,
-            write_result_path=body.write_result_path,
-            warm_id=body.warm_id,
-        )
-
-    call = await anyio.to_thread.run_sync(_spawn)
-    call_id = _function_call_id(call)
-    if not call_id:
-        raise HTTPException(status_code=500, detail="Unable to determine call id")
-    return ClaudeCliSubmitResponse(ok=True, call_id=call_id)
-
-
-@web_app.get("/claude_cli/result/{call_id}", response_model=ClaudeCliPollResponse)
-async def claude_cli_result(call_id: str):
-    """Poll a Claude CLI run by call id."""
-    try:
-        call = modal.FunctionCall.from_id(call_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail="Unknown call id") from exc
-
-    try:
-        result = await anyio.to_thread.run_sync(lambda: call.get(timeout=0))
-    except modal_exc.TimeoutError:
-        return JSONResponse(
-            status_code=202,
-            content=ClaudeCliPollResponse(ok=True, status="running").model_dump(),
-        )
-    except modal_exc.OutputExpiredError:
-        return JSONResponse(
-            status_code=410,
-            content=ClaudeCliPollResponse(
-                ok=False, status="expired", error="Result expired"
-            ).model_dump(),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content=ClaudeCliPollResponse(ok=False, status="failed", error=str(exc)).model_dump(),
-        )
-
-    return ClaudeCliPollResponse(ok=True, status="complete", result=result)
-
-
-@web_app.delete("/claude_cli/{call_id}", response_model=ClaudeCliCancelResponse)
-async def claude_cli_cancel(call_id: str):
-    """Cancel a running Claude CLI invocation.
-
-    This endpoint attempts to cancel a running function call. If the call
-    has already completed, it returns a status indicating the call is
-    already finished.
-    """
-    try:
-        call = modal.FunctionCall.from_id(call_id)
-    except Exception as exc:
-        _logger.warning("Cancel request for unknown call_id: %s", call_id, exc_info=exc)
-        return JSONResponse(
-            status_code=404,
-            content=ClaudeCliCancelResponse(
-                ok=False,
-                status="not_found",
-                message="Unknown call id",
-            ).model_dump(),
-        )
-
-    try:
-        # Check if already complete before cancelling
-        _result = call.get(timeout=0)  # noqa: F841
-        # If we get here, the call already completed
-        return ClaudeCliCancelResponse(
-            ok=True,
-            status="already_completed",
-            message="Call has already completed",
-        )
-    except modal_exc.TimeoutError:
-        # Call is still running, proceed to cancel
-        pass
-    except modal_exc.OutputExpiredError:
-        return ClaudeCliCancelResponse(
-            ok=True,
-            status="already_completed",
-            message="Call result has expired",
-        )
-    except Exception:
-        # Some other error, try to cancel anyway
-        pass
-
-    try:
-        await anyio.to_thread.run_sync(call.cancel)
-        return ClaudeCliCancelResponse(
-            ok=True,
-            status="cancelled",
-            message="Call cancellation requested",
-        )
-    except Exception as exc:
-        _logger.warning("Failed to cancel call %s: %s", call_id, exc)
-        return JSONResponse(
-            status_code=500,
-            content=ClaudeCliCancelResponse(
-                ok=False,
-                status="not_found",
-                message=f"Failed to cancel: {exc}",
-            ).model_dump(),
-        )
-
-
 @web_app.post("/submit", response_model=JobSubmitResponse)
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
@@ -1774,13 +1367,7 @@ def _cleanup_expired_workspaces(
             response.deleted_job_ids.append(job_id)
         else:
             # Actually delete
-            # Determine which fs_root based on workspace_root path
-            if "/data-cli/" in workspace_root:
-                fs_root = _settings.claude_cli_fs_root
-            else:
-                fs_root = _settings.agent_fs_root
-
-            deleted, freed = _delete_job_workspace(job_id, fs_root)
+            deleted, freed = _delete_job_workspace(job_id, _settings.agent_fs_root)
             if deleted:
                 response.workspaces_deleted += 1
                 response.bytes_freed += freed
@@ -1805,20 +1392,7 @@ async def delete_job_workspace_endpoint(job_id: str) -> WorkspaceDeleteResponse:
         WorkspaceDeleteResponse with deletion status and bytes freed
     """
     job_id = _normalize_job_id_or_400(job_id)
-
-    # Check workspace metadata to determine which volume
-    metadata = get_workspace_metadata(job_id)
-    if metadata and metadata.get("workspace_root"):
-        workspace_root = metadata["workspace_root"]
-        if "/data-cli/" in workspace_root:
-            fs_root = _settings.claude_cli_fs_root
-        else:
-            fs_root = _settings.agent_fs_root
-    else:
-        # Default to CLI workspace as that's most common for job-based work
-        fs_root = _settings.claude_cli_fs_root
-
-    deleted, bytes_freed = _delete_job_workspace(job_id, fs_root)
+    deleted, bytes_freed = _delete_job_workspace(job_id, _settings.agent_fs_root)
 
     return WorkspaceDeleteResponse(
         ok=True,
@@ -1865,408 +1439,6 @@ async def workspace_cleanup_endpoint(
         status_filter=body.status_filter,
         dry_run=body.dry_run,
     )
-
-
-# =============================================================================
-# RALPH WIGGUM ENDPOINTS
-# =============================================================================
-
-
-@web_app.post("/ralph/start", response_model=RalphStartResponse)
-async def start_ralph(body: RalphStartRequest) -> RalphStartResponse:
-    """Start a Ralph autonomous coding loop (async).
-
-    Starts a long-running Modal function that works through the provided PRD
-    until all tasks are complete or max iterations is reached.
-
-    Returns a job_id and call_id that can be used to poll for status.
-    """
-    # Validate feedback commands early to fail fast
-    if body.feedback_commands:
-        validate_feedback_commands(body.feedback_commands)
-
-    import uuid
-
-    job_id = str(uuid.uuid4())
-
-    call = run_ralph_remote.spawn(
-        job_id=job_id,
-        prd_json=body.prd.model_dump_json(),
-        workspace_source_json=body.workspace_source.model_dump_json(),
-        prompt_template=body.prompt_template,
-        max_iterations=body.max_iterations,
-        timeout_per_iteration=body.timeout_per_iteration,
-        first_iteration_timeout=body.first_iteration_timeout,
-        allowed_tools=",".join(body.allowed_tools),
-        feedback_commands=",".join(body.feedback_commands),
-        feedback_timeout=body.feedback_timeout,
-        auto_commit=body.auto_commit,
-        max_consecutive_failures=body.max_consecutive_failures,
-        # Push options
-        push_on_complete=body.push_on_complete,
-        remote_url=body.remote_url,
-        target_branch=body.target_branch,
-        force_push=body.force_push,
-    )
-
-    call_id = _function_call_id(call)
-    if not call_id:
-        raise HTTPException(status_code=500, detail="Unable to determine call id")
-
-    return RalphStartResponse(job_id=job_id, call_id=call_id)
-
-
-@web_app.post("/ralph/execute_stream")
-async def execute_ralph_stream_proxy(request: Request, body: RalphExecuteRequest):
-    """Proxy Ralph SSE streaming execution to the CLI sandbox."""
-    settings = Settings()
-
-    cli_sb, cli_url = await get_or_start_cli_sandbox_aio(job_id=body.job_id)
-    headers: dict[str, str] = {}
-    if settings.enforce_connect_token:
-        creds = await cli_sb.create_connect_token.aio(user_metadata={"job_id": body.job_id})
-        headers = {"Authorization": f"Bearer {creds.token}"}
-
-    async def sse_proxy():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                f"{cli_url.rstrip('/')}/ralph/execute_stream",
-                json=body.model_dump(),
-                headers=headers,
-            ) as response:
-                if response.status_code >= 400:
-                    detail = (await response.aread()).decode("utf-8", errors="ignore")
-                    raise HTTPException(
-                        status_code=response.status_code,
-                        detail=detail or "Ralph streaming request failed",
-                    )
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-
-    return StreamingResponse(
-        sse_proxy(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
-    )
-
-
-@web_app.get("/ralph/{job_id}", response_model=RalphStatusResponse)
-async def get_ralph_status(job_id: str, call_id: str) -> RalphStatusResponse:
-    """Get Ralph loop status by job_id.
-
-    Polls the running Ralph loop for current status. Returns live progress
-    from the workspace status.json file if available, otherwise checks the
-    Modal function call status.
-
-    Args:
-        job_id: The Ralph job ID returned from /ralph/start
-        call_id: The Modal call ID returned from /ralph/start
-    """
-    job_id = _normalize_job_id_or_400(job_id)
-
-    # Try to read live status from workspace first
-    workspace = Path(_settings.claude_cli_fs_root) / "jobs" / job_id
-    _reload_claude_cli_volume()
-    live_status = read_status(workspace)
-
-    if live_status and live_status.get("status") == "running":
-        return RalphStatusResponse(
-            job_id=job_id,
-            status=live_status["status"],
-            current_iteration=live_status["current_iteration"],
-            max_iterations=live_status["max_iterations"],
-            tasks_completed=live_status["tasks_completed"],
-            tasks_total=live_status["tasks_total"],
-            current_task=live_status.get("current_task"),
-            result=None,
-        )
-
-    # Check Modal call status
-    try:
-        call = modal.FunctionCall.from_id(call_id)
-        try:
-            result = call.get(timeout=0)
-            return RalphStatusResponse(
-                job_id=job_id,
-                status=result["status"],
-                current_iteration=result["iterations_completed"],
-                max_iterations=result["iterations_max"],
-                tasks_completed=result["tasks_completed"],
-                tasks_total=result["tasks_total"],
-                current_task=None,
-                result=RalphLoopResult(**result),
-            )
-        except modal_exc.TimeoutError:
-            # Still running but no status file yet
-            return RalphStatusResponse(
-                job_id=job_id,
-                status="running",
-                current_iteration=0,
-                max_iterations=0,
-                tasks_completed=0,
-                tasks_total=0,
-                current_task=None,
-                result=None,
-            )
-        except modal_exc.OutputExpiredError:
-            return JSONResponse(
-                status_code=410,
-                content={"job_id": job_id, "status": "expired", "error": "Result expired"},
-            )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-# =============================================================================
-# RALPH CONTROL ENDPOINTS (PAUSE/RESUME/SNAPSHOTS)
-# =============================================================================
-
-
-@web_app.post("/ralph/{job_id}/pause", response_model=RalphPauseResponse)
-async def pause_ralph(job_id: str, body: RalphPauseRequest) -> RalphPauseResponse:
-    """Request a Ralph loop to pause at the next safe point.
-
-    The pause won't take effect immediately - the loop will complete its
-    current iteration and then pause before starting the next one.
-
-    Args:
-        job_id: The Ralph job ID to pause.
-
-    Returns:
-        RalphPauseResponse with pause request status.
-    """
-    job_id = _normalize_job_id_or_400(job_id)
-
-    if not _settings.enable_ralph_control:
-        return RalphPauseResponse(
-            ok=False,
-            job_id=job_id,
-            status="disabled",
-            message="Ralph control is not enabled",
-        )
-
-    result = request_ralph_pause(
-        job_id=job_id,
-        requested_by=body.requested_by,
-        reason=body.reason,
-    )
-
-    return RalphPauseResponse(
-        ok=True,
-        job_id=job_id,
-        status=result.get("status", "pause_requested"),
-        paused_at=result.get("paused_at"),
-        reason=body.reason,
-        message=result.get("message"),
-    )
-
-
-@web_app.post("/ralph/{job_id}/resume", response_model=RalphResumeResponse)
-async def resume_ralph(job_id: str, body: RalphResumeRequest) -> RalphResumeResponse:
-    """Resume a paused Ralph loop from its checkpoint.
-
-    Spawns a new Modal function call that continues from the saved checkpoint.
-
-    Args:
-        job_id: The Ralph job ID to resume.
-
-    Returns:
-        RalphResumeResponse with new call_id for polling.
-    """
-    import json as json_module
-
-    job_id = _normalize_job_id_or_400(job_id)
-
-    if not _settings.enable_ralph_control:
-        return RalphResumeResponse(
-            ok=False,
-            job_id=job_id,
-            status="disabled",
-            message="Ralph control is not enabled",
-        )
-
-    # Get checkpoint info (now returns {status, checkpoint} dict)
-    checkpoint_info = get_ralph_checkpoint(job_id)
-    if not checkpoint_info:
-        return RalphResumeResponse(
-            ok=False,
-            job_id=job_id,
-            status="not_paused",
-            message="Ralph loop is not paused or checkpoint expired",
-        )
-
-    # Handle pause_requested state - pause hasn't been processed yet
-    if checkpoint_info.get("status") == "pause_requested":
-        # Cancel the pause request - loop continues normally
-        clear_ralph_pause(job_id)
-        return RalphResumeResponse(
-            ok=True,
-            job_id=job_id,
-            status="resumed",
-            call_id=None,  # No new call needed - original loop continues
-            message="Pause request cancelled - loop continues normally",
-        )
-
-    # Get checkpoint from paused state
-    checkpoint = checkpoint_info.get("checkpoint")
-    if not checkpoint:
-        return RalphResumeResponse(
-            ok=False,
-            job_id=job_id,
-            status="not_paused",
-            message="Ralph loop is paused but no checkpoint found",
-        )
-
-    # Mark as resumed
-    mark_ralph_resumed(job_id, requested_by=body.requested_by)
-
-    # Spawn resumed loop with checkpoint data
-    # The checkpoint contains prd_json (serialized PRD state)
-    prd_json = checkpoint.get("prd_json", "{}")
-
-    # Build workspace_source_json - empty source since workspace already exists
-    workspace_source_json = json_module.dumps({"type": "empty"})
-
-    call = run_ralph_remote.spawn(
-        job_id=job_id,
-        prd_json=prd_json,
-        workspace_source_json=workspace_source_json,
-        max_iterations=checkpoint.get("max_iterations", 10),
-        resume_checkpoint_json=json_module.dumps(checkpoint),
-    )
-
-    call_id = _function_call_id(call)
-    if not call_id:
-        raise HTTPException(status_code=500, detail="Unable to determine call id")
-
-    return RalphResumeResponse(
-        ok=True,
-        job_id=job_id,
-        status="resumed",
-        call_id=call_id,
-        message="Ralph loop resumed from checkpoint",
-    )
-
-
-@web_app.get("/ralph/{job_id}/control")
-async def get_ralph_control(job_id: str):
-    """Get the current control status for a Ralph job.
-
-    Args:
-        job_id: The Ralph job ID to check.
-
-    Returns:
-        Control status including pause state and checkpoint info.
-    """
-    job_id = _normalize_job_id_or_400(job_id)
-
-    status = get_ralph_control_status(job_id)
-    if not status:
-        return {"ok": True, "job_id": job_id, "status": "running", "paused": False}
-
-    return {
-        "ok": True,
-        "job_id": job_id,
-        "status": status.get("status"),
-        "paused": status.get("status") in ("pause_requested", "paused"),
-        "pause_requested_at": status.get("pause_requested_at"),
-        "paused_at": status.get("paused_at"),
-        "resumed_at": status.get("resumed_at"),
-        "reason": status.get("reason"),
-        "has_checkpoint": status.get("checkpoint") is not None,
-    }
-
-
-@web_app.get("/ralph/{job_id}/snapshots", response_model=RalphSnapshotListResponse)
-async def list_ralph_snapshots(job_id: str) -> RalphSnapshotListResponse:
-    """List all available iteration snapshots for a Ralph job.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        List of iteration snapshots available for rollback.
-    """
-    job_id = _normalize_job_id_or_400(job_id)
-
-    if not _settings.enable_ralph_iteration_snapshots:
-        return RalphSnapshotListResponse(
-            ok=False,
-            job_id=job_id,
-            snapshots=[],
-            total=0,
-        )
-
-    snapshots = list_ralph_iteration_snapshots(job_id)
-    entries = [RalphIterationSnapshotEntry(**s) for s in snapshots]
-
-    return RalphSnapshotListResponse(
-        ok=True,
-        job_id=job_id,
-        snapshots=entries,
-        total=len(entries),
-    )
-
-
-@web_app.post("/ralph/{job_id}/rollback/{iteration}", response_model=RalphRollbackResponse)
-async def rollback_ralph(
-    job_id: str, iteration: int, body: RalphRollbackRequest
-) -> RalphRollbackResponse:
-    """Rollback a Ralph job to a previous iteration's state.
-
-    This restores the filesystem state from the specified iteration's snapshot
-    and starts a new Ralph loop from that point.
-
-    Args:
-        job_id: The Ralph job ID.
-        iteration: The iteration number to rollback to.
-
-    Returns:
-        RalphRollbackResponse with rollback status.
-    """
-    job_id = _normalize_job_id_or_400(job_id)
-
-    if not _settings.enable_ralph_iteration_snapshots:
-        return RalphRollbackResponse(
-            ok=False,
-            job_id=job_id,
-            iteration=iteration,
-            status="disabled",
-            message="Ralph iteration snapshots are not enabled",
-        )
-
-    # Get the snapshot
-    snapshot = get_ralph_iteration_snapshot(job_id, iteration)
-    if not snapshot:
-        return RalphRollbackResponse(
-            ok=False,
-            job_id=job_id,
-            iteration=iteration,
-            status="snapshot_not_found",
-            message=f"No snapshot found for iteration {iteration}",
-        )
-
-    # Note: Actual rollback requires creating a new sandbox from the snapshot image
-    # This is a complex operation that requires the CLI sandbox to be recreated
-    # For now, we return the snapshot info and let the caller handle the rollback
-
-    return RalphRollbackResponse(
-        ok=True,
-        job_id=job_id,
-        iteration=iteration,
-        status="snapshot_available",
-        message=f"Snapshot available for iteration {iteration}. "
-        f"Image ID: {snapshot.get('image_id')}. "
-        "Use this to restore the sandbox state.",
-    )
-
-
-@web_app.get("/ralph/snapshots/status")
-async def ralph_snapshot_status():
-    """Get overall status of Ralph iteration snapshots.
-
-    Returns statistics about snapshot storage and configuration.
-    """
-    return get_ralph_snapshot_status()
 
 
 @web_app.get("/service_info")
@@ -2337,41 +1509,6 @@ async def pool_status_endpoint():
     }
 
 
-@web_app.get("/cli/pool/status")
-async def cli_pool_status_endpoint():
-    """Get current status of the CLI warm sandbox pool.
-
-    Returns pool statistics including:
-    - enabled: Whether CLI warm pool is enabled
-    - target_size: Configured pool size
-    - warm: Number of available warm CLI sandboxes
-    - claimed: Number of currently claimed sandboxes
-    - total: Total sandboxes in pool
-    - entries: List of pool entries with metadata
-
-    Example:
-        ```
-        curl 'https://<org>--test-sandbox-http-app-dev.modal.run/cli/pool/status'
-        ```
-    """
-    if not _settings.enable_cli_warm_pool:
-        return {
-            "ok": True,
-            "enabled": False,
-            "message": "CLI warm pool is disabled",
-        }
-
-    pool_status = get_cli_warm_pool_status()
-    return {
-        "ok": True,
-        "enabled": True,
-        "target_size": _settings.cli_warm_pool_size,
-        "refresh_interval_seconds": _settings.cli_warm_pool_refresh_interval,
-        "sandbox_max_age_seconds": _settings.cli_warm_pool_sandbox_max_age,
-        **pool_status,
-    }
-
-
 @web_app.get("/image/version")
 async def get_image_version_endpoint():
     """Return current image version info.
@@ -2414,7 +1551,7 @@ async def prewarm_sandbox(body: WarmRequest) -> WarmResponse:
 
     Call this endpoint when users start typing to speculatively prepare
     a sandbox before the actual query arrives. Returns a warm_id that
-    should be passed with the subsequent /query or /claude_cli request.
+    should be passed with the subsequent /query request.
 
     Args:
         body: Pre-warm request with sandbox_type and optional session/job IDs.
@@ -2459,10 +1596,7 @@ async def prewarm_sandbox(body: WarmRequest) -> WarmResponse:
 
     # Spawn background task to warm the sandbox
     # This runs async and updates the pre-warm entry when ready
-    if body.sandbox_type == "agent_sdk":
-        prewarm_agent_sdk_sandbox.spawn(warm_id, body.session_id)
-    else:
-        prewarm_cli_sandbox.spawn(warm_id, body.job_id)
+    prewarm_agent_sdk_sandbox.spawn(warm_id, body.session_id)
 
     _logger.info(
         "Pre-warm request registered",
@@ -3289,45 +2423,6 @@ def prewarm_agent_sdk_sandbox(warm_id: str, session_id: str | None = None):
         )
 
 
-@app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=120)
-def prewarm_cli_sandbox(warm_id: str, job_id: str | None = None):
-    """Background task to pre-warm a CLI sandbox.
-
-    Creates or claims a sandbox and updates the pre-warm entry when ready.
-    This runs in the background after POST /warm returns.
-    """
-    try:
-        # Get or create CLI sandbox (will claim from pool if available)
-        sb, url = get_or_start_cli_sandbox(job_id=job_id)
-
-        # Update pre-warm entry with sandbox details
-        updated = update_prewarm_ready(warm_id, sb.object_id, url)
-        if updated:
-            _logger.info(
-                "Pre-warm ready (cli)",
-                extra={
-                    "warm_id": warm_id,
-                    "sandbox_id": sb.object_id,
-                    "url": url,
-                },
-            )
-        else:
-            # Entry expired or missing - mark as failed so it's not stuck at "warming"
-            mark_prewarm_failed(warm_id, "Entry expired before sandbox ready")
-            _logger.warning(
-                "Pre-warm expired before sandbox ready",
-                extra={"warm_id": warm_id, "sandbox_id": sb.object_id},
-            )
-    except Exception as exc:
-        # Mark as failed so the entry doesn't stay stuck at "warming"
-        mark_prewarm_failed(warm_id, str(exc))
-        _logger.error(
-            "Pre-warm failed (cli)",
-            exc_info=True,
-            extra={"warm_id": warm_id, "error": str(exc)},
-        )
-
-
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets)
 async def tail_logs(n: int = 200, timeout: float = 2.0) -> list[str]:
     """Tail logs from the background sandbox.
@@ -3370,10 +2465,6 @@ SESSIONS = modal.Dict.from_name("sandbox-sessions", create_if_missing=True)
 SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
-CLI_SANDBOX_NAME = _settings.claude_cli_sandbox_name
-CLI_SERVICE_PORT = _settings.claude_cli_service_port
-CLI_SERVICE_PORTS = _settings.claude_cli_service_ports
-CLI_PERSIST_VOL_NAME = _settings.claude_cli_persist_vol_name
 
 
 # =============================================================================
@@ -3394,8 +2485,6 @@ CLI_PERSIST_VOL_NAME = _settings.claude_cli_persist_vol_name
 # =============================================================================
 SANDBOX: modal.Sandbox | None = None
 SERVICE_URL: str | None = None
-CLI_SANDBOX: modal.Sandbox | None = None
-CLI_SERVICE_URL: str | None = None
 
 
 def _wait_for_service(url: str, timeout: int = 60, path: str = "/health_check") -> None:
@@ -3446,15 +2535,6 @@ def cleanup_sessions():
         SESSIONS[SANDBOX_NAME] = {"status": "missing"}
     except Exception:
         logging.getLogger(__name__).exception("Unexpected error cleaning up sessions")
-
-    try:
-        cli_sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
-        _ = cli_sb.tunnels()
-        SESSIONS[CLI_SANDBOX_NAME] = {**SESSIONS.get(CLI_SANDBOX_NAME, {}), "status": "running"}
-    except modal_exc.NotFoundError:
-        SESSIONS[CLI_SANDBOX_NAME] = {"status": "missing"}
-    except Exception:
-        logging.getLogger(__name__).exception("Unexpected error cleaning up Claude CLI sessions")
 
 
 # =============================================================================
@@ -3686,236 +2766,6 @@ def maintain_warm_pool():
 
 
 # =============================================================================
-# CLI WARM POOL MANAGEMENT
-# =============================================================================
-# Functions for maintaining a pool of pre-warmed CLI sandboxes.
-# The pool reduces cold-start latency by keeping CLI sandboxes ready for use.
-# Pool sandboxes run uvicorn with the same configuration as the CLI service.
-
-
-def _create_cli_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
-    """Create a single warm CLI sandbox and add it to the pool.
-
-    Creates a new CLI sandbox with uvicorn running, waits for it to become healthy,
-    registers it in the pool, and returns the sandbox details.
-
-    Returns:
-        Tuple of (sandbox, sandbox_id, sandbox_name) if successful, None if failed.
-    """
-    pool_name = generate_cli_pool_sandbox_name()
-    cli_vol = _get_claude_cli_volume()
-
-    try:
-        sb = modal.Sandbox.create(
-            "uvicorn",
-            "agent_sandbox.controllers.cli_controller:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(CLI_SERVICE_PORT),
-            app=app,
-            image=claude_cli_image,
-            secrets=agent_sdk_secrets,
-            workdir=str(CLAUDE_CLI_APP_ROOT),
-            name=pool_name,
-            encrypted_ports=CLI_SERVICE_PORTS,
-            volumes={_settings.claude_cli_fs_root: cli_vol},
-            timeout=_settings.claude_cli_sandbox_timeout,
-            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
-            **_cli_sandbox_resource_kwargs(),
-            verbose=False,
-        )
-    except Exception:
-        _logger.warning("Failed to create CLI warm pool sandbox", exc_info=True)
-        return None
-
-    # Set pool tags for tracking
-    sb.set_tags(
-        {
-            "pool": "cli",
-            "status": "warm",
-            "app": "test-sandbox",
-            "port": str(CLI_SERVICE_PORT),
-        }
-    )
-
-    # Wait for tunnel URL
-    deadline = time.time() + 30
-    service_url = None
-    while time.time() < deadline:
-        tunnels = sb.tunnels()
-        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
-            service_url = tunnels[CLI_SERVICE_PORT].url
-            break
-        time.sleep(0.5)
-
-    if not service_url:
-        _logger.warning("Failed to get tunnel URL for CLI warm pool sandbox")
-        try:
-            sb.terminate()
-        except Exception:
-            pass
-        return None
-
-    # Wait for health check
-    try:
-        _wait_for_service(service_url, timeout=30)
-    except TimeoutError:
-        _logger.warning("CLI warm pool sandbox health check failed")
-        try:
-            sb.terminate()
-        except Exception:
-            pass
-        return None
-
-    # Register in pool
-    sandbox_id = sb.object_id
-    register_cli_warm_sandbox(sandbox_id, pool_name)
-    _logger.info(
-        "Created CLI warm pool sandbox",
-        extra={"sandbox_id": sandbox_id, "sandbox_name": pool_name, "url": service_url},
-    )
-
-    return sb, sandbox_id, pool_name
-
-
-@app.function(
-    image=claude_cli_image,
-    secrets=agent_sdk_secrets,
-    timeout=600,
-    **_retry_kwargs(),
-)
-def replenish_cli_warm_pool():
-    """Add CLI sandboxes to the warm pool up to the configured size.
-
-    Called after a sandbox is claimed from the pool to replenish it.
-    Also called by the pool maintainer on a schedule.
-    """
-    if not _settings.enable_cli_warm_pool:
-        return {"status": "disabled", "created": 0}
-
-    target_size = _settings.cli_warm_pool_size
-    pool_status = get_cli_warm_pool_status()
-    warm_count = pool_status["warm"]
-    needed = target_size - warm_count
-
-    _logger.info(
-        "Replenishing CLI warm pool",
-        extra={"target": target_size, "current_warm": warm_count, "needed": needed},
-    )
-
-    created = 0
-    for _ in range(needed):
-        result = _create_cli_warm_sandbox_sync()
-        if result:
-            created += 1
-        else:
-            # Don't keep trying if creation fails
-            break
-
-    return {"status": "ok", "created": created, "target": target_size, "warm_count": warm_count}
-
-
-@app.function(
-    image=claude_cli_image,
-    secrets=agent_sdk_secrets,
-    schedule=modal.Cron(f"*/{max(_settings.cli_warm_pool_refresh_interval // 60, 1)} * * * *"),
-    timeout=600,
-    **_retry_kwargs(),
-)
-def maintain_cli_warm_pool():
-    """Periodic maintenance of the CLI warm sandbox pool.
-
-    Runs on a schedule to:
-    1. Clean up stale pool entries for sandboxes that no longer exist
-    2. Expire old sandboxes (beyond max age) to pick up image changes
-    3. Replenish the pool to maintain target size
-
-    The schedule is derived from cli_warm_pool_refresh_interval setting.
-    """
-    if not _settings.enable_cli_warm_pool:
-        return {"status": "disabled"}
-
-    _logger.info("Running CLI warm pool maintenance")
-
-    # Step 1: Find live pool sandboxes via Modal API
-    live_sandbox_ids: set[str] = set()
-    try:
-        for sb in modal.Sandbox.list(tags={"pool": "cli"}):
-            # Verify sandbox is still running
-            if sb.poll() is None:
-                live_sandbox_ids.add(sb.object_id)
-            else:
-                # Sandbox has exited, remove from pool
-                remove_from_cli_pool(sb.object_id)
-    except Exception:
-        _logger.warning("Failed to list CLI pool sandboxes", exc_info=True)
-
-    # Step 2: Clean up stale entries (entries for sandboxes that no longer exist)
-    stale_removed = cleanup_stale_cli_pool_entries(live_sandbox_ids)
-    if stale_removed > 0:
-        _logger.info("Removed stale CLI pool entries", extra={"count": stale_removed})
-
-    # Step 3: Expire old sandboxes
-    expired_entries = get_expired_cli_pool_entries(_settings.cli_warm_pool_sandbox_max_age)
-    expired_count = 0
-    for entry in expired_entries:
-        sandbox_id = entry.get("sandbox_id")
-        if sandbox_id:
-            try:
-                sb = modal.Sandbox.from_id(sandbox_id)
-                sb.terminate()
-                _logger.info(
-                    "Terminated expired CLI pool sandbox", extra={"sandbox_id": sandbox_id}
-                )
-            except Exception:
-                pass
-            remove_from_cli_pool(sandbox_id)
-            expired_count += 1
-    if expired_count > 0:
-        _logger.info("Expired old CLI pool sandboxes", extra={"count": expired_count})
-
-    # Step 3b: Invalidate sandboxes created before current deploy
-    deploy_invalidated = 0
-    if _settings.enable_image_version_tracking:
-        current_deploy_time = get_image_deployed_at()
-        if current_deploy_time:
-            for entry in get_cli_warm_pool_entries():
-                if entry.get("status") == "warm":
-                    created_at = entry.get("created_at", 0)
-                    if created_at < current_deploy_time:
-                        sandbox_id = entry.get("sandbox_id")
-                        if sandbox_id:
-                            try:
-                                sb = modal.Sandbox.from_id(sandbox_id)
-                                sb.terminate()
-                            except Exception:
-                                pass
-                            remove_from_cli_pool(sandbox_id)
-                            deploy_invalidated += 1
-            if deploy_invalidated > 0:
-                _logger.info(
-                    "Invalidated pre-deploy CLI pool sandboxes",
-                    extra={"count": deploy_invalidated},
-                )
-
-    # Step 4: Replenish pool
-    replenish_result = replenish_cli_warm_pool.local()
-
-    pool_status = get_cli_warm_pool_status()
-    return {
-        "status": "ok",
-        "stale_removed": stale_removed,
-        "expired_terminated": expired_count,
-        "deploy_invalidated": deploy_invalidated,
-        "replenished": replenish_result.get("created", 0),
-        "pool_warm": pool_status["warm"],
-        "pool_claimed": pool_status["claimed"],
-        "pool_total": pool_status["total"],
-    }
-
-
-# =============================================================================
 # DEPLOY INVALIDATION
 # =============================================================================
 # This function records the new image version and invalidates warm pool
@@ -3967,19 +2817,6 @@ def on_deploy_invalidate_pools():
                 remove_from_pool(sandbox_id)
                 invalidated += 1
 
-    # CLI pool
-    for entry in get_cli_warm_pool_entries():
-        if entry.get("status") == "warm":
-            sandbox_id = entry.get("sandbox_id")
-            if sandbox_id:
-                try:
-                    sb = modal.Sandbox.from_id(sandbox_id)
-                    sb.terminate()
-                except Exception:
-                    pass
-                remove_from_cli_pool(sandbox_id)
-                invalidated += 1
-
     _logger.info(
         "Deploy invalidation complete",
         extra={"version_id": _IMAGE_VERSION_ID, "invalidated": invalidated},
@@ -3999,7 +2836,7 @@ def on_deploy_invalidate_pools():
 
 
 @app.function(
-    image=claude_cli_image,
+    image=agent_sdk_image,
     secrets=agent_sdk_secrets,
     schedule=modal.Cron(
         f"0 */{max(_settings.workspace_cleanup_interval_seconds // 3600, 1)} * * *"
@@ -4511,422 +3348,6 @@ async def get_or_start_background_sandbox_aio(
     return SANDBOX, SERVICE_URL
 
 
-def get_or_start_cli_sandbox(
-    job_id: str | None = None,
-) -> tuple[modal.Sandbox, str]:
-    """Return a running Claude CLI sandbox and its encrypted service URL.
-
-    Args:
-        job_id: Optional job ID for snapshot restoration. When provided
-            and a snapshot exists for this job, creates the sandbox from
-            the snapshot image to restore filesystem state from a previous job.
-
-    Returns:
-        A pair of `(sandbox, service_url)`.
-
-    Warm Pool:
-        When enabled, the function first tries to claim a pre-warmed CLI sandbox
-        from the pool. Pool sandboxes have uvicorn already running and
-        health-checked, eliminating cold-start latency.
-
-    CLI Job Snapshot Restoration:
-        When resuming a job after sandbox timeout, pass the job_id to
-        check for stored snapshots. If a snapshot exists:
-        1. The snapshot image is used instead of the base claude_cli_image
-        2. This restores installed packages, downloaded files, and other
-           filesystem changes from the previous job execution
-    """
-    global CLI_SANDBOX, CLI_SERVICE_URL
-
-    if CLI_SANDBOX is not None and CLI_SERVICE_URL:
-        return CLI_SANDBOX, CLI_SERVICE_URL
-
-    try:
-        sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
-        tunnels = sb.tunnels()
-        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
-            CLI_SANDBOX = sb
-            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
-            _wait_for_service(CLI_SERVICE_URL)
-            return CLI_SANDBOX, CLI_SERVICE_URL
-    except Exception:
-        pass
-
-    # -------------------------------------------------------------------------
-    # Determine image for new sandbox (snapshot restoration)
-    # -------------------------------------------------------------------------
-    # Check if we have a stored snapshot for this job. If so, use the
-    # snapshot image to restore filesystem state from the previous execution.
-    # This enables "leave and come back" workflows where CLI-installed tools
-    # and downloaded files are preserved across sandbox restarts.
-    # -------------------------------------------------------------------------
-    sandbox_image = claude_cli_image
-    restored_from_snapshot = False
-    use_cli_warm_pool = _settings.enable_cli_warm_pool
-
-    if job_id and _settings.enable_cli_job_snapshots:
-        snapshot = get_cli_job_snapshot(job_id)
-        if snapshot and snapshot.get("image_id"):
-            try:
-                snapshot_image = modal.Image.from_id(snapshot["image_id"])
-                sandbox_image = snapshot_image
-                restored_from_snapshot = True
-                # Don't use warm pool when restoring from snapshot - need specific image
-                use_cli_warm_pool = False
-                _logger.info(
-                    "Restoring CLI sandbox from job snapshot",
-                    extra={
-                        "job_id": job_id,
-                        "snapshot_image_id": snapshot["image_id"],
-                        "snapshot_created_at": snapshot.get("created_at"),
-                    },
-                )
-            except Exception:
-                _logger.warning(
-                    "Failed to restore CLI sandbox from snapshot, using base image",
-                    exc_info=True,
-                    extra={"job_id": job_id, "snapshot": snapshot},
-                )
-
-    # -------------------------------------------------------------------------
-    # Try to claim from CLI warm pool (if enabled and no snapshot)
-    # -------------------------------------------------------------------------
-    # The CLI warm pool contains pre-created sandboxes with uvicorn already running
-    # and health-checked. Claiming from pool avoids sandbox creation overhead.
-    # Pool is only used when not restoring from snapshot (need base image).
-    # -------------------------------------------------------------------------
-    if use_cli_warm_pool:
-        try:
-            claimed = claim_cli_warm_sandbox(job_id=job_id)
-            if claimed:
-                sandbox_id = claimed.get("sandbox_id")
-                sandbox_name = claimed.get("sandbox_name")
-                if sandbox_id:
-                    try:
-                        pool_sb = modal.Sandbox.from_id(sandbox_id)
-                        # Verify sandbox is still running
-                        if pool_sb.poll() is None:
-                            # Get tunnel URL
-                            tunnels = pool_sb.tunnels()
-                            if CLI_SERVICE_PORT in tunnels and getattr(
-                                tunnels[CLI_SERVICE_PORT], "url", None
-                            ):
-                                pool_url = tunnels[CLI_SERVICE_PORT].url
-                                # Verify health
-                                _wait_for_service(pool_url)
-                                CLI_SANDBOX = pool_sb
-                                CLI_SERVICE_URL = pool_url
-                                _logger.info(
-                                    "Claimed CLI sandbox from warm pool",
-                                    extra={
-                                        "sandbox_id": sandbox_id,
-                                        "sandbox_name": sandbox_name,
-                                        "job_id": job_id,
-                                    },
-                                )
-                                # Update tags to reflect active use
-                                pool_sb.set_tags(
-                                    {
-                                        "pool": "cli",
-                                        "status": "claimed",
-                                        "role": "claude-cli-service",
-                                        "app": "test-sandbox",
-                                        "port": str(CLI_SERVICE_PORT),
-                                    }
-                                )
-                                # Trigger async pool replenishment
-                                try:
-                                    replenish_cli_warm_pool.spawn()
-                                except Exception:
-                                    pass  # Non-critical: pool will be replenished by maintainer
-                                return CLI_SANDBOX, CLI_SERVICE_URL
-                    except Exception:
-                        _logger.warning(
-                            "Failed to use claimed CLI pool sandbox, will create new",
-                            exc_info=True,
-                            extra={"sandbox_id": sandbox_id},
-                        )
-                        # Remove the bad entry from pool
-                        remove_from_cli_pool(sandbox_id)
-        except Exception:
-            _logger.warning("Error checking CLI warm pool, will create new sandbox", exc_info=True)
-
-    cli_vol = _get_claude_cli_volume()
-    try:
-        CLI_SANDBOX = modal.Sandbox.create(
-            "uvicorn",
-            "agent_sandbox.controllers.cli_controller:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(CLI_SERVICE_PORT),
-            app=app,
-            image=sandbox_image,  # Use snapshot image if available
-            secrets=agent_sdk_secrets,
-            workdir=str(CLAUDE_CLI_APP_ROOT),
-            name=CLI_SANDBOX_NAME,
-            encrypted_ports=CLI_SERVICE_PORTS,
-            volumes={_settings.claude_cli_fs_root: cli_vol},
-            timeout=_settings.claude_cli_sandbox_timeout,
-            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
-            **_cli_sandbox_resource_kwargs(),
-            verbose=True,
-        )
-    except modal_exc.AlreadyExistsError:
-        try:
-            CLI_SANDBOX = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{CLI_SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
-
-    CLI_SANDBOX.set_tags(
-        {"role": "claude-cli-service", "app": "test-sandbox", "port": str(CLI_SERVICE_PORT)}
-    )
-
-    CLI_SERVICE_URL = None
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        tunnels = CLI_SANDBOX.tunnels()
-        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
-            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
-            break
-        time.sleep(0.5)
-
-    if not CLI_SERVICE_URL:
-        raise RuntimeError("Failed to start Claude CLI sandbox or get service URL")
-
-    _wait_for_service(CLI_SERVICE_URL)
-    try:
-        session_metadata: dict = {
-            "id": CLI_SANDBOX.object_id,
-            "url": CLI_SERVICE_URL,
-            "volume": CLI_PERSIST_VOL_NAME,
-            "created_at": int(time.time()),
-            "tags": {
-                "role": "claude-cli-service",
-                "app": "test-sandbox",
-                "port": str(CLI_SERVICE_PORT),
-            },
-            "status": "running",
-        }
-        # Track snapshot restoration for observability
-        if restored_from_snapshot and job_id:
-            session_metadata["restored_from_job"] = job_id
-            session_metadata["restored_from_snapshot"] = True
-        SESSIONS[CLI_SANDBOX_NAME] = session_metadata
-    except modal_exc.Error as exc:
-        logging.getLogger(__name__).warning(
-            "Failed to persist Claude CLI session metadata: %s", exc
-        )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Unexpected error persisting Claude CLI session metadata"
-        )
-
-    return CLI_SANDBOX, CLI_SERVICE_URL
-
-
-async def get_or_start_cli_sandbox_aio(
-    job_id: str | None = None,
-) -> tuple[modal.Sandbox, str]:
-    """Async version of get_or_start_cli_sandbox.
-
-    Args:
-        job_id: Optional job ID for snapshot restoration.
-
-    Returns:
-        A pair of `(sandbox, service_url)`.
-    """
-    global CLI_SANDBOX, CLI_SERVICE_URL
-
-    if CLI_SANDBOX and CLI_SERVICE_URL:
-        return CLI_SANDBOX, CLI_SERVICE_URL
-
-    try:
-        sb = modal.Sandbox.from_name("test-sandbox", CLI_SANDBOX_NAME)
-        deadline = anyio.current_time() + 30
-        url = None
-        while anyio.current_time() < deadline:
-            tunnels = await sb.tunnels.aio()
-            if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
-                url = tunnels[CLI_SERVICE_PORT].url
-                break
-            await anyio.sleep(0.5)
-        if url:
-            CLI_SANDBOX, CLI_SERVICE_URL = sb, url
-            await _wait_for_service_aio(CLI_SERVICE_URL)
-            return CLI_SANDBOX, CLI_SERVICE_URL
-    except Exception:
-        pass
-
-    # Determine image for new sandbox (snapshot restoration)
-    sandbox_image = claude_cli_image
-    restored_from_snapshot = False
-    use_cli_warm_pool = _settings.enable_cli_warm_pool
-
-    if job_id and _settings.enable_cli_job_snapshots:
-        snapshot = get_cli_job_snapshot(job_id)
-        if snapshot and snapshot.get("image_id"):
-            try:
-                snapshot_image = modal.Image.from_id(snapshot["image_id"])
-                sandbox_image = snapshot_image
-                restored_from_snapshot = True
-                # Don't use warm pool when restoring from snapshot - need specific image
-                use_cli_warm_pool = False
-                _logger.info(
-                    "Restoring CLI sandbox from job snapshot (async)",
-                    extra={
-                        "job_id": job_id,
-                        "snapshot_image_id": snapshot["image_id"],
-                        "snapshot_created_at": snapshot.get("created_at"),
-                    },
-                )
-            except Exception:
-                _logger.warning(
-                    "Failed to restore CLI sandbox from snapshot, using base image",
-                    exc_info=True,
-                    extra={"job_id": job_id, "snapshot": snapshot},
-                )
-
-    # -------------------------------------------------------------------------
-    # Try to claim from CLI warm pool (if enabled and no snapshot)
-    # -------------------------------------------------------------------------
-    if use_cli_warm_pool:
-        try:
-            claimed = claim_cli_warm_sandbox(job_id=job_id)
-            if claimed:
-                sandbox_id = claimed.get("sandbox_id")
-                sandbox_name = claimed.get("sandbox_name")
-                if sandbox_id:
-                    try:
-                        pool_sb = modal.Sandbox.from_id(sandbox_id)
-                        # Verify sandbox is still running
-                        if pool_sb.poll() is None:
-                            # Get tunnel URL
-                            deadline = anyio.current_time() + 5
-                            pool_url = None
-                            while anyio.current_time() < deadline:
-                                tunnels = await pool_sb.tunnels.aio()
-                                if CLI_SERVICE_PORT in tunnels and getattr(
-                                    tunnels[CLI_SERVICE_PORT], "url", None
-                                ):
-                                    pool_url = tunnels[CLI_SERVICE_PORT].url
-                                    break
-                                await anyio.sleep(0.25)
-                            if pool_url:
-                                # Verify health
-                                await _wait_for_service_aio(pool_url)
-                                CLI_SANDBOX = pool_sb
-                                CLI_SERVICE_URL = pool_url
-                                _logger.info(
-                                    "Claimed CLI sandbox from warm pool (async)",
-                                    extra={
-                                        "sandbox_id": sandbox_id,
-                                        "sandbox_name": sandbox_name,
-                                        "job_id": job_id,
-                                    },
-                                )
-                                # Update tags to reflect active use
-                                await pool_sb.set_tags.aio(
-                                    {
-                                        "pool": "cli",
-                                        "status": "claimed",
-                                        "role": "claude-cli-service",
-                                        "app": "test-sandbox",
-                                        "port": str(CLI_SERVICE_PORT),
-                                    }
-                                )
-                                # Trigger async pool replenishment
-                                try:
-                                    replenish_cli_warm_pool.spawn()
-                                except Exception:
-                                    pass
-                                return CLI_SANDBOX, CLI_SERVICE_URL
-                    except Exception:
-                        _logger.warning(
-                            "Failed to use claimed CLI pool sandbox (async), will create new",
-                            exc_info=True,
-                            extra={"sandbox_id": sandbox_id},
-                        )
-                        remove_from_cli_pool(sandbox_id)
-        except Exception:
-            _logger.warning(
-                "Error checking CLI warm pool (async), will create new sandbox", exc_info=True
-            )
-
-    cli_vol = _get_claude_cli_volume()
-    try:
-        CLI_SANDBOX = await modal.Sandbox.create.aio(
-            "uvicorn",
-            "agent_sandbox.controllers.cli_controller:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(CLI_SERVICE_PORT),
-            app=app,
-            image=sandbox_image,  # Use snapshot image if available
-            secrets=agent_sdk_secrets,
-            workdir=str(CLAUDE_CLI_APP_ROOT),
-            name=CLI_SANDBOX_NAME,
-            encrypted_ports=CLI_SERVICE_PORTS,
-            volumes={_settings.claude_cli_fs_root: cli_vol},
-            timeout=_settings.claude_cli_sandbox_timeout,
-            idle_timeout=_settings.claude_cli_sandbox_idle_timeout,
-            **_cli_sandbox_resource_kwargs(),
-            verbose=True,
-        )
-    except modal_exc.AlreadyExistsError:
-        try:
-            CLI_SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", CLI_SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{CLI_SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
-
-    await CLI_SANDBOX.set_tags.aio(
-        {"role": "claude-cli-service", "app": "test-sandbox", "port": str(CLI_SERVICE_PORT)}
-    )
-
-    deadline = anyio.current_time() + 30
-    CLI_SERVICE_URL = None
-    while anyio.current_time() < deadline:
-        tunnels = await CLI_SANDBOX.tunnels.aio()
-        if CLI_SERVICE_PORT in tunnels and getattr(tunnels[CLI_SERVICE_PORT], "url", None):
-            CLI_SERVICE_URL = tunnels[CLI_SERVICE_PORT].url
-            break
-        await anyio.sleep(0.5)
-
-    if not CLI_SERVICE_URL:
-        raise RuntimeError("Failed to start Claude CLI sandbox or get service URL")
-
-    await _wait_for_service_aio(CLI_SERVICE_URL)
-    try:
-        session_metadata: dict = {
-            "id": CLI_SANDBOX.object_id,
-            "url": CLI_SERVICE_URL,
-            "volume": CLI_PERSIST_VOL_NAME,
-            "created_at": int(time.time()),
-            "tags": {
-                "role": "claude-cli-service",
-                "app": "test-sandbox",
-                "port": str(CLI_SERVICE_PORT),
-            },
-            "status": "running",
-        }
-        # Track snapshot restoration for observability
-        if restored_from_snapshot and job_id:
-            session_metadata["restored_from_job"] = job_id
-            session_metadata["restored_from_snapshot"] = True
-        SESSIONS[CLI_SANDBOX_NAME] = session_metadata
-    except Exception:
-        pass
-
-    return CLI_SANDBOX, CLI_SERVICE_URL
-
-
 @app.cls(
     image=agent_sdk_image,
     secrets=agent_sdk_secrets,
@@ -5023,263 +3444,6 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
         question: Natural-language query to send to the agent.
     """
     AgentRunner().run.remote(question)
-
-
-@app.function(
-    image=claude_cli_image,
-    secrets=agent_sdk_secrets,
-    timeout=60 * 60 * 24,
-    **_function_runtime_kwargs(include_autoscale=False),
-)
-def run_claude_cli_remote(
-    prompt: str = DEFAULT_QUESTION,
-    allowed_tools: str | None = None,
-    dangerously_skip_permissions: bool = True,
-    output_format: str = "json",
-    timeout_seconds: int = 120,
-    max_turns: int | None = None,
-    job_id: str | None = None,
-    return_stdout: bool = False,
-    debug: bool = False,
-    probe: str | None = None,
-    write_result_path: str | None = None,
-    warm_id: str | None = None,
-) -> dict | str:
-    """Run Claude Code CLI in a dedicated sandbox and return the response."""
-    tools_list = None
-    if allowed_tools:
-        tools_list = [tool.strip() for tool in allowed_tools.split(",") if tool.strip()]
-
-    normalized_job_id = normalize_job_id(job_id)
-    env = claude_cli_env()
-    require_claude_cli_auth(env)
-
-    request_body = ClaudeCliRequest(
-        prompt=prompt,
-        allowed_tools=tools_list,
-        dangerously_skip_permissions=dangerously_skip_permissions,
-        output_format=output_format,
-        timeout_seconds=timeout_seconds,
-        max_turns=max_turns,
-        job_id=normalized_job_id,
-        debug=debug,
-        probe=probe,
-        write_result_path=write_result_path,
-    )
-
-    _logger.info(
-        "claude_cli.invoke",
-        extra={
-            "job_id": normalized_job_id,
-            "output_format": output_format,
-            "probe": probe is not None,
-            "warm_id": warm_id,
-        },
-    )
-
-    # Check for pre-warmed sandbox (from POST /warm)
-    settings = Settings()
-    if warm_id and settings.enable_prewarm:
-        prewarm_claimed = claim_prewarm(warm_id, normalized_job_id or "anonymous")
-        if prewarm_claimed:
-            _logger.info(
-                "CLI using pre-warmed sandbox",
-                extra={
-                    "warm_id": warm_id,
-                    "sandbox_id": prewarm_claimed.get("sandbox_id"),
-                    "prewarm_status": prewarm_claimed.get("status"),
-                },
-            )
-
-    # Pass job_id for potential snapshot restoration
-    # If pre-warm was claimed, the sandbox should already be ready in globals
-    sb, url = get_or_start_cli_sandbox(job_id=normalized_job_id)
-    headers: dict[str, str] = {}
-    settings = Settings()
-    if settings.enforce_connect_token:
-        creds = sb.create_connect_token(user_metadata={"job_id": normalized_job_id or "unknown"})
-        headers = {"Authorization": f"Bearer {creds.token}"}
-
-    try:
-        timeout = httpx.Timeout(timeout_seconds + 60, connect=30.0)
-        response = httpx.post(
-            f"{url.rstrip('/')}/execute",
-            json=request_body.model_dump(),
-            headers=headers,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPStatusError as exc:
-        try:
-            payload = exc.response.json()
-        except Exception:
-            payload = {}
-        message = payload.get("error") or exc.response.text or str(exc)
-        raise RuntimeError(message) from exc
-    except Exception as exc:
-        raise RuntimeError(f"Claude CLI sandbox request failed: {exc}") from exc
-
-    if payload and payload.get("ok") is False:
-        message = payload.get("error") or payload.get("stderr") or "Claude CLI sandbox run failed"
-        raise RuntimeError(message)
-
-    # Trigger CLI job snapshot after successful execution (fire-and-forget)
-    if (
-        normalized_job_id
-        and settings.enable_cli_job_snapshots
-        and should_snapshot_cli_job(normalized_job_id, settings.cli_snapshot_min_interval_seconds)
-    ):
-        try:
-            snapshot_cli_job_state.spawn(normalized_job_id, sb.object_id)
-        except Exception:
-            _logger.debug(
-                "Failed to spawn CLI job snapshot",
-                exc_info=True,
-                extra={"job_id": normalized_job_id},
-            )
-
-    if return_stdout:
-        cli_stdout = (payload.get("stdout") or "").strip()
-        cli_stderr = (payload.get("stderr") or "").strip()
-        if cli_stdout or cli_stderr:
-            return cli_stdout or cli_stderr
-        return json.dumps(payload)
-
-    return payload
-
-
-# =============================================================================
-# RALPH WIGGUM MODAL FUNCTION
-# =============================================================================
-
-
-@app.function(
-    image=claude_cli_image,
-    secrets=agent_sdk_secrets,
-    timeout=86400,  # 24 hours
-)
-def run_ralph_remote(
-    job_id: str,
-    prd_json: str,
-    workspace_source_json: str,
-    prompt_template: str | None = None,
-    max_iterations: int = 10,
-    timeout_per_iteration: int = 300,
-    first_iteration_timeout: int | None = None,
-    allowed_tools: str = "Read,Write,Bash,Glob,Grep",
-    feedback_commands: str = "",
-    feedback_timeout: int = 120,
-    auto_commit: bool = True,
-    max_consecutive_failures: int = 3,
-    resume_checkpoint_json: str | None = None,
-    # Push options
-    push_on_complete: bool = False,
-    remote_url: str | None = None,
-    target_branch: str = "ralph-output",
-    force_push: bool = False,
-) -> dict:
-    """Run Ralph autonomous coding loop inside a dedicated Claude CLI sandbox.
-
-    Args:
-        job_id: Unique job identifier.
-        prd_json: JSON-serialized PRD.
-        workspace_source_json: JSON-serialized workspace source config.
-        prompt_template: Custom prompt template.
-        max_iterations: Maximum iterations.
-        timeout_per_iteration: CLI timeout per iteration.
-        first_iteration_timeout: Longer timeout for first iteration (cold start).
-        allowed_tools: Comma-separated list of allowed CLI tools.
-        feedback_commands: Comma-separated list of feedback commands.
-        feedback_timeout: Timeout for feedback commands.
-        auto_commit: Whether to auto-commit changes.
-        max_consecutive_failures: Max failures before stopping.
-        resume_checkpoint_json: JSON-serialized checkpoint for resuming a paused loop.
-        push_on_complete: Push commits to remote after successful completion.
-        remote_url: GitHub repository URL for push operations.
-        target_branch: Branch name to push to (default: ralph-output).
-        force_push: Whether to force push (use with caution).
-    """
-    normalized_job_id = normalize_job_id(job_id)
-    if not normalized_job_id:
-        raise ValueError("job_id must be a valid UUID")
-
-    env = claude_cli_env()
-    require_claude_cli_auth(env)
-
-    tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()]
-    feedback_list = [c.strip() for c in feedback_commands.split(",") if c.strip()]
-
-    # Build request body
-    request_dict = {
-        "job_id": normalized_job_id,
-        "prd": json.loads(prd_json),
-        "workspace_source": json.loads(workspace_source_json),
-        "prompt_template": prompt_template,
-        "max_iterations": max_iterations,
-        "timeout_per_iteration": timeout_per_iteration,
-        "first_iteration_timeout": first_iteration_timeout,
-        "allowed_tools": tools_list,
-        "feedback_commands": feedback_list,
-        "feedback_timeout": feedback_timeout,
-        "auto_commit": auto_commit,
-        "max_consecutive_failures": max_consecutive_failures,
-        # Push options
-        "push_on_complete": push_on_complete,
-        "remote_url": remote_url,
-        "target_branch": target_branch,
-        "force_push": force_push,
-    }
-
-    # Add resume checkpoint if provided
-    if resume_checkpoint_json:
-        request_dict["resume_checkpoint"] = json.loads(resume_checkpoint_json)
-
-    request_body = RalphExecuteRequest(**request_dict)
-
-    estimated_runtime = max_iterations * timeout_per_iteration
-    # Pass job_id for potential snapshot restoration
-    sb, url = get_or_start_cli_sandbox(job_id=normalized_job_id)
-    headers: dict[str, str] = {}
-    settings = Settings()
-    if settings.enforce_connect_token:
-        creds = sb.create_connect_token(user_metadata={"job_id": normalized_job_id})
-        headers = {"Authorization": f"Bearer {creds.token}"}
-
-    try:
-        timeout = httpx.Timeout(estimated_runtime + 300, connect=30.0)
-        response = httpx.post(
-            f"{url.rstrip('/')}/ralph/execute",
-            json=request_body.model_dump(),
-            headers=headers,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPStatusError as exc:
-        try:
-            payload = exc.response.json()
-        except Exception:
-            payload = {}
-        message = payload.get("error") or exc.response.text or str(exc)
-        raise RuntimeError(message) from exc
-    except Exception as exc:
-        raise RuntimeError(f"Ralph sandbox request failed: {exc}") from exc
-
-    # Trigger CLI job snapshot after Ralph execution (fire-and-forget)
-    if settings.enable_cli_job_snapshots and should_snapshot_cli_job(
-        normalized_job_id, settings.cli_snapshot_min_interval_seconds
-    ):
-        try:
-            snapshot_cli_job_state.spawn(normalized_job_id, sb.object_id)
-        except Exception:
-            _logger.debug(
-                "Failed to spawn CLI job snapshot for Ralph",
-                exc_info=True,
-                extra={"job_id": normalized_job_id},
-            )
-
-    return payload
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
@@ -5388,10 +3552,6 @@ def process_job_queue() -> None:
         attempt = bump_attempts(job_id)
         started_at = int(time.time())
         record = get_job_record(job_id) or {}
-        spawn_context = (record.get("metadata") or {}).get("spawn_context") or {}
-        sandbox_type = spawn_context.get("sandbox_type", "agent_sdk")
-        allowed_tools = spawn_context.get("allowed_tools")
-        timeout_seconds = spawn_context.get("timeout_seconds")
         created_at = record.get("created_at")
         queue_latency_ms = None
         if created_at is not None:
@@ -5405,57 +3565,22 @@ def process_job_queue() -> None:
             },
         )
         try:
-            if sandbox_type == "cli":
-                cli_sb, cli_url = get_or_start_cli_sandbox(job_id=job_id)
-                update_job(job_id, {"sandbox_id": cli_sb.object_id})
-                _logger.info(
-                    "job.start",
-                    extra={
-                        "job_id": job_id,
-                        "attempt": attempt,
-                        "sandbox_id": cli_sb.object_id,
-                        "sandbox_type": "cli",
-                    },
-                )
-                headers = {}
-                if settings.enforce_connect_token:
-                    creds = cli_sb.create_connect_token(user_metadata={"job_id": job_id})
-                    headers = {"Authorization": f"Bearer {creds.token}"}
-                cli_allowed_tools = None
-                if isinstance(allowed_tools, str):
-                    cli_allowed_tools = [t.strip() for t in allowed_tools.split(",") if t.strip()]
-                elif isinstance(allowed_tools, list):
-                    cli_allowed_tools = allowed_tools
-                cli_payload = {
-                    "prompt": question,
-                    "job_id": job_id,
-                    "allowed_tools": cli_allowed_tools,
-                }
-                if timeout_seconds:
-                    cli_payload["timeout_seconds"] = timeout_seconds
-                r = httpx.post(
-                    f"{cli_url.rstrip('/')}/execute",
-                    json=cli_payload,
-                    headers=headers,
-                    timeout=httpx.Timeout(120.0, connect=30.0),
-                )
-            else:
-                sb, url = get_or_start_background_sandbox()
-                update_job(job_id, {"sandbox_id": sb.object_id})
-                _logger.info(
-                    "job.start",
-                    extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
-                )
-                headers = {}
-                if settings.enforce_connect_token:
-                    creds = sb.create_connect_token(user_metadata={"job_id": job_id})
-                    headers = {"Authorization": f"Bearer {creds.token}"}
-                r = httpx.post(
-                    f"{url.rstrip('/')}/query",
-                    json={"question": question, "job_id": job_id},
-                    headers=headers,
-                    timeout=httpx.Timeout(120.0, connect=30.0),
-                )
+            sb, url = get_or_start_background_sandbox()
+            update_job(job_id, {"sandbox_id": sb.object_id})
+            _logger.info(
+                "job.start",
+                extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
+            )
+            headers = {}
+            if settings.enforce_connect_token:
+                creds = sb.create_connect_token(user_metadata={"job_id": job_id})
+                headers = {"Authorization": f"Bearer {creds.token}"}
+            r = httpx.post(
+                f"{url.rstrip('/')}/query",
+                json={"question": question, "job_id": job_id},
+                headers=headers,
+                timeout=httpx.Timeout(120.0, connect=30.0),
+            )
             r.raise_for_status()
             result = r.json()
             _reload_persist_volume()
@@ -5868,89 +3993,6 @@ def snapshot_session_state(session_id: str, sandbox_id: str | None = None) -> di
         return {"ok": False, "error": str(e), "type": e.__class__.__name__}
     except Exception:
         _logger.exception("Unexpected error snapshotting session %s", session_id)
-        return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
-
-
-@app.function(image=claude_cli_image, secrets=agent_sdk_secrets, timeout=300, **_retry_kwargs())
-def snapshot_cli_job_state(job_id: str, sandbox_id: str | None = None) -> dict:
-    """Capture CLI sandbox filesystem state for a specific job.
-
-    Creates a snapshot tied to a job_id, enabling job state restoration when
-    resuming a job after the CLI sandbox has timed out. This enables
-    "leave and come back" workflows where the CLI's installed tools, downloaded
-    files, and other filesystem state are preserved.
-
-    Unlike snapshot_service() which creates a global snapshot, this function
-    stores the snapshot reference keyed by job_id in CLI_JOB_SNAPSHOTS,
-    allowing per-job restoration.
-
-    Args:
-        job_id: The CLI job ID (UUID) to associate with this snapshot.
-
-    Returns:
-        Dict with snapshot info:
-        - ok: True if snapshot succeeded
-        - job_id: The job ID this snapshot is associated with
-        - image_id: Modal Image object_id for restoration
-        - sandbox_name: Name of the sandbox that was snapshotted
-        - created_at: Unix timestamp
-
-    Usage:
-        Called after CLI job completes when job snapshots are enabled:
-        ```python
-        if should_snapshot_cli_job(job_id, min_interval_seconds=60):
-            result = snapshot_cli_job_state.spawn(job_id, sb.object_id)
-        ```
-
-    Restoration:
-        When resuming a job after sandbox timeout, use get_cli_job_snapshot()
-        to retrieve the image_id and create a new sandbox from it.
-
-    See: https://modal.com/docs/guide/sandbox#filesystem-snapshots
-    """
-    if not job_id:
-        return {"ok": False, "error": "job_id is required"}
-
-    # Check if we should skip snapshotting (throttling)
-    if not should_snapshot_cli_job(job_id, _settings.cli_snapshot_min_interval_seconds):
-        existing = get_cli_job_snapshot(job_id)
-        return {
-            "ok": True,
-            "skipped": True,
-            "reason": "Recent snapshot exists",
-            "job_id": job_id,
-            "existing_snapshot": existing,
-        }
-
-    try:
-        if sandbox_id:
-            sb = modal.Sandbox.from_id(sandbox_id)
-        else:
-            sb, _ = get_or_start_cli_sandbox()
-        img = sb.snapshot_filesystem()
-        snapshot_info = store_cli_job_snapshot(
-            job_id=job_id,
-            image_id=img.object_id,
-            sandbox_name=CLI_SANDBOX_NAME,
-        )
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "image_id": img.object_id,
-            "sandbox_name": CLI_SANDBOX_NAME,
-            "created_at": snapshot_info["created_at"],
-        }
-    except modal_exc.SandboxTerminatedError:
-        return {
-            "ok": False,
-            "error": "CLI sandbox terminated, cannot snapshot",
-            "type": "SandboxTerminatedError",
-        }
-    except modal_exc.Error as e:
-        _logger.warning("Failed to snapshot CLI job %s: %s", job_id, e)
-        return {"ok": False, "error": str(e), "type": e.__class__.__name__}
-    except Exception:
-        _logger.exception("Unexpected error snapshotting CLI job %s", job_id)
         return {"ok": False, "error": "Unexpected error", "type": "UnexpectedException"}
 
 

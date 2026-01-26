@@ -710,7 +710,7 @@ def record_session_start(
     """Record that a new session has started.
 
     Args:
-        sandbox_type: Type of sandbox ("agent_sdk", "cli", "ralph")
+        sandbox_type: Type of sandbox ("agent_sdk")
         job_id: Optional job ID for correlation
         user_id: Optional user ID for unique user tracking
     """
@@ -721,8 +721,6 @@ def record_session_start(
         bucket = STATS_STORE.get(key) or {
             "timestamp": now,
             "agent_sdk": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
-            "cli": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
-            "ralph": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
             "users": set(),
             "durations": [],
             "queue_latencies": [],
@@ -758,7 +756,7 @@ def record_session_end(
     """Record that a session has ended.
 
     Args:
-        sandbox_type: Type of sandbox ("agent_sdk", "cli", "ralph")
+        sandbox_type: Type of sandbox ("agent_sdk")
         status: Final status ("complete", "failed", "canceled")
         duration_ms: Session duration in milliseconds
         queue_latency_ms: Time from enqueue to start in milliseconds
@@ -773,8 +771,6 @@ def record_session_end(
         bucket = STATS_STORE.get(key) or {
             "timestamp": now,
             "agent_sdk": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
-            "cli": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
-            "ralph": {"started": 0, "completed": 0, "failed": 0, "canceled": 0},
             "users": [],
             "durations": [],
             "queue_latencies": [],
@@ -841,18 +837,6 @@ def get_stats(period_hours: int = 24, include_time_series: bool = False) -> dict
             "failed_sessions": 0,
             "canceled_sessions": 0,
         },
-        "cli": {
-            "total_sessions": 0,
-            "completed_sessions": 0,
-            "failed_sessions": 0,
-            "canceled_sessions": 0,
-        },
-        "ralph": {
-            "total_sessions": 0,
-            "completed_sessions": 0,
-            "failed_sessions": 0,
-            "canceled_sessions": 0,
-        },
         "totals": {
             "total_sessions": 0,
             "completed_sessions": 0,
@@ -879,7 +863,7 @@ def get_stats(period_hours: int = 24, include_time_series: bool = False) -> dict
 
         if bucket:
             # Aggregate by sandbox type
-            for sandbox_type in ["agent_sdk", "cli", "ralph"]:
+            for sandbox_type in ["agent_sdk"]:
                 if sandbox_type in bucket:
                     type_stats = bucket[sandbox_type]
                     result[sandbox_type]["total_sessions"] += type_stats.get("started", 0)
@@ -907,31 +891,26 @@ def get_stats(period_hours: int = 24, include_time_series: bool = False) -> dict
                     {
                         "hour": current.strftime("%Y-%m-%dT%H"),
                         "started": sum(
-                            bucket.get(st, {}).get("started", 0)
-                            for st in ["agent_sdk", "cli", "ralph"]
+                            bucket.get(st, {}).get("started", 0) for st in ["agent_sdk"]
                         ),
                         "completed": sum(
-                            bucket.get(st, {}).get("completed", 0)
-                            for st in ["agent_sdk", "cli", "ralph"]
+                            bucket.get(st, {}).get("completed", 0) for st in ["agent_sdk"]
                         ),
-                        "failed": sum(
-                            bucket.get(st, {}).get("failed", 0)
-                            for st in ["agent_sdk", "cli", "ralph"]
-                        ),
+                        "failed": sum(bucket.get(st, {}).get("failed", 0) for st in ["agent_sdk"]),
                     }
                 )
 
         current += timedelta(hours=1)
 
     # Calculate totals
-    for sandbox_type in ["agent_sdk", "cli", "ralph"]:
+    for sandbox_type in ["agent_sdk"]:
         result["totals"]["total_sessions"] += result[sandbox_type]["total_sessions"]
         result["totals"]["completed_sessions"] += result[sandbox_type]["completed_sessions"]
         result["totals"]["failed_sessions"] += result[sandbox_type]["failed_sessions"]
         result["totals"]["canceled_sessions"] += result[sandbox_type]["canceled_sessions"]
 
     # Calculate averages and rates
-    for sandbox_type in ["agent_sdk", "cli", "ralph", "totals"]:
+    for sandbox_type in ["agent_sdk", "totals"]:
         stats = result[sandbox_type]
         finished = stats["completed_sessions"] + stats["failed_sessions"]
         if finished > 0:
@@ -1127,186 +1106,6 @@ def delete_session_snapshot(session_id: str) -> bool:
     """
     try:
         del SESSION_SNAPSHOTS[session_id]
-        return True
-    except KeyError:
-        return False
-
-
-# =============================================================================
-# CLI JOB SNAPSHOT MANAGEMENT
-# =============================================================================
-# Functions for storing and retrieving CLI sandbox filesystem snapshots.
-# Snapshots capture the CLI sandbox filesystem state after job execution,
-# enabling state restoration when resuming a job after sandbox timeout.
-# Unlike session snapshots (keyed by session_id), CLI snapshots are keyed
-# by job_id since CLI sandboxes use a job-based execution model.
-
-CLI_JOB_SNAPSHOTS = modal.Dict.from_name(
-    _settings.cli_job_snapshot_store_name, create_if_missing=True
-)
-
-
-def store_cli_job_snapshot(
-    job_id: str,
-    image_id: str,
-    sandbox_name: str,
-) -> dict[str, Any]:
-    """Store a filesystem snapshot reference for a CLI job.
-
-    Records the Modal Image ID from a sandbox.snapshot_filesystem() call,
-    allowing the CLI job's filesystem state to be restored when the job
-    resumes in a new sandbox.
-
-    Args:
-        job_id: The CLI job ID (UUID) to associate with this snapshot.
-        image_id: Modal Image object_id from sandbox.snapshot_filesystem().
-        sandbox_name: Name of the sandbox that was snapshotted (e.g., "claude-cli-runner").
-
-    Returns:
-        Dict with snapshot metadata including job_id, image_id, sandbox_name,
-        and created_at timestamp.
-
-    Storage Structure:
-        CLI_JOB_SNAPSHOTS[job_id] = {
-            "job_id": "550e8400-...",
-            "image_id": "im-xxx",
-            "sandbox_name": "claude-cli-runner",
-            "created_at": 1704067200,
-        }
-
-    Usage:
-        Called after CLI job completes to capture filesystem state:
-        ```python
-        # After CLI execution completes
-        image = sandbox.snapshot_filesystem()
-        store_cli_job_snapshot(
-            job_id=job_id,
-            image_id=image.object_id,
-            sandbox_name="claude-cli-runner",
-        )
-        ```
-
-    Note:
-        - Only stores the latest snapshot per job (overwrites previous)
-        - image_id can be used to create a new sandbox from the snapshot:
-          `modal.Sandbox.create(image=modal.Image.from_id(image_id), ...)`
-        - Snapshots persist in Modal Dict across sandbox restarts
-
-    See Also:
-        - get_cli_job_snapshot(): Retrieve snapshot for job restoration
-        - should_snapshot_cli_job(): Check if snapshot is needed
-    """
-    now = int(time.time())
-    snapshot_info = {
-        "job_id": job_id,
-        "image_id": image_id,
-        "sandbox_name": sandbox_name,
-        "created_at": now,
-    }
-    CLI_JOB_SNAPSHOTS[job_id] = snapshot_info
-    return snapshot_info
-
-
-def get_cli_job_snapshot(job_id: str) -> dict[str, Any] | None:
-    """Retrieve the stored filesystem snapshot for a CLI job.
-
-    Looks up the most recent snapshot for the given job ID, which can be
-    used to restore filesystem state when creating a new sandbox.
-
-    Args:
-        job_id: The CLI job ID (UUID) to look up.
-
-    Returns:
-        Snapshot metadata dict if found, containing:
-        - job_id: The job identifier
-        - image_id: Modal Image object_id for sandbox.create(image=...)
-        - sandbox_name: Original sandbox name
-        - created_at: Unix timestamp of snapshot
-
-        None if no snapshot exists for this job.
-
-    Usage:
-        Called when resuming a job to check for restorable state:
-        ```python
-        snapshot = get_cli_job_snapshot(job_id)
-        if snapshot:
-            # Create sandbox from snapshot
-            image = modal.Image.from_id(snapshot["image_id"])
-            sandbox = modal.Sandbox.create(image=image, ...)
-        ```
-
-    See Also:
-        - store_cli_job_snapshot(): Store new snapshot
-        - should_snapshot_cli_job(): Check if new snapshot needed
-    """
-    return CLI_JOB_SNAPSHOTS.get(job_id)
-
-
-def should_snapshot_cli_job(
-    job_id: str,
-    min_interval_seconds: int = 60,
-) -> bool:
-    """Check if a new snapshot should be taken for a CLI job.
-
-    Prevents excessive snapshot creation by enforcing a minimum interval
-    between snapshots for the same job. Snapshots are expensive I/O
-    operations, so throttling is important for high-frequency executions.
-
-    Args:
-        job_id: The job to check.
-        min_interval_seconds: Minimum seconds since last snapshot before
-            allowing a new one. Default 60 seconds.
-
-    Returns:
-        True if no snapshot exists for this job, or if the last snapshot
-        was taken more than min_interval_seconds ago.
-        False if a recent snapshot exists (within the interval).
-
-    Usage:
-        ```python
-        if should_snapshot_cli_job(job_id, min_interval_seconds=60):
-            image = sandbox.snapshot_filesystem()
-            store_cli_job_snapshot(job_id, image.object_id, sandbox_name)
-        ```
-
-    Throttling Behavior:
-        - First execution for a job: Always snapshots (no existing snapshot)
-        - Rapid follow-ups (<60s): Skip snapshot to reduce I/O
-        - After interval: Snapshot to capture recent changes
-
-    See Also:
-        - store_cli_job_snapshot(): Store new snapshot
-        - get_cli_job_snapshot(): Retrieve existing snapshot
-    """
-    snapshot = CLI_JOB_SNAPSHOTS.get(job_id)
-    if not snapshot:
-        return True
-    created_at = snapshot.get("created_at", 0)
-    now = int(time.time())
-    return (now - created_at) >= min_interval_seconds
-
-
-def delete_cli_job_snapshot(job_id: str) -> bool:
-    """Delete the stored snapshot for a CLI job.
-
-    Removes the snapshot reference from storage. The underlying Modal Image
-    may still exist in Modal's infrastructure but will no longer be associated
-    with this job.
-
-    Args:
-        job_id: The job whose snapshot should be deleted.
-
-    Returns:
-        True if a snapshot was deleted, False if no snapshot existed.
-
-    Usage:
-        Called when a job is explicitly cleaned up:
-        ```python
-        delete_cli_job_snapshot(job_id)
-        ```
-    """
-    try:
-        del CLI_JOB_SNAPSHOTS[job_id]
         return True
     except KeyError:
         return False
@@ -1636,329 +1435,6 @@ def cleanup_stale_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
 
 
 # =============================================================================
-# CLI WARM POOL MANAGEMENT
-# =============================================================================
-# Functions for managing a pool of pre-warmed CLI sandboxes.
-# The pool reduces cold-start latency by keeping CLI sandboxes ready for use.
-# Pool entries are stored in a Modal Dict keyed by sandbox object_id.
-#
-# Pool Entry Structure:
-#   CLI_WARM_POOL[sandbox_id] = {
-#       "sandbox_id": "sb-xxx",           # Modal sandbox object_id
-#       "status": "warm" | "claimed",      # Current status
-#       "created_at": 1704067200,          # Unix timestamp when added to pool
-#       "claimed_at": None | 1704067300,   # Unix timestamp when claimed
-#       "claimed_by": None | "job_id",     # Job that claimed this sandbox
-#       "sandbox_name": "cli-pool-xxx",    # Unique name for this sandbox
-#   }
-#
-# The pool uses optimistic locking via status transitions:
-#   - Only "warm" sandboxes can be claimed
-#   - Claiming atomically updates status to "claimed"
-#   - Multiple callers may race; only one succeeds per sandbox
-
-CLI_WARM_POOL = modal.Dict.from_name(_settings.cli_warm_pool_store_name, create_if_missing=True)
-
-
-def generate_cli_pool_sandbox_name() -> str:
-    """Generate a unique name for a CLI pool sandbox.
-
-    Returns:
-        A name like "cli-pool-abc12345" that can be used to identify
-        CLI pool sandboxes via Sandbox.from_name().
-    """
-    suffix = uuid.uuid4().hex[:8]
-    return f"cli-pool-{suffix}"
-
-
-def register_cli_warm_sandbox(
-    sandbox_id: str,
-    sandbox_name: str,
-) -> dict[str, Any]:
-    """Register a new CLI sandbox in the warm pool.
-
-    Adds a CLI sandbox to the pool with "warm" status, making it available
-    for claiming by incoming requests.
-
-    Args:
-        sandbox_id: Modal sandbox object_id from sandbox.object_id.
-        sandbox_name: Unique name assigned to this sandbox.
-
-    Returns:
-        Dict with pool entry metadata.
-
-    Usage:
-        ```python
-        sb = modal.Sandbox.create(name=pool_name, ...)
-        register_cli_warm_sandbox(sb.object_id, pool_name)
-        ```
-
-    Note:
-        Call this after successfully creating a warm CLI sandbox and
-        verifying it's healthy (e.g., after health check passes).
-    """
-    now = int(time.time())
-    entry = {
-        "sandbox_id": sandbox_id,
-        "sandbox_name": sandbox_name,
-        "status": "warm",
-        "created_at": now,
-        "claimed_at": None,
-        "claimed_by": None,
-    }
-    CLI_WARM_POOL[sandbox_id] = entry
-    return entry
-
-
-def claim_cli_warm_sandbox(
-    job_id: str | None = None,
-) -> dict[str, Any] | None:
-    """Attempt to claim a warm CLI sandbox from the pool.
-
-    Iterates through warm CLI sandboxes and attempts to atomically claim one.
-    Uses optimistic locking by checking status before updating.
-
-    Args:
-        job_id: Optional job ID to associate with the claim.
-            Used for debugging and tracking which job owns which sandbox.
-
-    Returns:
-        Pool entry dict if a sandbox was successfully claimed, containing:
-        - sandbox_id: Modal sandbox object_id for retrieval
-        - sandbox_name: Name for Sandbox.from_name()
-        - status: "claimed"
-        - claimed_at: Claim timestamp
-        - claimed_by: The job_id
-
-        None if no warm CLI sandboxes are available.
-
-    Race Condition Handling:
-        Multiple callers may attempt to claim the same sandbox.
-        This function handles races by:
-        1. Fetching entry and checking status == "warm"
-        2. Updating status to "claimed"
-        3. If another caller claimed it first, trying the next sandbox
-
-        The window between fetch and update is small, so most races
-        resolve naturally. For high-contention scenarios, consider
-        increasing pool size.
-
-    Usage:
-        ```python
-        claim = claim_cli_warm_sandbox(job_id="550e8400-...")
-        if claim:
-            sb = modal.Sandbox.from_id(claim["sandbox_id"])
-            # Use sandbox...
-        ```
-    """
-    now = int(time.time())
-
-    # Get all pool entries
-    # Note: Modal Dict doesn't support atomic iteration with updates,
-    # so we iterate over keys and handle races
-    try:
-        all_entries = list(CLI_WARM_POOL.items())
-    except Exception:
-        return None
-
-    for sandbox_id, entry in all_entries:
-        if entry.get("status") != "warm":
-            continue
-
-        # Attempt to claim this sandbox
-        # Re-fetch to minimize race window
-        current = CLI_WARM_POOL.get(sandbox_id)
-        if not current or current.get("status") != "warm":
-            continue
-
-        # Update to claimed status
-        claimed_entry = {
-            **current,
-            "status": "claimed",
-            "claimed_at": now,
-            "claimed_by": job_id,
-        }
-        CLI_WARM_POOL[sandbox_id] = claimed_entry
-        return claimed_entry
-
-    return None
-
-
-def release_cli_warm_sandbox(sandbox_id: str) -> bool:
-    """Return a claimed CLI sandbox to the warm pool.
-
-    Resets a CLI sandbox's status from "claimed" back to "warm",
-    making it available for future requests.
-
-    Args:
-        sandbox_id: The Modal sandbox object_id to release.
-
-    Returns:
-        True if the sandbox was found and released, False otherwise.
-
-    Usage:
-        Called when a job ends but the sandbox is still healthy
-        and can be reused:
-        ```python
-        release_cli_warm_sandbox(sandbox_id)
-        ```
-
-    Note:
-        Only call this if the sandbox is still running and healthy.
-        If the sandbox terminated or had errors, use remove_from_cli_pool()
-        instead to clean up the pool entry.
-    """
-    entry = CLI_WARM_POOL.get(sandbox_id)
-    if not entry:
-        return False
-
-    updated = {
-        **entry,
-        "status": "warm",
-        "claimed_at": None,
-        "claimed_by": None,
-    }
-    CLI_WARM_POOL[sandbox_id] = updated
-    return True
-
-
-def remove_from_cli_pool(sandbox_id: str) -> bool:
-    """Remove a CLI sandbox entry from the pool.
-
-    Deletes the pool entry for a CLI sandbox that is no longer usable
-    (terminated, errored, or expired).
-
-    Args:
-        sandbox_id: The Modal sandbox object_id to remove.
-
-    Returns:
-        True if an entry was removed, False if not found.
-
-    Usage:
-        ```python
-        # After sandbox terminates or times out
-        remove_from_cli_pool(sandbox_id)
-        ```
-    """
-    try:
-        del CLI_WARM_POOL[sandbox_id]
-        return True
-    except KeyError:
-        return False
-
-
-def get_cli_warm_pool_entries() -> list[dict[str, Any]]:
-    """Get all entries in the CLI warm pool.
-
-    Returns:
-        List of pool entry dicts with sandbox metadata.
-
-    Usage:
-        ```python
-        entries = get_cli_warm_pool_entries()
-        warm_count = sum(1 for e in entries if e["status"] == "warm")
-        ```
-    """
-    try:
-        return [entry for _, entry in CLI_WARM_POOL.items()]
-    except Exception:
-        return []
-
-
-def get_cli_warm_pool_status() -> dict[str, Any]:
-    """Get current status of the CLI warm pool.
-
-    Returns:
-        Dict with pool statistics:
-        - total: Total sandboxes in pool (warm + claimed)
-        - warm: Available warm sandboxes
-        - claimed: Currently claimed sandboxes
-        - entries: List of pool entries with metadata
-
-    Usage:
-        ```python
-        status = get_cli_warm_pool_status()
-        if status["warm"] < settings.cli_warm_pool_size:
-            # Replenish pool
-        ```
-    """
-    entries = get_cli_warm_pool_entries()
-    warm = sum(1 for e in entries if e.get("status") == "warm")
-    claimed = sum(1 for e in entries if e.get("status") == "claimed")
-
-    return {
-        "total": len(entries),
-        "warm": warm,
-        "claimed": claimed,
-        "entries": entries,
-    }
-
-
-def get_expired_cli_pool_entries(max_age_seconds: int = 3600) -> list[dict[str, Any]]:
-    """Get CLI pool entries older than the specified max age.
-
-    Returns CLI sandboxes that should be recycled due to age. This ensures
-    pool sandboxes pick up image changes and don't accumulate state.
-
-    Args:
-        max_age_seconds: Maximum age before a sandbox is considered expired.
-            Default 3600 seconds (1 hour).
-
-    Returns:
-        List of expired pool entries that should be removed.
-
-    Usage:
-        ```python
-        expired = get_expired_cli_pool_entries(max_age_seconds=3600)
-        for entry in expired:
-            # Terminate sandbox and remove from pool
-            sb = modal.Sandbox.from_id(entry["sandbox_id"])
-            sb.terminate()
-            remove_from_cli_pool(entry["sandbox_id"])
-        ```
-    """
-    now = int(time.time())
-    entries = get_cli_warm_pool_entries()
-    cutoff = now - max_age_seconds
-
-    return [
-        entry
-        for entry in entries
-        if entry.get("created_at", now) < cutoff and entry.get("status") == "warm"
-    ]
-
-
-def cleanup_stale_cli_pool_entries(sandbox_ids_to_keep: set[str]) -> int:
-    """Remove CLI pool entries for sandboxes that no longer exist.
-
-    Used by the CLI pool maintainer to clean up entries for sandboxes
-    that have terminated unexpectedly.
-
-    Args:
-        sandbox_ids_to_keep: Set of sandbox_ids that are known to still exist.
-            Any entry not in this set will be removed.
-
-    Returns:
-        Number of stale entries removed.
-
-    Usage:
-        ```python
-        # Get list of live sandboxes from Modal
-        live_ids = {sb.object_id for sb in modal.Sandbox.list(tags={"pool": "cli"})}
-        removed = cleanup_stale_cli_pool_entries(live_ids)
-        ```
-    """
-    entries = get_cli_warm_pool_entries()
-    removed = 0
-    for entry in entries:
-        sandbox_id = entry.get("sandbox_id")
-        if sandbox_id and sandbox_id not in sandbox_ids_to_keep:
-            if remove_from_cli_pool(sandbox_id):
-                removed += 1
-    return removed
-
-
-# =============================================================================
 # Image Version Tracking
 # =============================================================================
 # These functions track deployed image versions to enable warm pool invalidation
@@ -2049,15 +1525,15 @@ def get_image_deployed_at() -> float | None:
 # Pre-warm Entry Structure:
 # {
 #     "warm_id": str,              # Unique correlation ID
-#     "sandbox_type": str,         # "agent_sdk" or "cli"
+#     "sandbox_type": str,         # "agent_sdk"
 #     "sandbox_id": str | None,    # Modal sandbox object_id (once prepared)
 #     "sandbox_url": str | None,   # Tunnel URL (once prepared)
 #     "status": str,               # "warming" | "ready" | "claimed" | "expired"
 #     "created_at": int,           # Unix timestamp
 #     "expires_at": int,           # Unix timestamp (created_at + timeout)
 #     "claimed_by": str | None,    # session_id/job_id (when claimed)
-#     "session_id": str | None,    # Optional session_id for Agent SDK
-#     "job_id": str | None,        # Optional job_id for CLI
+#     "session_id": str | None,    # Optional session_id for session restoration
+#     "job_id": str | None,        # Optional job_id for workspace setup
 # }
 # =============================================================================
 
@@ -2093,9 +1569,9 @@ def register_prewarm(
 
     Args:
         warm_id: Unique ID for correlation with future queries.
-        sandbox_type: "agent_sdk" or "cli".
-        session_id: Optional session_id for Agent SDK pre-warms.
-        job_id: Optional job_id for CLI pre-warms.
+        sandbox_type: "agent_sdk".
+        session_id: Optional session_id for session restoration.
+        job_id: Optional job_id for workspace setup.
         timeout_seconds: Custom timeout (defaults to settings.prewarm_timeout_seconds).
 
     Returns:
@@ -3682,519 +3158,6 @@ def get_multiplayer_status() -> dict[str, Any]:
 
 
 # =============================================================================
-# Ralph Control API (Pause/Resume)
-# =============================================================================
-# Functions for pausing, resuming, and managing Ralph loop execution.
-#
-# Control Entry Structure:
-#   RALPH_CONTROL[job_id] = {
-#       "job_id": str,              # Ralph job identifier
-#       "status": str,              # "running" | "pause_requested" | "paused" | "resumed"
-#       "pause_requested_at": int,  # Unix timestamp when pause was requested
-#       "paused_at": int | None,    # Unix timestamp when loop actually paused
-#       "resumed_at": int | None,   # Unix timestamp when loop resumed
-#       "requested_by": str | None, # Who requested pause/resume
-#       "reason": str | None,       # Why paused
-#       "checkpoint": dict | None,  # Checkpoint data for resume
-#       "expires_at": int,          # When this entry expires
-#   }
-#
-# Lifecycle:
-#   1. Client calls POST /ralph/{job_id}/pause
-#   2. Server sets status="pause_requested" in RALPH_CONTROL
-#   3. Ralph loop checks is_ralph_paused() before each iteration
-#   4. When paused, loop saves checkpoint and returns with status=PAUSED
-#   5. Client calls POST /ralph/{job_id}/resume
-#   6. Server spawns new Ralph function with checkpoint data
-#   7. Loop continues from saved checkpoint
-
-RALPH_CONTROL = modal.Dict.from_name(_settings.ralph_control_store_name, create_if_missing=True)
-
-
-def request_ralph_pause(
-    job_id: str,
-    requested_by: str | None = None,
-    reason: str | None = None,
-) -> dict[str, Any]:
-    """Request a Ralph loop to pause at the next safe point.
-
-    The pause won't take effect immediately - the loop will complete its
-    current iteration and then pause before starting the next one.
-
-    Args:
-        job_id: The Ralph job ID to pause.
-        requested_by: Optional identifier of who requested the pause.
-        reason: Optional reason for pausing.
-
-    Returns:
-        Dict with pause request status.
-
-    Usage:
-        ```python
-        result = request_ralph_pause(job_id, reason="Need to review progress")
-        # result["status"] == "pause_requested"
-        ```
-    """
-    now = int(time.time())
-    expiry = now + _settings.ralph_control_expiry_seconds
-
-    existing = RALPH_CONTROL.get(job_id)
-    if existing and existing.get("status") in ("pause_requested", "paused"):
-        return {
-            "job_id": job_id,
-            "status": "already_paused",
-            "paused_at": existing.get("paused_at"),
-            "message": "Ralph loop is already paused or pause is pending",
-        }
-
-    entry = {
-        "job_id": job_id,
-        "status": "pause_requested",
-        "pause_requested_at": now,
-        "paused_at": None,
-        "resumed_at": None,
-        "requested_by": requested_by,
-        "reason": reason,
-        "checkpoint": None,
-        "expires_at": expiry,
-    }
-    RALPH_CONTROL[job_id] = entry
-
-    return {
-        "job_id": job_id,
-        "status": "pause_requested",
-        "pause_requested_at": now,
-        "reason": reason,
-        "message": "Pause requested - loop will pause after current iteration",
-    }
-
-
-def is_ralph_paused(job_id: str) -> bool:
-    """Check if a Ralph loop has a pending pause request.
-
-    Called by the Ralph loop before each iteration to check if it should pause.
-
-    Args:
-        job_id: The Ralph job ID to check.
-
-    Returns:
-        True if pause is requested or loop is paused, False otherwise.
-
-    Usage:
-        ```python
-        # In Ralph loop
-        for iteration in range(1, max_iterations + 1):
-            if is_ralph_paused(job_id):
-                save_checkpoint(...)
-                return {"status": "paused", ...}
-            # Continue with iteration
-        ```
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry:
-        return False
-
-    now = int(time.time())
-    if now > entry.get("expires_at", 0):
-        # Expired - clean up
-        try:
-            del RALPH_CONTROL[job_id]
-        except KeyError:
-            pass
-        return False
-
-    return entry.get("status") in ("pause_requested", "paused")
-
-
-def mark_ralph_paused(
-    job_id: str, checkpoint: dict[str, Any] | None = None
-) -> dict[str, Any] | None:
-    """Mark a Ralph loop as paused with optional checkpoint data.
-
-    Called by the Ralph loop when it pauses to store checkpoint for resume.
-
-    Args:
-        job_id: The Ralph job ID.
-        checkpoint: Optional checkpoint data for resuming later.
-
-    Returns:
-        Updated control entry, or None if no pause was requested.
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry or entry.get("status") != "pause_requested":
-        return None
-
-    now = int(time.time())
-    entry.update(
-        {
-            "status": "paused",
-            "paused_at": now,
-            "checkpoint": checkpoint,
-        }
-    )
-    RALPH_CONTROL[job_id] = entry
-    return entry
-
-
-def get_ralph_checkpoint(job_id: str) -> dict[str, Any] | None:
-    """Get the checkpoint data for a paused Ralph loop.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        Dict with status and checkpoint info:
-        - {"status": "paused", "checkpoint": {...}} for paused loops
-        - {"status": "pause_requested", "checkpoint": None} for pending pause
-        - None if not paused or pause_requested
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry:
-        return None
-
-    status = entry.get("status")
-
-    # Pause requested but loop hasn't processed it yet
-    if status == "pause_requested":
-        return {"status": "pause_requested", "checkpoint": None}
-
-    # Only return checkpoint for actually paused state
-    if status != "paused":
-        return None
-
-    return {"status": "paused", "checkpoint": entry.get("checkpoint")}
-
-
-def mark_ralph_resumed(job_id: str, requested_by: str | None = None) -> dict[str, Any] | None:
-    """Mark a Ralph loop as resumed and clear the pause state.
-
-    Called when resuming a paused loop.
-
-    Args:
-        job_id: The Ralph job ID.
-        requested_by: Who is resuming the loop.
-
-    Returns:
-        Updated control entry, or None if loop wasn't paused.
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry or entry.get("status") != "paused":
-        return None
-
-    now = int(time.time())
-    entry.update(
-        {
-            "status": "resumed",
-            "resumed_at": now,
-            "requested_by": requested_by,
-        }
-    )
-    RALPH_CONTROL[job_id] = entry
-    return entry
-
-
-def clear_ralph_pause(job_id: str) -> bool:
-    """Cancel a pending pause request before it takes effect.
-
-    Called when resuming while status is still "pause_requested" (before the
-    loop has processed the pause). This allows cancelling a pause before it
-    takes effect.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        True if pause was cleared, False if not in pause_requested state.
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry or entry.get("status") != "pause_requested":
-        return False
-    try:
-        del RALPH_CONTROL[job_id]
-        return True
-    except KeyError:
-        return False
-
-
-def clear_ralph_control(job_id: str) -> bool:
-    """Clear control state for a Ralph job.
-
-    Called after loop completes or when cleaning up.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        True if entry was found and cleared, False otherwise.
-    """
-    try:
-        del RALPH_CONTROL[job_id]
-        return True
-    except KeyError:
-        return False
-
-
-def get_ralph_control_status(job_id: str) -> dict[str, Any] | None:
-    """Get the current control status for a Ralph job.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        Control entry if found, None otherwise.
-    """
-    entry = RALPH_CONTROL.get(job_id)
-    if not entry:
-        return None
-
-    now = int(time.time())
-    if now > entry.get("expires_at", 0):
-        # Expired
-        try:
-            del RALPH_CONTROL[job_id]
-        except KeyError:
-            pass
-        return None
-
-    return entry
-
-
-# =============================================================================
-# Ralph Iteration Snapshots (Rollback Support)
-# =============================================================================
-# Functions for managing filesystem snapshots after each Ralph iteration.
-#
-# Snapshot Entry Structure:
-#   RALPH_ITERATION_SNAPSHOTS[job_id] = {
-#       "job_id": str,
-#       "snapshots": [
-#           {
-#               "iteration": int,
-#               "task_id": str | None,
-#               "task_description": str | None,
-#               "image_id": str,           # Modal Image object_id
-#               "commit_sha": str | None,
-#               "created_at": int,
-#               "feedback_passed": bool,
-#           }
-#       ],
-#       "updated_at": int,
-#   }
-#
-# Usage:
-#   - After each successful iteration, store_ralph_iteration_snapshot() is called
-#   - Snapshots are stored per-job with all iterations
-#   - Old snapshots are pruned when max_snapshots_per_job is reached
-#   - Rollback restores sandbox from the specified iteration's snapshot
-
-RALPH_ITERATION_SNAPSHOTS = modal.Dict.from_name(
-    _settings.ralph_iteration_snapshot_store_name, create_if_missing=True
-)
-
-
-def store_ralph_iteration_snapshot(
-    job_id: str,
-    iteration: int,
-    image_id: str,
-    task_id: str | None = None,
-    task_description: str | None = None,
-    commit_sha: str | None = None,
-    feedback_passed: bool = False,
-) -> dict[str, Any]:
-    """Store a filesystem snapshot for a Ralph iteration.
-
-    Called after each successful iteration to enable rollback.
-
-    Args:
-        job_id: The Ralph job ID.
-        iteration: The iteration number that was just completed.
-        image_id: Modal Image object_id from sandbox.snapshot_filesystem().
-        task_id: The task ID that was worked on.
-        task_description: Description of the task.
-        commit_sha: Git commit SHA if auto-commit was enabled.
-        feedback_passed: Whether feedback commands passed.
-
-    Returns:
-        The created snapshot entry.
-
-    Usage:
-        ```python
-        # After iteration completes successfully
-        image = sandbox.snapshot_filesystem()
-        store_ralph_iteration_snapshot(
-            job_id=job_id,
-            iteration=5,
-            image_id=image.object_id,
-            task_id="task_1",
-            commit_sha="abc123",
-            feedback_passed=True,
-        )
-        ```
-    """
-    now = int(time.time())
-
-    # Get or create snapshot list for this job
-    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id) or {
-        "job_id": job_id,
-        "snapshots": [],
-        "updated_at": now,
-    }
-
-    # Create snapshot entry
-    snapshot = {
-        "iteration": iteration,
-        "task_id": task_id,
-        "task_description": task_description,
-        "image_id": image_id,
-        "commit_sha": commit_sha,
-        "created_at": now,
-        "feedback_passed": feedback_passed,
-    }
-
-    # Add to list
-    entry["snapshots"].append(snapshot)
-
-    # Prune old snapshots if over limit
-    max_snapshots = _settings.ralph_max_snapshots_per_job
-    if len(entry["snapshots"]) > max_snapshots:
-        # Keep most recent snapshots
-        entry["snapshots"] = entry["snapshots"][-max_snapshots:]
-
-    entry["updated_at"] = now
-    RALPH_ITERATION_SNAPSHOTS[job_id] = entry
-
-    return snapshot
-
-
-def get_ralph_iteration_snapshot(job_id: str, iteration: int) -> dict[str, Any] | None:
-    """Get the snapshot for a specific iteration.
-
-    Args:
-        job_id: The Ralph job ID.
-        iteration: The iteration number to get snapshot for.
-
-    Returns:
-        Snapshot entry if found, None otherwise.
-
-    Usage:
-        ```python
-        snapshot = get_ralph_iteration_snapshot(job_id, iteration=3)
-        if snapshot:
-            image = modal.Image.from_id(snapshot["image_id"])
-            sandbox = modal.Sandbox.create(image=image, ...)
-        ```
-    """
-    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
-    if not entry:
-        return None
-
-    for snapshot in entry.get("snapshots", []):
-        if snapshot.get("iteration") == iteration:
-            return snapshot
-
-    return None
-
-
-def list_ralph_iteration_snapshots(job_id: str) -> list[dict[str, Any]]:
-    """List all available iteration snapshots for a job.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        List of snapshot entries, sorted by iteration (ascending).
-
-    Usage:
-        ```python
-        snapshots = list_ralph_iteration_snapshots(job_id)
-        for snap in snapshots:
-            print(f"Iteration {snap['iteration']}: {snap['task_id']}")
-        ```
-    """
-    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
-    if not entry:
-        return []
-
-    snapshots = entry.get("snapshots", [])
-    return sorted(snapshots, key=lambda s: s.get("iteration", 0))
-
-
-def delete_ralph_iteration_snapshot(job_id: str, iteration: int) -> bool:
-    """Delete a specific iteration snapshot.
-
-    Args:
-        job_id: The Ralph job ID.
-        iteration: The iteration number to delete snapshot for.
-
-    Returns:
-        True if snapshot was found and deleted, False otherwise.
-    """
-    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
-    if not entry:
-        return False
-
-    original_len = len(entry.get("snapshots", []))
-    entry["snapshots"] = [s for s in entry.get("snapshots", []) if s.get("iteration") != iteration]
-
-    if len(entry["snapshots"]) < original_len:
-        entry["updated_at"] = int(time.time())
-        RALPH_ITERATION_SNAPSHOTS[job_id] = entry
-        return True
-
-    return False
-
-
-def clear_ralph_iteration_snapshots(job_id: str) -> int:
-    """Delete all iteration snapshots for a job.
-
-    Args:
-        job_id: The Ralph job ID.
-
-    Returns:
-        Number of snapshots that were deleted.
-    """
-    entry = RALPH_ITERATION_SNAPSHOTS.get(job_id)
-    if not entry:
-        return 0
-
-    count = len(entry.get("snapshots", []))
-    try:
-        del RALPH_ITERATION_SNAPSHOTS[job_id]
-    except KeyError:
-        pass
-
-    return count
-
-
-def get_ralph_snapshot_status() -> dict[str, Any]:
-    """Get overall status of Ralph iteration snapshots.
-
-    Returns:
-        Dict with statistics:
-        - total_jobs: Jobs with snapshots
-        - total_snapshots: Total snapshots stored
-        - max_per_job: Configured limit per job
-        - enabled: Whether snapshots are enabled
-    """
-    total_jobs = 0
-    total_snapshots = 0
-
-    try:
-        for _, entry in RALPH_ITERATION_SNAPSHOTS.items():
-            total_jobs += 1
-            total_snapshots += len(entry.get("snapshots", []))
-    except Exception:
-        pass
-
-    return {
-        "enabled": _settings.enable_ralph_iteration_snapshots,
-        "total_jobs": total_jobs,
-        "total_snapshots": total_snapshots,
-        "max_per_job": _settings.ralph_max_snapshots_per_job,
-    }
-
-
-# =============================================================================
 # WORKSPACE RETENTION TRACKING
 # =============================================================================
 # Distributed dictionary for tracking workspace metadata and retention.
@@ -4425,7 +3388,7 @@ def build_artifact_manifest(workspace_root: str) -> ArtifactManifest:
 
     Usage:
         ```python
-        workspace = job_workspace_root("/data-cli", job_id)
+        workspace = job_workspace_root("/data", job_id)
         manifest = build_artifact_manifest(str(workspace))
         update_job(job_id, {"artifacts": manifest.model_dump()})
         ```
@@ -4573,10 +3536,10 @@ def register_child_session(
         parent_id: UUID of the parent job/session that spawned this child
         child_job_id: UUID of the spawned child job
         task: Task description given to the child
-        sandbox_type: Type of sandbox used ("agent_sdk" or "cli")
+        sandbox_type: Type of sandbox used ("agent_sdk")
         context: Optional additional context provided to child
         timeout_seconds: Timeout configured for child session
-        allowed_tools: Comma-separated tools allowed (CLI sandbox only)
+        allowed_tools: Comma-separated tools allowed (optional)
 
     Returns:
         True if registration was successful, False if max children exceeded.

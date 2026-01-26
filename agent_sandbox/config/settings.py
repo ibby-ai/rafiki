@@ -38,54 +38,6 @@ class Settings(BaseSettings):
     )
     persist_vol_name: str = "svc-runner-8001-vol"
 
-    # Claude CLI sandbox + volume configuration
-    claude_cli_sandbox_name: str = "claude-cli-runner"
-    claude_cli_persist_vol_name: str = "claude-cli-runner-vol"
-    claude_cli_fs_root: str = Field(
-        default="/data-cli",
-        description=(
-            "Root directory for Claude CLI workspace files. "
-            "This is the Modal Volume mount point used by Claude CLI sandboxes. "
-            "Default: /data-cli."
-        ),
-    )
-    claude_cli_service_port: int = Field(
-        default=8002,
-        description="Internal port for the Claude CLI controller service",
-    )
-    claude_cli_service_ports: list[int] = Field(
-        default=[8002],
-        description="List of encrypted ports to expose for the Claude CLI sandbox",
-    )
-    claude_cli_sandbox_timeout: int = Field(
-        default=60 * 60 * 24,
-        description="Max Claude CLI sandbox lifetime (seconds, default 24h)",
-    )
-    claude_cli_sandbox_idle_timeout: int = Field(
-        default=60 * 30,
-        description="Shutdown Claude CLI sandbox after idle (seconds, default 30min)",
-    )
-    claude_cli_sandbox_cpu: float = Field(
-        default=1.0,
-        description="Claude CLI sandbox CPU cores requested",
-    )
-    claude_cli_sandbox_memory: int = Field(
-        default=2048,
-        description="Claude CLI sandbox memory requested (MB)",
-    )
-    claude_cli_sandbox_cpu_limit: float | None = Field(
-        default=None,
-        description="Max Claude CLI sandbox CPU cores (None = no limit)",
-    )
-    claude_cli_sandbox_memory_limit: int | None = Field(
-        default=None,
-        description="Max Claude CLI sandbox memory (MB, None = no limit)",
-    )
-    claude_cli_sandbox_ephemeral_disk: int | None = Field(
-        default=None,
-        description="Claude CLI sandbox ephemeral disk size (MiB)",
-    )
-
     # Custom domains for production deployments
     custom_domains: list[str] | None = Field(
         default=None,
@@ -224,27 +176,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # CLI sandbox snapshot settings
-    cli_job_snapshot_store_name: str = Field(
-        default="cli-job-snapshots",
-        description="Modal Dict name for storing CLI job filesystem snapshots",
-    )
-    enable_cli_job_snapshots: bool = Field(
-        default=True,
-        description=(
-            "Enable automatic filesystem snapshots for CLI job persistence. "
-            "When enabled, snapshots are taken after CLI jobs complete, "
-            "allowing job state to be restored when resuming after sandbox timeout."
-        ),
-    )
-    cli_snapshot_min_interval_seconds: int = Field(
-        default=60,
-        description=(
-            "Minimum seconds between snapshots for the same CLI job. "
-            "Prevents excessive snapshot creation for rapid-fire executions."
-        ),
-    )
-
     # Warm pool settings for Agent SDK sandbox
     warm_pool_store_name: str = Field(
         default="agent-warm-pool",
@@ -286,51 +217,6 @@ class Settings(BaseSettings):
         default=5,
         description=(
             "Seconds to wait when attempting to claim a warm sandbox. "
-            "If claiming takes longer, falls back to creating a new sandbox."
-        ),
-    )
-
-    # CLI Warm pool settings for Claude CLI sandbox
-    cli_warm_pool_store_name: str = Field(
-        default="cli-warm-pool",
-        description="Modal Dict name for storing CLI warm pool metadata",
-    )
-    enable_cli_warm_pool: bool = Field(
-        default=True,
-        description=(
-            "Enable warm sandbox pool for CLI sandboxes to reduce cold-start latency. "
-            "When enabled, the system maintains a pool of pre-warmed CLI sandboxes "
-            "ready for immediate use, eliminating sandbox creation overhead."
-        ),
-    )
-    cli_warm_pool_size: int = Field(
-        default=2,
-        description=(
-            "Number of warm CLI sandboxes to maintain in the pool. "
-            "Higher values reduce cold-start probability but increase cost. "
-            "Recommended: 1-2 for low traffic, 2-3 for moderate traffic."
-        ),
-    )
-    cli_warm_pool_refresh_interval: int = Field(
-        default=300,
-        description=(
-            "Seconds between CLI pool maintenance runs. "
-            "The pool maintainer checks sandbox health and replenishes as needed. "
-            "Lower values ensure pool readiness but increase API calls."
-        ),
-    )
-    cli_warm_pool_sandbox_max_age: int = Field(
-        default=3600,
-        description=(
-            "Maximum age (seconds) for warm CLI sandboxes before recycling. "
-            "Sandboxes older than this are terminated and replaced to ensure "
-            "freshness and pick up image changes. Default: 1 hour."
-        ),
-    )
-    cli_warm_pool_claim_timeout: int = Field(
-        default=5,
-        description=(
-            "Seconds to wait when attempting to claim a warm CLI sandbox. "
             "If claiming takes longer, falls back to creating a new sandbox."
         ),
     )
@@ -456,65 +342,6 @@ class Settings(BaseSettings):
             "Maximum number of users that can be authorized on a single session. "
             "Does not include the session owner. "
             "Default: 20 users."
-        ),
-    )
-
-    # Ralph control settings (pause/resume)
-    ralph_control_store_name: str = Field(
-        default="ralph-control-store",
-        description="Modal Dict name for storing Ralph pause/resume control state",
-    )
-    enable_ralph_control: bool = Field(
-        default=True,
-        description=(
-            "Enable Ralph pause/resume control. "
-            "When enabled, clients can pause and resume Ralph loops mid-execution "
-            "via POST /ralph/{job_id}/pause and POST /ralph/{job_id}/resume endpoints."
-        ),
-    )
-    ralph_control_expiry_seconds: int = Field(
-        default=86400,
-        description=(
-            "How long (seconds) a Ralph control entry remains valid. "
-            "After this time, pause/checkpoint entries are considered stale. "
-            "Default: 24 hours (matches sandbox lifetime)."
-        ),
-    )
-
-    # GitHub push settings
-    github_token_secret_name: str = Field(
-        default="github-token",
-        description=(
-            "Modal secret name that provides GITHUB_TOKEN for push operations. "
-            "Create with: modal secret create github-token GITHUB_TOKEN=github_pat_xxx. "
-            "Recommended: Use a fine-grained PAT (https://github.com/settings/personal-access-tokens/new) "
-            "scoped to specific repositories with 'Contents: Read and write' permission only."
-        ),
-    )
-    enable_github_push: bool = Field(
-        default=True,
-        description="Enable GitHub push operations in Ralph loops",
-    )
-
-    # Ralph iteration snapshot settings (rollback support)
-    ralph_iteration_snapshot_store_name: str = Field(
-        default="ralph-iteration-snapshots",
-        description="Modal Dict name for storing Ralph iteration filesystem snapshots",
-    )
-    enable_ralph_iteration_snapshots: bool = Field(
-        default=True,
-        description=(
-            "Enable filesystem snapshots after each Ralph iteration. "
-            "When enabled, the system takes a snapshot after each successful iteration, "
-            "allowing rollback to any previous iteration state."
-        ),
-    )
-    ralph_max_snapshots_per_job: int = Field(
-        default=20,
-        description=(
-            "Maximum number of iteration snapshots to retain per job. "
-            "Older snapshots are deleted when limit is reached. "
-            "Default: 20 snapshots."
         ),
     )
 
@@ -706,14 +533,6 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
             modal.Secret.from_name(
                 settings.modal_auth_secret_name,
                 required_keys=["SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET"],
-            )
-        )
-
-    if settings.enable_github_push:
-        secrets.append(
-            modal.Secret.from_name(
-                settings.github_token_secret_name,
-                required_keys=["GITHUB_TOKEN"],
             )
         )
 
