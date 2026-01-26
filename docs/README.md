@@ -127,13 +127,6 @@ Learn how to create custom tools:
 - Registering tools with the MCP server
 - Best practices and testing
 
-### [Ralph Git Clone Verification](./ralph-git-clone-verification.md)
-Test plan and verification results for the Ralph loop's `git_clone` workspace source:
-- Implementation analysis and code flow
-- Bug fix for git ownership issues
-- Integration test with real GitHub repo (snarktank/ralph)
-- Modal volume verification
-
 ## Quick Reference
 
 ### Understanding the Architecture

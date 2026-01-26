@@ -55,24 +55,6 @@ modal run -m agent_sandbox.app
 # Run agent as remote function
 modal run -m agent_sandbox.app::run_agent_remote --question "Your question here"
 
-# Run Claude Code CLI via the background sandbox
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --prompt "Summarize repo layout" \
-  --allowed-tools "Read"
-
-# Run Claude Code CLI and allow code execution
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create hello.py and run it" \
-  --allowed-tools "Write,Bash,Read" \
-  --timeout-seconds 300
-
-# Capture CLI output to a file (modal run only writes string/bytes results)
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --prompt "Say hello in one sentence" \
-  --return-stdout \
-  --write-result ./claude_cli_output.txt
-
 # Start dev server with hot reload (enables HTTP endpoints)
 modal serve -m agent_sandbox.app
 
@@ -89,11 +71,6 @@ When `modal serve -m agent_sandbox.app` or `modal deploy -m agent_sandbox.deploy
 curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is the capital of Canada?"}'
-
-# Test the Claude Code CLI endpoint
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli' \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Summarize repo layout","allowed_tools":["Read"],"output_format":"json"}'
 
 # Test streaming endpoint
 curl -N -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query_stream' \
@@ -115,20 +92,18 @@ The codebase demonstrates two distinct patterns for running agents:
 - Terminates sandbox after completion
 - Use for: batch jobs, scheduled tasks, one-off queries
 
-**2. Long-lived Background Service Pattern** (Dual Sandbox Architecture)
+**2. Long-lived Background Service Pattern**
 
-The system uses **two separate sandboxes**:
+The system uses a persistent sandbox for the Agent SDK:
 
 | Sandbox | Name | Port | Volume | Purpose |
 |---------|------|------|--------|---------|
 | Agent SDK | `svc-runner-8001` | 8001 | `/data` | Conversational queries via Claude Agent SDK |
-| CLI | `claude-cli-runner` | 8002 | `/data-cli` | Code execution via Claude CLI, Ralph loops |
 
-- Both sandboxes maintain persistent FastAPI services via uvicorn
-- HTTP gateway (`http_app`) routes requests to appropriate sandbox
+- Sandbox maintains persistent FastAPI service via uvicorn
+- HTTP gateway (`http_app`) routes requests to the sandbox
 - Agent SDK sandbox: 24h timeout, 10min idle
-- CLI sandbox: 24h timeout, 30min idle
-- Use for: low-latency serving, repeated queries, production APIs, autonomous coding
+- Use for: low-latency serving, repeated queries, production APIs
 
 ### Key Components
 
@@ -136,13 +111,11 @@ The system uses **two separate sandboxes**:
 
 - Defines `modal.App("test-sandbox")`
 - `get_or_start_background_sandbox()`: Manages Agent SDK sandbox lifecycle
-- `get_or_start_cli_sandbox()`: Manages CLI sandbox lifecycle
-- `http_app`: ASGI app exposing HTTP endpoints that proxy to both sandboxes
+- `http_app`: ASGI app exposing HTTP endpoints that proxy to the sandbox
 - `run_agent_remote`: Short-lived function for single queries
-- `run_ralph_remote`: Short-lived function for Ralph loops
 - `main`: Local CLI entry point for `modal run`
 
-**`agent_sandbox/agents/loop.py`** - CLI-based agent execution
+**`agent_sandbox/agents/loop.py`** - Agent execution
 
 - Builds `ClaudeAgentOptions` from MCP servers and prompts
 - `run_agent()`: Single query execution with streaming output
@@ -153,32 +126,14 @@ The system uses **two separate sandboxes**:
 - `GET /health_check`: Liveness probe
 - `POST /query`: Agent query endpoint that returns responses
 - `POST /query_stream`: Agent query endpoint that streams responses as SSE
-- `POST /claude_cli`: Claude Code CLI endpoint (may delegate to CLI sandbox)
 - Uses `permission_mode="acceptEdits"` with `can_use_tool` handler
 - Supports session resumption via `session_id`, `session_key`, `fork_session`
-
-**`agent_sandbox/controllers/cli_controller.py`** - CLI microservice (port 8002)
-
-- `GET /health_check`: Liveness probe
-- `POST /execute`: Execute Claude Code CLI as subprocess
-- `POST /ralph/execute`: Execute Ralph autonomous coding loop
-- Runs as non-root `claude` user (required for `--dangerously-skip-permissions`)
-- Volume: `/data-cli` for job workspaces
-
-**`agent_sandbox/ralph/`** - Ralph autonomous coding loop module
-
-- `loop.py`: Main orchestrator (`run_ralph_loop`)
-- `schemas.py`: Pydantic models (Prd, IterationResult, RalphLoopResult)
-- PRD-driven task execution with feedback validation
-- Git integration for commit tracking
 
 **`agent_sandbox/app.py`** - HTTP Gateway endpoints (in addition to above)
 
 - `POST /submit`: Enqueue async job to `JOB_QUEUE`
 - `GET /jobs/{job_id}`: Check job status from `JOB_RESULTS` dict
 - `DELETE /jobs/{job_id}`: Cancel a queued job
-- `POST /ralph/start`: Start async Ralph loop
-- `GET /ralph/{job_id}`: Poll Ralph status
 
 **`agent_sandbox/config/settings.py`** - Configuration management
 
@@ -188,7 +143,7 @@ The system uses **two separate sandboxes**:
 
 **`agent_sandbox/app.py`** - Image building
 
-- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, @anthropic-ai/claude-agent-sdk, and the Claude Code CLI
+- `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
 - Working directory: `/root/app`
 - Copies local project and installs dependencies
 
@@ -215,7 +170,7 @@ The system uses **two separate sandboxes**:
 
 ### Background Sandbox Lifecycle
 
-Both sandboxes follow the same lifecycle pattern:
+The Agent SDK sandbox follows this lifecycle pattern:
 
 **Agent SDK Sandbox** (`get_or_start_background_sandbox()`):
 1. Checks for existing sandbox in global `SANDBOX` and `SERVICE_URL` variables
@@ -224,20 +179,12 @@ Both sandboxes follow the same lifecycle pattern:
 4. Polls `sandbox.tunnels()` for up to 30 seconds to get encrypted port URL
 5. Calls `_wait_for_service()` to poll `/health_check` until 200 OK
 
-**CLI Sandbox** (`get_or_start_cli_sandbox()`):
-1. Checks for existing sandbox in global `CLI_SANDBOX` and `CLI_SERVICE_URL` variables
-2. Creates sandbox with `modal.Sandbox.create()` running uvicorn on port 8002
-3. Mounts `claude-cli-runner-vol` at `/data-cli`
-4. Polls `sandbox.tunnels()` for up to 30 seconds to get encrypted port URL
-5. Calls `_wait_for_service()` to poll `/health_check` until 200 OK
-
-Both sandboxes persist across multiple requests within the same Modal worker, avoiding cold starts.
+The sandbox persists across multiple requests within the same Modal worker, avoiding cold starts.
 
 ### Permission Modes
 
 - `agent_sandbox/agents/loop.py`: Uses default permission mode (requires user approval for tools)
 - `agent_sandbox/controllers/controller.py`: Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
-- `agent_sandbox/controllers/cli_controller.py`: CLI runs with `--dangerously-skip-permissions` as non-root `claude` user
 
 When adding new endpoints or execution patterns, choose permission mode based on trust level and use case.
 
@@ -320,101 +267,6 @@ async def your_endpoint(body: QueryBody, request: Request):
 - **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
 - **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
 - **Agent Turn Limits**: Set `agent_max_turns` to limit conversation turns and prevent runaway loops
-
-### Claude Code CLI in Modal Sandbox
-
-The `/claude_cli` endpoint runs the Claude Code CLI via subprocess. Important considerations:
-
-- **Non-root execution**: The CLI is executed as the `claude` user so `--dangerously-skip-permissions` can be used when requested. Use with care.
-- **Default skip-permissions**: `run_claude_cli_remote` defaults to `--dangerously-skip-permissions` to avoid non-interactive approval prompts. Use `--allowedTools` to scope access when possible.
-
-> **Security Note**: The `dangerously_skip_permissions=True` default is intentional for non-interactive
-> task execution. This bypasses tool approval prompts, allowing the CLI to execute tools autonomously.
-> Always scope tool access via `--allowedTools` when possible to limit what the CLI can do.
-> For example, use `--allowedTools "Read"` for read-only operations.
-- **Non-interactive mode**: The `-p` flag enables "print mode" which is non-interactive. Combined with `stdin=subprocess.DEVNULL`, this ensures the CLI won't hang waiting for user input.
-- **Volume operations**: `reload()` and `commit()` on Modal Volumes can only be called from within a Modal function context, not from a sandbox subprocess. The code handles these errors gracefully.
-- **Long-running CLI runs**: `run_claude_cli_remote` is configured with a 24-hour Modal function timeout. Set `--timeout-seconds` to control the CLI subprocess timeout.
-- **Shared volume access**: The Claude CLI container mounts the shared `/data` Modal volume. Use `--job-id` to write into `/data/jobs/<job_id>/` for persistence.
-- **CLI output capture**: `modal run` only writes return values when they are strings/bytes. Use `--return-stdout` with `--write-result` to capture output reliably (JSON fallback is returned if stdout/stderr is empty).
-- **If output is empty**: Check the Modal run logs and confirm `anthropic-secret` is configured with `ANTHROPIC_API_KEY` so the Claude CLI can authenticate. A successful exit with empty stdout/stderr usually indicates missing auth or misconfigured CLI settings.
-
-### Claude Code CLI Async Polling
-
-For long-running runs, use async submission with polling:
-
-```bash
-# Start a run and get a call_id
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/submit' \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Create app.py and run it","allowed_tools":["Write","Bash","Read"],"job_id":"550e8400-e29b-41d4-a716-446655440000","timeout_seconds":300}'
-
-# Poll for completion
-curl -X GET 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/<call_id>'
-
-# Cancel a running job
-curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/<call_id>'
-```
-
-Example polling loop:
-
-```bash
-call_id="<call_id>"
-while true; do
-  resp=$(curl -s "https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/${call_id}")
-  echo "$resp"
-  if echo "$resp" | grep -q '"status":"complete"\|"status":"failed"\|"status":"expired"'; then
-    break
-  fi
-  sleep 2
-done
-```
-
-Status polling behavior:
-
-- `202` + `{"status":"running"}` while the run is still executing
-- `200` + `{"status":"complete","result":{...}}` when finished
-- `200` + `{"status":"cancelled"}` if the run was cancelled via DELETE
-- `410` + `{"status":"expired"}` if the result TTL has passed
-- `500` + `{"status":"failed","error":"..."}` on execution errors
-
-### Running Code with Claude Code CLI
-
-To create files and execute code, ensure you:
-
-- **Pass `--job-id`** so the CLI runs in a volume-backed workspace at `/data/jobs/<job_id>/`.
-- **Allow tools** needed for execution: `Write` for file creation and `Bash` for running code.
-- **Set timeout** for longer runs (the CLI defaults to 120 seconds).
-
-Examples:
-
-```bash
-# Python: create and run a file
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create game.py and run it to show sample output" \
-  --allowed-tools "Write,Bash,Read" \
-  --timeout-seconds 300
-
-# Node: create and run a file
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create index.js and run it with node" \
-  --allowed-tools "Write,Bash,Read" \
-  --timeout-seconds 300
-
-# Full bypass (use sparingly)
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create app.py and run it" \
-  --dangerously-skip-permissions \
-  --timeout-seconds 300
-```
-
-Notes:
-
-- Without `--job-id`, files are written under `/home/claude/app` and are not persisted.
-- Files written under `/data/jobs/<job_id>/` are persisted after the CLI finishes.
 
 ### Volume Persistence Behavior
 

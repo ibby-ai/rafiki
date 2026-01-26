@@ -7,6 +7,7 @@ All settings can be configured via environment variables (case-insensitive).
 See CLAUDE.md and docs/configuration.md for usage guidance.
 """
 
+import os
 from functools import lru_cache
 from typing import Self
 
@@ -37,54 +38,6 @@ class Settings(BaseSettings):
     )
     persist_vol_name: str = "svc-runner-8001-vol"
 
-    # Claude CLI sandbox + volume configuration
-    claude_cli_sandbox_name: str = "claude-cli-runner"
-    claude_cli_persist_vol_name: str = "claude-cli-runner-vol"
-    claude_cli_fs_root: str = Field(
-        default="/data-cli",
-        description=(
-            "Root directory for Claude CLI workspace files. "
-            "This is the Modal Volume mount point used by Claude CLI sandboxes. "
-            "Default: /data-cli."
-        ),
-    )
-    claude_cli_service_port: int = Field(
-        default=8002,
-        description="Internal port for the Claude CLI controller service",
-    )
-    claude_cli_service_ports: list[int] = Field(
-        default=[8002],
-        description="List of encrypted ports to expose for the Claude CLI sandbox",
-    )
-    claude_cli_sandbox_timeout: int = Field(
-        default=60 * 60 * 24,
-        description="Max Claude CLI sandbox lifetime (seconds, default 24h)",
-    )
-    claude_cli_sandbox_idle_timeout: int = Field(
-        default=60 * 30,
-        description="Shutdown Claude CLI sandbox after idle (seconds, default 30min)",
-    )
-    claude_cli_sandbox_cpu: float = Field(
-        default=1.0,
-        description="Claude CLI sandbox CPU cores requested",
-    )
-    claude_cli_sandbox_memory: int = Field(
-        default=2048,
-        description="Claude CLI sandbox memory requested (MB)",
-    )
-    claude_cli_sandbox_cpu_limit: float | None = Field(
-        default=None,
-        description="Max Claude CLI sandbox CPU cores (None = no limit)",
-    )
-    claude_cli_sandbox_memory_limit: int | None = Field(
-        default=None,
-        description="Max Claude CLI sandbox memory (MB, None = no limit)",
-    )
-    claude_cli_sandbox_ephemeral_disk: int | None = Field(
-        default=None,
-        description="Claude CLI sandbox ephemeral disk size (MiB)",
-    )
-
     # Custom domains for production deployments
     custom_domains: list[str] | None = Field(
         default=None,
@@ -95,6 +48,17 @@ class Settings(BaseSettings):
     admin_secret_name: str = Field(
         default="admin-secret",
         description="Modal secret name for admin operations (terminate, snapshot)",
+    )
+    modal_auth_secret_name: str = Field(
+        default="modal-auth-secret",
+        description=(
+            "Modal secret name that provides SANDBOX_MODAL_TOKEN_ID and SANDBOX_MODAL_TOKEN_SECRET "
+            "for in-sandbox Modal API access."
+        ),
+    )
+    enable_modal_auth_secret: bool = Field(
+        default=True,
+        description="Include the modal auth secret in sandbox/function secrets.",
     )
 
     # Security settings
@@ -188,6 +152,275 @@ class Settings(BaseSettings):
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
     session_store_name: str = "agent-session-store"
+    stats_store_name: str = Field(
+        default="agent-stats-store",
+        description="Modal Dict name for storing aggregate statistics",
+    )
+    session_snapshot_store_name: str = Field(
+        default="agent-session-snapshots",
+        description="Modal Dict name for storing session filesystem snapshots",
+    )
+    enable_session_snapshots: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic filesystem snapshots for session persistence. "
+            "When enabled, snapshots are taken after agent queries complete, "
+            "allowing session state to be restored when resuming after sandbox timeout."
+        ),
+    )
+    snapshot_min_interval_seconds: int = Field(
+        default=60,
+        description=(
+            "Minimum seconds between snapshots for the same session. "
+            "Prevents excessive snapshot creation for rapid-fire queries."
+        ),
+    )
+
+    # Warm pool settings for Agent SDK sandbox
+    warm_pool_store_name: str = Field(
+        default="agent-warm-pool",
+        description="Modal Dict name for storing warm pool metadata",
+    )
+    enable_warm_pool: bool = Field(
+        default=True,
+        description=(
+            "Enable warm sandbox pool for reduced cold-start latency. "
+            "When enabled, the system maintains a pool of pre-warmed sandboxes "
+            "ready for immediate use, eliminating sandbox creation overhead."
+        ),
+    )
+    warm_pool_size: int = Field(
+        default=2,
+        description=(
+            "Number of warm sandboxes to maintain in the pool. "
+            "Higher values reduce cold-start probability but increase cost. "
+            "Recommended: 1-3 for low traffic, 3-5 for moderate traffic."
+        ),
+    )
+    warm_pool_refresh_interval: int = Field(
+        default=300,
+        description=(
+            "Seconds between pool maintenance runs. "
+            "The pool maintainer checks sandbox health and replenishes as needed. "
+            "Lower values ensure pool readiness but increase API calls."
+        ),
+    )
+    warm_pool_sandbox_max_age: int = Field(
+        default=3600,
+        description=(
+            "Maximum age (seconds) for warm sandboxes before recycling. "
+            "Sandboxes older than this are terminated and replaced to ensure "
+            "freshness and pick up image changes. Default: 1 hour."
+        ),
+    )
+    warm_pool_claim_timeout: int = Field(
+        default=5,
+        description=(
+            "Seconds to wait when attempting to claim a warm sandbox. "
+            "If claiming takes longer, falls back to creating a new sandbox."
+        ),
+    )
+
+    # Pre-warm API settings (speculative warming on user typing)
+    prewarm_store_name: str = Field(
+        default="agent-prewarm-store",
+        description="Modal Dict name for storing pre-warm request tracking",
+    )
+    enable_prewarm: bool = Field(
+        default=True,
+        description=(
+            "Enable the pre-warm API for speculative sandbox preparation. "
+            "When enabled, clients can call POST /warm when users start typing "
+            "to begin sandbox preparation before the actual query arrives."
+        ),
+    )
+    prewarm_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "How long (seconds) a pre-warmed sandbox reservation remains valid. "
+            "If no query arrives within this time, the pre-warm is expired "
+            "and the sandbox returns to the pool (if from pool) or continues warming. "
+            "Default: 60 seconds."
+        ),
+    )
+
+    # Image version tracking settings
+    image_version_store_name: str = Field(
+        default="agent-image-version",
+        description="Modal Dict name for storing image version metadata",
+    )
+    enable_image_version_tracking: bool = Field(
+        default=True,
+        description="Track image versions to invalidate old warm pool sandboxes on deploy",
+    )
+
+    # Session cancellation settings (stop/cancel mid-execution)
+    session_cancellation_store_name: str = Field(
+        default="agent-session-cancellations",
+        description="Modal Dict name for storing session cancellation flags",
+    )
+    enable_session_cancellation: bool = Field(
+        default=True,
+        description=(
+            "Enable the session stop/cancel API. "
+            "When enabled, clients can call POST /session/{id}/stop to gracefully "
+            "terminate agent execution mid-query by rejecting further tool calls."
+        ),
+    )
+    cancellation_expiry_seconds: int = Field(
+        default=3600,
+        description=(
+            "How long (seconds) a cancellation flag remains active. "
+            "After this time, the cancellation flag is considered stale and ignored. "
+            "This prevents old cancellation requests from affecting new sessions. "
+            "Default: 1 hour."
+        ),
+    )
+
+    # Prompt queue settings (follow-up prompts while agent is executing)
+    prompt_queue_store_name: str = Field(
+        default="agent-prompt-queue",
+        description="Modal Dict name for storing per-session prompt queues",
+    )
+    enable_prompt_queue: bool = Field(
+        default=True,
+        description=(
+            "Enable the prompt queue feature. "
+            "When enabled, prompts sent while a session is executing are queued "
+            "and processed sequentially after the current query completes."
+        ),
+    )
+    max_queued_prompts_per_session: int = Field(
+        default=10,
+        description=(
+            "Maximum number of prompts that can be queued per session. "
+            "Additional prompts are rejected with a 429 status when limit is reached. "
+            "Default: 10 prompts."
+        ),
+    )
+    prompt_queue_entry_expiry_seconds: int = Field(
+        default=3600,
+        description=(
+            "How long (seconds) a queued prompt remains valid. "
+            "Expired prompts are skipped during processing. "
+            "Default: 1 hour."
+        ),
+    )
+
+    # Multiplayer session settings (collaborative sessions)
+    session_metadata_store_name: str = Field(
+        default="agent-session-metadata",
+        description="Modal Dict name for storing session metadata and message history",
+    )
+    enable_multiplayer_sessions: bool = Field(
+        default=True,
+        description=(
+            "Enable multiplayer session support. "
+            "When enabled, sessions track ownership, authorized users, and message history "
+            "with user attribution, allowing multiple users to collaborate on the same session."
+        ),
+    )
+    max_message_history_per_session: int = Field(
+        default=100,
+        description=(
+            "Maximum number of messages to retain in session history. "
+            "Older messages are removed when limit is reached. "
+            "Default: 100 messages."
+        ),
+    )
+    message_content_max_length: int = Field(
+        default=1000,
+        description=(
+            "Maximum length of message content stored in history. "
+            "Longer messages are truncated. This limits storage cost for verbose responses. "
+            "Default: 1000 characters."
+        ),
+    )
+    max_authorized_users_per_session: int = Field(
+        default=20,
+        description=(
+            "Maximum number of users that can be authorized on a single session. "
+            "Does not include the session owner. "
+            "Default: 20 users."
+        ),
+    )
+
+    # Child session spawning settings
+    child_session_registry_name: str = Field(
+        default="agent-child-session-registry",
+        description="Modal Dict name for storing parent-child session relationships",
+    )
+    max_children_per_session: int = Field(
+        default=10,
+        description=(
+            "Maximum number of child sessions that can be spawned from a single parent session. "
+            "Prevents resource exhaustion from runaway parallel spawning. "
+            "Default: 10 children."
+        ),
+    )
+    child_session_default_timeout: int = Field(
+        default=300,
+        description=(
+            "Default timeout in seconds for child sessions if not specified. "
+            "Child sessions will be terminated after this duration. "
+            "Default: 300 seconds (5 minutes)."
+        ),
+    )
+    enable_child_sessions: bool = Field(
+        default=True,
+        description=(
+            "Enable child session spawning. "
+            "When enabled, agents can spawn child sessions for parallel work delegation "
+            "using the spawn_session tool. Disable to prevent resource-intensive parallel work."
+        ),
+    )
+
+    # Workspace Retention Settings
+    workspace_retention_store_name: str = Field(
+        default="cli-workspace-retention",
+        description="Modal Dict name for storing workspace retention metadata",
+    )
+    enable_workspace_retention: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic workspace retention tracking and cleanup. "
+            "When enabled, the system tracks job workspaces and automatically "
+            "deletes old workspaces based on retention policy."
+        ),
+    )
+    workspace_retention_days: int = Field(
+        default=7,
+        description=(
+            "Number of days to keep completed job workspaces before cleanup. "
+            "Applies to jobs with status 'complete'. "
+            "Default: 7 days."
+        ),
+    )
+    failed_job_retention_days: int = Field(
+        default=14,
+        description=(
+            "Number of days to keep failed job workspaces before cleanup. "
+            "Failed jobs are retained longer to allow debugging. "
+            "Default: 14 days."
+        ),
+    )
+    max_workspace_size_mb: int | None = Field(
+        default=None,
+        description=(
+            "Optional maximum size limit per workspace in megabytes. "
+            "Workspaces exceeding this limit may be flagged for review. "
+            "None = no limit. Default: None."
+        ),
+    )
+    workspace_cleanup_interval_seconds: int = Field(
+        default=3600,
+        description=(
+            "Seconds between automatic workspace cleanup runs. "
+            "The cleanup task checks for expired workspaces at this interval. "
+            "Default: 3600 (1 hour)."
+        ),
+    )
+
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
     )
@@ -295,6 +528,14 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
         # Admin secret is optional - use required_keys=[] to avoid failure if not set
         secrets.append(modal.Secret.from_name(settings.admin_secret_name))
 
+    if settings.enable_modal_auth_secret:
+        secrets.append(
+            modal.Secret.from_name(
+                settings.modal_auth_secret_name,
+                required_keys=["SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET"],
+            )
+        )
+
     return secrets
 
 
@@ -306,3 +547,20 @@ def get_settings() -> Settings:
         Cached Settings instance.
     """
     return Settings()
+
+
+def _hydrate_modal_token_env() -> None:
+    """Populate MODAL_TOKEN_ID/SECRET from auth secret env vars if needed."""
+    token_id = (os.getenv("MODAL_TOKEN_ID") or "").strip()
+    token_secret = (os.getenv("MODAL_TOKEN_SECRET") or "").strip()
+    if token_id and token_secret:
+        return
+
+    alt_id = (os.getenv("SANDBOX_MODAL_TOKEN_ID") or "").strip()
+    alt_secret = (os.getenv("SANDBOX_MODAL_TOKEN_SECRET") or "").strip()
+    if alt_id and alt_secret:
+        os.environ["MODAL_TOKEN_ID"] = alt_id
+        os.environ["MODAL_TOKEN_SECRET"] = alt_secret
+
+
+_hydrate_modal_token_env()

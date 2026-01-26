@@ -467,3 +467,139 @@ class ArtifactListResponse(BaseSchema):
     ok: bool = Field(default=True, description="Always true for valid job lookups")
     job_id: str = Field(description="UUID of the job")
     artifacts: ArtifactManifest = Field(description="Manifest of artifacts for the job")
+
+
+class WorkspaceMetadata(BaseSchema):
+    """Metadata for a job workspace tracked for retention purposes.
+
+    Stores information about a job's workspace directory including creation time,
+    size, and file count. Used by the retention system to determine which workspaces
+    are eligible for cleanup based on age and job status.
+
+    Attributes:
+        job_id: UUID of the job that owns this workspace
+        workspace_root: Absolute path to the workspace directory
+        created_at: Unix timestamp when workspace was created
+        size_bytes: Total size of workspace in bytes (may be None if not computed)
+        file_count: Number of files in the workspace
+        status: Workspace status ("active" or "deleted")
+        deleted_at: Unix timestamp when workspace was deleted (None if active)
+        job_status: Status of the associated job (queued, running, complete, failed, canceled)
+    """
+
+    job_id: str = Field(description="UUID of the job")
+    workspace_root: str = Field(description="Absolute path to workspace directory")
+    created_at: int = Field(description="Unix timestamp when workspace was created")
+    size_bytes: int | None = Field(default=None, ge=0, description="Total workspace size in bytes")
+    file_count: int = Field(default=0, ge=0, description="Number of files in workspace")
+    status: Literal["active", "deleted"] = Field(default="active", description="Workspace status")
+    deleted_at: int | None = Field(
+        default=None, description="Unix timestamp when workspace was deleted"
+    )
+    job_status: Literal["queued", "running", "complete", "failed", "canceled"] | None = Field(
+        default=None, description="Status of the associated job"
+    )
+
+
+class WorkspaceCleanupRequest(BaseSchema):
+    """Request body for triggering workspace cleanup.
+
+    Allows filtering which workspaces to clean up based on age and job status.
+    Supports dry-run mode to preview cleanup without actually deleting files.
+
+    Attributes:
+        older_than_days: Only clean up workspaces older than this many days.
+                        If None, uses default retention settings.
+        status_filter: Only clean up workspaces for jobs with these statuses.
+                      If None, uses default (complete, failed, canceled).
+        dry_run: If True, returns what would be deleted without actually deleting.
+    """
+
+    older_than_days: int | None = Field(
+        default=None,
+        ge=0,
+        description="Only cleanup workspaces older than this many days (None = use defaults)",
+    )
+    status_filter: list[Literal["queued", "running", "complete", "failed", "canceled"]] | None = (
+        Field(
+            default=None,
+            description="Only cleanup workspaces for jobs with these statuses",
+        )
+    )
+    dry_run: bool = Field(
+        default=False, description="If True, report what would be deleted without deleting"
+    )
+
+
+class WorkspaceCleanupResponse(BaseSchema):
+    """Response body for workspace cleanup operations.
+
+    Reports statistics about the cleanup operation including number of workspaces
+    checked, deleted, and bytes freed.
+
+    Attributes:
+        ok: True if cleanup completed successfully
+        dry_run: True if this was a dry-run (no actual deletions)
+        workspaces_checked: Total number of workspaces evaluated
+        workspaces_deleted: Number of workspaces deleted (or would be deleted in dry-run)
+        bytes_freed: Total bytes freed (or would be freed in dry-run)
+        deleted_job_ids: List of job IDs whose workspaces were deleted
+        errors: List of error messages encountered during cleanup
+    """
+
+    ok: bool = Field(default=True, description="True if cleanup completed successfully")
+    dry_run: bool = Field(default=False, description="True if this was a preview only")
+    workspaces_checked: int = Field(default=0, ge=0, description="Number of workspaces evaluated")
+    workspaces_deleted: int = Field(default=0, ge=0, description="Number of workspaces deleted")
+    bytes_freed: int = Field(default=0, ge=0, description="Total bytes freed by cleanup")
+    deleted_job_ids: list[str] = Field(
+        default_factory=list, description="Job IDs whose workspaces were deleted"
+    )
+    errors: list[str] = Field(default_factory=list, description="Errors encountered during cleanup")
+
+
+class WorkspaceRetentionStatusResponse(BaseSchema):
+    """Response body for workspace retention status queries.
+
+    Provides an overview of workspace retention settings and current state,
+    including counts, total size, and age statistics.
+
+    Attributes:
+        enabled: Whether workspace retention is enabled
+        retention_days: Days to keep completed job workspaces
+        failed_retention_days: Days to keep failed job workspaces
+        total_workspaces: Total number of tracked workspaces
+        active_workspaces: Number of active (not deleted) workspaces
+        total_size_bytes: Total size of all active workspaces
+        oldest_workspace_age_days: Age in days of the oldest active workspace
+        workspaces_pending_cleanup: Number of workspaces eligible for cleanup
+    """
+
+    enabled: bool = Field(description="Whether workspace retention is enabled")
+    retention_days: int = Field(description="Days to keep completed job workspaces")
+    failed_retention_days: int = Field(description="Days to keep failed job workspaces")
+    total_workspaces: int = Field(default=0, ge=0, description="Total tracked workspaces")
+    active_workspaces: int = Field(default=0, ge=0, description="Active (not deleted) workspaces")
+    total_size_bytes: int = Field(default=0, ge=0, description="Total size of active workspaces")
+    oldest_workspace_age_days: float | None = Field(
+        default=None, description="Age of oldest workspace in days"
+    )
+    workspaces_pending_cleanup: int = Field(
+        default=0, ge=0, description="Workspaces eligible for cleanup"
+    )
+
+
+class WorkspaceDeleteResponse(BaseSchema):
+    """Response body for deleting a specific job workspace.
+
+    Attributes:
+        ok: True if deletion was successful
+        job_id: UUID of the job whose workspace was deleted
+        deleted: True if workspace was actually deleted (False if already deleted/not found)
+        bytes_freed: Number of bytes freed by deletion
+    """
+
+    ok: bool = Field(default=True, description="True if operation completed successfully")
+    job_id: str = Field(description="UUID of the job")
+    deleted: bool = Field(description="True if workspace was deleted")
+    bytes_freed: int = Field(default=0, ge=0, description="Bytes freed by deletion")

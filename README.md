@@ -14,7 +14,7 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
 - **Secure execution** via Modal sandboxes
 - **HTTP API endpoints** for querying agents
 - **MCP (Model Context Protocol)** tool integration
-- **Two execution patterns**: short-lived sandboxes (ephemeral, for batch jobs) and long-lived background services (persistent, for low-latency APIs)
+- **Two execution patterns**: short-lived sandboxes (ephemeral, for batch jobs) and long-lived background service (persistent, for low-latency APIs)
 
 ## Table of Contents
 
@@ -25,6 +25,11 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
   - [Development Mode](#development-mode)
   - [Production Mode (Persistent Service)](#production-mode-persistent-service)
   - [Service Management](#service-management)
+- [Session Management](#session-management)
+  - [Session Stop/Cancel](#session-stopcancel)
+  - [Multiplayer Sessions](#multiplayer-sessions)
+  - [Prompt Queue](#prompt-queue)
+  - [Sub-Session Spawning](#sub-session-spawning)
 - [Execution Patterns](#execution-patterns)
   - [Pattern 1: Short-Lived Sandbox](#pattern-1-short-lived-sandbox)
   - [Pattern 2: Long-Lived Service](#pattern-2-long-lived-service)
@@ -231,6 +236,133 @@ curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123..
 **Note:** In development, run `modal run -m agent_sandbox.app::process_job_queue` to consume queued jobs.
 Set `job_queue_cron` in settings to schedule automatic processing.
 
+## Session Management
+
+The system provides comprehensive session management features for controlling agent execution, enabling collaboration, and orchestrating complex workflows.
+
+### Session Stop/Cancel
+
+Stop a running or resumable session gracefully or immediately:
+
+```bash
+# Check if a session has a stop request
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop'
+
+# Request graceful stop (agent stops after current tool call)
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop' \
+  -H 'Content-Type: application/json' \
+  -d '{"requested_by":"user_alice","reason":"User requested cancellation"}'
+
+# Request immediate stop (interrupts active client)
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop' \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"immediate","requested_by":"user_alice","reason":"Emergency stop"}'
+
+# Check system-wide cancellation status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/cancellations/status'
+```
+
+**Stop modes:**
+
+- `graceful` (default): Agent completes current tool call, then stops
+- `immediate`: Interrupts the active SDK client immediately
+
+**Response fields:**
+
+- `status`: `not_found` | `requested` | `acknowledged` | `expired`
+- `expires_at`: Unix timestamp when the cancellation request expires (default: 1 hour)
+
+### Multiplayer Sessions
+
+Share sessions between users for collaborative workflows:
+
+```bash
+# Get session metadata (owner, authorized users, message count)
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/metadata'
+
+# Get session users
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/users'
+
+# Share session with another user
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/share' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user_bob"}'
+
+# Get session history (with user attribution)
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/history'
+
+# Check system-wide multiplayer status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/multiplayer/status'
+
+# Revoke access from a user
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/unshare' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user_bob"}'
+```
+
+**Features:**
+
+- Sessions track `owner_id` and `authorized_users`
+- Message history includes `user_id` attribution for each message
+- Shared users can continue the session with their own queries
+
+### Prompt Queue
+
+Queue follow-up prompts for a session, useful when the agent is busy processing:
+
+```bash
+# Check if session is currently executing
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/executing'
+
+# Get queued prompts
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+
+# Queue a follow-up prompt
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Follow-up question here","user_id":"user_alice"}'
+
+# Check system-wide queue status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/queue/status'
+
+# Clear the queue for a session
+curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+```
+
+**How it works:**
+
+1. If a session is executing, new prompts are queued instead of rejected
+2. After the primary query completes, queued prompts are processed in order
+3. Queue entries expire after 1 hour (configurable)
+4. Maximum queue size: 10 prompts per session
+
+### Sub-Session Spawning
+
+Agents can spawn child sessions for parallel task execution using MCP tools:
+
+```bash
+# Ask agent to spawn a child session
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question":"Use spawn_session to create a child session with task \"Analyze data\" and sandbox_type \"agent_sdk\"",
+    "user_id":"user_alice"
+  }'
+```
+
+**Available MCP tools for sub-sessions:**
+
+- `mcp__sessions__spawn_session`: Create a child session with a specific task
+- `mcp__sessions__check_session_status`: Check the status of a child session
+- `mcp__sessions__get_session_result`: Retrieve the result of a completed child session
+- `mcp__sessions__list_child_sessions`: List all child sessions for the current parent
+
+**Use cases:**
+
+- Parallel task execution (agent spawns multiple workers)
+- Divide-and-conquer workflows
+- Background processing while continuing the main conversation
+
 ## Execution Patterns
 
 This starter supports **two patterns** for running the agent. Choose based on your use case:
@@ -318,96 +450,89 @@ For more details, see [Modal's Getting Started Guide](https://modal.com/docs/gui
 ### Quick Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                            Modal App (test-sandbox)                          │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                         HTTP Gateway (web_app)                         │  │
-│  │                                                                        │  │
-│  │  /health              /query, /query_stream       /claude_cli/*        │  │
-│  │  /submit              /claude_cli (proxy)         /ralph/start         │  │
-│  │  /jobs/*                                          /ralph/{job_id}      │  │
-│  │  /service_info                                                         │  │
-│  └───────────────────────────┬────────────────────────────┬───────────────┘  │
-│                              │                            │                  │
-│              ┌───────────────┘                            └───────────────┐  │
-│              │                                                            │  │
-│              ▼                                                            ▼  │
-│  ┌───────────────────────────────────┐        ┌───────────────────────────────────┐
-│  │      Agent SDK Sandbox            │        │       CLI Sandbox                 │
-│  │      (svc-runner-8001)            │        │       (claude-cli-runner)         │
-│  │                                   │        │                                   │
-│  │  ┌─────────────────────────────┐  │        │  ┌─────────────────────────────┐  │
-│  │  │  controller.py :8001        │  │        │  │  cli_controller.py :8002    │  │
-│  │  │                             │  │        │  │                             │  │
-│  │  │  GET  /health_check         │  │        │  │  GET  /health_check         │  │
-│  │  │  POST /query                │  │        │  │  POST /execute              │  │
-│  │  │  POST /query_stream         │  │        │  │  POST /ralph/execute        │  │
-│  │  │  POST /claude_cli           │  │        │  │                             │  │
-│  │  └─────────────────────────────┘  │        │  └─────────────────────────────┘  │
-│  │                                   │        │                                   │
-│  │  Volume: svc-runner-8001-vol      │        │  Volume: claude-cli-runner-vol    │
-│  │  Mount:  /data                    │        │  Mount:  /data-cli                │
-│  │                                   │        │                                   │
-│  │  Image: _base_anthropic_sdk_image │        │  Image: _claude_cli_image         │
-│  │  (Claude Agent SDK)               │        │  (Claude Code CLI)                │
-│  └───────────────────────────────────┘        └───────────────────────────────────┘
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          Modal App (test-sandbox)                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                       HTTP Gateway (web_app)                         │  │
+│  │                                                                      │  │
+│  │  /health              /query, /query_stream      /session/*/stop     │  │
+│  │  /submit              /jobs/*                    /session/*/share    │  │
+│  │  /service_info        /session/*/queue           /session/*/history  │  │
+│  └────────────────────────────────────┬─────────────────────────────────┘  │
+│                                       │                                    │
+│                                       ▼                                    │
+│            ┌───────────────────────────────────────────────┐               │
+│            │           Agent SDK Sandbox                   │               │
+│            │           (svc-runner-8001)                   │               │
+│            │                                               │               │
+│            │  ┌─────────────────────────────────────────┐  │               │
+│            │  │  controller.py :8001                    │  │               │
+│            │  │                                         │  │               │
+│            │  │  GET  /health_check                     │  │               │
+│            │  │  POST /query                            │  │               │
+│            │  │  POST /query_stream                     │  │               │
+│            │  └─────────────────────────────────────────┘  │               │
+│            │                                               │               │
+│            │  Volume: svc-runner-8001-vol                  │               │
+│            │  Mount:  /data                                │               │
+│            │                                               │               │
+│            │  Image: _base_anthropic_sdk_image             │               │
+│            │  (Claude Agent SDK)                           │               │
+│            └───────────────────────────────────────────────┘               │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Detailed Architecture
 
-This project uses a **dual-sandbox architecture** with separate long-lived sandboxes for the Agent SDK and Claude CLI:
+This project uses a **single long-lived sandbox** for the Claude Agent SDK:
 
 ```
-                                 ┌─────────────────────────────────────────────────────────────────┐
-                                 │                           Modal Cloud                           │
-   ┌──────────────┐              │  ┌─────────────────────────────────────────────────────────┐   │
-   │              │   HTTP POST  │  │              http_app (FastAPI Gateway)                 │   │
-   │    Client    │─────────────────▶  /query, /query_stream  │  /claude_cli, /ralph/*       │   │
-   │              │◀─ Proxy Auth ──│  /submit, /jobs/{id}     │                              │   │
-   └──────────────┘              │  └────────────┬────────────┴────────────────┬─────────────┘   │
-                                 │               │                             │                  │
-                                 │     ┌─────────┴─────────┐         ┌─────────┴─────────┐       │
-                                 │     │                   │         │                   │       │
-                                 │     ▼ proxy to :8001    │         ▼ proxy to :8002    │       │
-                                 │  ┌──────────────────────┴──┐   ┌──────────────────────┴──┐    │
-                                 │  │    Agent SDK Sandbox    │   │     CLI Sandbox         │    │
-                                 │  │   (svc-runner-8001)     │   │  (claude-cli-runner)    │    │
-                                 │  │  ────────────────────   │   │  ────────────────────   │    │
-                                 │  │                         │   │                         │    │
-                                 │  │  ┌───────────────────┐  │   │  ┌───────────────────┐  │    │
-                                 │  │  │ FastAPI :8001     │  │   │  │ FastAPI :8002     │  │    │
-                                 │  │  │ (uvicorn)         │  │   │  │ (uvicorn)         │  │    │
-                                 │  │  │ controller.py     │  │   │  │ cli_controller.py │  │    │
-                                 │  │  └─────────┬─────────┘  │   │  └─────────┬─────────┘  │    │
-                                 │  │            │            │   │            │            │    │
-                                 │  │  User: root             │   │  User: claude (non-root)│    │
-                                 │  │  Dir: /root/app         │   │  Dir: /home/claude/app  │    │
-                                 │  │            │            │   │            │            │    │
-                                 │  │            ▼            │   │            ▼            │    │
-                                 │  │  ┌───────────────────┐  │   │  ┌───────────────────┐  │    │
-                                 │  │  │ Claude Agent SDK  │  │   │  │ Claude Code CLI   │  │    │
-                                 │  │  │ ┌─────┐ ┌───────┐ │  │   │  │ (subprocess)      │  │    │
-                                 │  │  │ │ MCP │ │ Tools │ │  │   │  │ + Ralph loop      │  │    │
-                                 │  │  │ └─────┘ └───────┘ │  │   │  └───────────────────┘  │    │
-                                 │  │  └───────────────────┘  │   │                         │    │
-                                 │  │            │            │   │            │            │    │
-                                 │  │  ┌─────────┴─────────┐  │   │  ┌─────────┴─────────┐  │    │
-                                 │  │  │  /data volume     │  │   │  │ /data-cli volume  │  │    │
-                                 │  │  │  svc-runner-8001  │  │   │  │ claude-cli-runner │  │    │
-                                 │  │  │  -vol             │  │   │  │ -vol              │  │    │
-                                 │  │  └───────────────────┘  │   │  └───────────────────┘  │    │
-                                 │  └─────────────────────────┘   └─────────────────────────┘    │
-                                 │                                                               │
-                                 │               ┌──────────────────────────────┐                │
-                                 │               │  Shared Resources            │                │
-                                 │               │  • Modal Dicts (session/job) │                │
-                                 │               │  • Modal Queue (JOB_QUEUE)   │                │
-                                 │               └──────────────────────────────┘                │
-                                 └───────────────────────────────────────────────────────────────┘
+                                 ┌─────────────────────────────────────────────────────────┐
+                                 │                       Modal Cloud                       │
+   ┌──────────────┐              │  ┌─────────────────────────────────────────────────┐   │
+   │              │   HTTP POST  │  │          http_app (FastAPI Gateway)             │   │
+   │    Client    │─────────────────▶  /query, /query_stream, /session/*              │   │
+   │              │◀─ Proxy Auth ──│  /submit, /jobs/{id}                             │   │
+   └──────────────┘              │  └──────────────────────────┬──────────────────────┘   │
+                                 │                             │                          │
+                                 │                             ▼ proxy to :8001          │
+                                 │            ┌────────────────────────────────────┐      │
+                                 │            │      Agent SDK Sandbox             │      │
+                                 │            │      (svc-runner-8001)             │      │
+                                 │            │  ────────────────────────────────  │      │
+                                 │            │                                    │      │
+                                 │            │  ┌────────────────────────────┐    │      │
+                                 │            │  │ FastAPI :8001              │    │      │
+                                 │            │  │ (uvicorn)                  │    │      │
+                                 │            │  │ controller.py              │    │      │
+                                 │            │  └────────────┬───────────────┘    │      │
+                                 │            │               │                    │      │
+                                 │            │  User: root                        │      │
+                                 │            │  Dir: /root/app                    │      │
+                                 │            │               │                    │      │
+                                 │            │               ▼                    │      │
+                                 │            │  ┌────────────────────────────┐    │      │
+                                 │            │  │ Claude Agent SDK           │    │      │
+                                 │            │  │ ┌─────┐ ┌───────┐          │    │      │
+                                 │            │  │ │ MCP │ │ Tools │          │    │      │
+                                 │            │  │ └─────┘ └───────┘          │    │      │
+                                 │            │  └────────────────────────────┘    │      │
+                                 │            │               │                    │      │
+                                 │            │  ┌────────────┴───────────────┐    │      │
+                                 │            │  │  /data volume              │    │      │
+                                 │            │  │  svc-runner-8001-vol       │    │      │
+                                 │            │  └────────────────────────────┘    │      │
+                                 │            └────────────────────────────────────┘      │
+                                 │                                                        │
+                                 │            ┌────────────────────────────────────┐      │
+                                 │            │  Shared Resources                  │      │
+                                 │            │  • Modal Dicts (session/job)       │      │
+                                 │            │  • Modal Queue (JOB_QUEUE)         │      │
+                                 │            └────────────────────────────────────┘      │
+                                 └────────────────────────────────────────────────────────┘
 ```
 
 ### Understanding the Diagram
@@ -418,32 +543,26 @@ This project uses a **dual-sandbox architecture** with separate long-lived sandb
 | **http_app (FastAPI Gateway)** | Lightweight HTTP entry point | Scales to zero when idle; handles routing without running the full agent |
 | **Proxy Auth** | API authentication | Secure production endpoints with `Modal-Key`/`Modal-Secret` token headers |
 | **Agent SDK Sandbox (svc-runner-8001)** | Long-lived sandbox for agent queries | Runs as root; hosts Claude Agent SDK with MCP tools |
-| **CLI Sandbox (claude-cli-runner)** | Long-lived sandbox for CLI/Ralph | Runs as non-root `claude` user; required for `--dangerously-skip-permissions` |
 | **controller.py :8001** | Agent SDK controller | Handles `/query`, `/query_stream` for conversational AI |
-| **cli_controller.py :8002** | CLI controller | Handles `/execute` for CLI, `/ralph/execute` for autonomous loops |
 | **JOB_QUEUE (Modal Queue)** | Async job processing | Fire-and-forget workloads; long-running tasks processed by workers |
 | **Proxy connections** | Internal forwarding | Decouples the public API from sandbox services; enables independent scaling |
 | **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
-| **Claude Code CLI + Ralph** | Code execution & autonomous loops | CLI subprocess for code tasks; Ralph for PRD-driven autonomous coding |
-| **/data volume** | Agent SDK storage | Files persist at `/data` for Agent SDK sandbox |
-| **/data-cli volume** | CLI/Ralph storage | Files persist at `/data-cli` for CLI sandbox; Ralph writes artifacts here |
+| **/data volume** | Agent SDK storage | Files persist at `/data` for the Agent SDK sandbox |
 | **Modal Dicts (SESSION/JOB)** | Session & job state storage | Resume conversations; track async job status |
+| **Session Management** | Stop/cancel, multiplayer, queues | Control running sessions; enable collaboration; orchestrate workflows |
 
 ### How It Works
 
-1. **Dual Background Services**: Two long-lived `modal.Sandbox` instances run FastAPI microservices:
+1. **Background Service**: A long-lived `modal.Sandbox` instance runs a FastAPI microservice:
    - **Agent SDK sandbox** (`controller.py` on :8001) handles conversational queries
-   - **CLI sandbox** (`cli_controller.py` on :8002) handles code execution and Ralph loops
-2. **HTTP Gateway**: `http_app` routes requests to the appropriate sandbox based on endpoint
-3. **Volume Persistence**: Each sandbox has its own persistent volume (`/data` and `/data-cli`)
-4. **Low Latency**: Both sandboxes stay warm, avoiding cold-start delays
+2. **HTTP Gateway**: `http_app` routes requests to the background sandbox
+3. **Volume Persistence**: The sandbox has a persistent volume at `/data`
+4. **Low Latency**: The sandbox stays warm, avoiding cold-start delays
 
 ### Key Modules
 
-- `agent_sandbox/app.py`: Defines the Modal `App`, dual sandbox management, and HTTP gateway endpoints
+- `agent_sandbox/app.py`: Defines the Modal `App`, sandbox management, and HTTP gateway endpoints
 - `agent_sandbox/controllers/controller.py`: Agent SDK microservice (port 8001) with `/query`, `/query_stream`
-- `agent_sandbox/controllers/cli_controller.py`: CLI microservice (port 8002) with `/execute`, `/ralph/execute`
-- `agent_sandbox/ralph/`: Ralph autonomous coding loop module (PRD-driven task execution)
 - `agent_sandbox/agents/loop.py`: Standalone agent runner (used by `run_agent_remote` for one-off executions)
 - `agent_sandbox/config/settings.py`: Pydantic Settings for configuration and Modal secrets management
 - `agent_sandbox/tools/`: MCP tool system with registry and individual tool implementations
@@ -451,22 +570,18 @@ This project uses a **dual-sandbox architecture** with separate long-lived sandb
 
 ### Persistent Storage
 
-Each sandbox has its own persistent volume:
+The sandbox has a persistent volume mounted at `/data`:
 
 | Sandbox | Volume Mount | Use Case |
 |---------|--------------|----------|
-| Agent SDK | `/data` | Agent queries, MCP tool outputs |
-| CLI | `/data-cli` | Claude CLI jobs, Ralph workspaces |
+| Agent SDK | `/data` | Agent queries, MCP tool outputs, job artifacts |
 
-**Important**: Files must be written to the correct volume to persist:
+**Important**: Files must be written to `/data` to persist:
 
 ```python
-# Agent SDK sandbox - use /data
+# ✅ Persisted across restarts
 with open("/data/myfile.py", "w") as f:
     f.write("code here")
-
-# CLI sandbox - use /data-cli
-# Ralph writes to /data-cli/jobs/{job_id}/
 
 # ❌ Not persisted (lost on restart)
 with open("/tmp/myfile.py", "w") as f:
@@ -474,84 +589,6 @@ with open("/tmp/myfile.py", "w") as f:
 ```
 
 The system prompt automatically instructs the agent to use `/data` for file operations.
-
-### Claude Code CLI: Running Code
-
-Claude Code CLI runs in a dedicated long-lived sandbox (`claude-cli-runner`) as a non-root user. To create files and execute code:
-
-- **Pass `job_id`** so files land under `/data-cli/jobs/<job_id>/` and persist.
-- **Allow tools**: `Write` to create files and `Bash` to execute them.
-- **Increase timeouts** for longer tasks (default CLI timeout is 120 seconds).
-- **Non-root execution**: The CLI runs as the `claude` user, required for `--dangerously-skip-permissions`.
-- **CLI output capture**: `modal run` only writes return values when they are strings/bytes. Use `--return-stdout` with `--write-result` (JSON fallback is returned if stdout/stderr is empty).
-- **If output is empty**: Check the Modal run logs and confirm `anthropic-secret` is configured with `ANTHROPIC_API_KEY` so the Claude CLI can authenticate.
-
-Examples:
-
-```bash
-# Python: create and run a file
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create game.py and run it to show sample output" \
-  --allowed-tools "Write,Bash,Read" \
-  --timeout-seconds 300
-
-# Node: create and run a file
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create index.js and run it with node" \
-  --allowed-tools "Write,Bash,Read" \
-  --timeout-seconds 300
-
-# Full bypass (use sparingly)
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --job-id "550e8400-e29b-41d4-a716-446655440000" \
-  --prompt "Create app.py and run it" \
-  --dangerously-skip-permissions \
-  --timeout-seconds 300
-
-# Capture CLI output to a file (modal run only writes string/bytes results)
-modal run -m agent_sandbox.app::run_claude_cli_remote \
-  --prompt "Say hello in one sentence" \
-  --return-stdout \
-  --write-result ./claude_cli_output.txt
-```
-
-Without `--job-id`, files are written under `/home/claude/app` and are not persisted.
-The CLI sandbox mounts `claude-cli-runner-vol` at `/data-cli` for persisted artifacts.
-
-For long-running runs, use async submission and polling:
-
-```bash
-# Start a run and get a call_id
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/submit' \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Create app.py and run it","allowed_tools":["Write","Bash","Read"],"job_id":"550e8400-e29b-41d4-a716-446655440000","timeout_seconds":300}'
-
-# Poll for completion
-curl -X GET 'https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/<call_id>'
-```
-
-Example polling loop:
-
-```bash
-call_id="<call_id>"
-while true; do
-  resp=$(curl -s "https://<org>--test-sandbox-http-app-dev.modal.run/claude_cli/result/${call_id}")
-  echo "$resp"
-  if echo "$resp" | grep -q '"status":"complete"\|"status":"failed"\|"status":"expired"'; then
-    break
-  fi
-  sleep 2
-done
-```
-
-Status polling behavior:
-
-- `202` + `{"status":"running"}` while the run is still executing
-- `200` + `{"status":"complete","result":{...}}` when finished
-- `410` + `{"status":"expired"}` if the result TTL has passed
-- `500` + `{"status":"failed","error":"..."}` on execution errors
 
 ## Configuration
 
