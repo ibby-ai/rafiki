@@ -25,6 +25,11 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
   - [Development Mode](#development-mode)
   - [Production Mode (Persistent Service)](#production-mode-persistent-service)
   - [Service Management](#service-management)
+- [Session Management](#session-management)
+  - [Session Stop/Cancel](#session-stopcancel)
+  - [Multiplayer Sessions](#multiplayer-sessions)
+  - [Prompt Queue](#prompt-queue)
+  - [Sub-Session Spawning](#sub-session-spawning)
 - [Execution Patterns](#execution-patterns)
   - [Pattern 1: Short-Lived Sandbox](#pattern-1-short-lived-sandbox)
   - [Pattern 2: Long-Lived Service](#pattern-2-long-lived-service)
@@ -231,6 +236,133 @@ curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123..
 **Note:** In development, run `modal run -m agent_sandbox.app::process_job_queue` to consume queued jobs.
 Set `job_queue_cron` in settings to schedule automatic processing.
 
+## Session Management
+
+The system provides comprehensive session management features for controlling agent execution, enabling collaboration, and orchestrating complex workflows.
+
+### Session Stop/Cancel
+
+Stop a running or resumable session gracefully or immediately:
+
+```bash
+# Check if a session has a stop request
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop'
+
+# Request graceful stop (agent stops after current tool call)
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop' \
+  -H 'Content-Type: application/json' \
+  -d '{"requested_by":"user_alice","reason":"User requested cancellation"}'
+
+# Request immediate stop (interrupts active client)
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/stop' \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"immediate","requested_by":"user_alice","reason":"Emergency stop"}'
+
+# Check system-wide cancellation status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/cancellations/status'
+```
+
+**Stop modes:**
+
+- `graceful` (default): Agent completes current tool call, then stops
+- `immediate`: Interrupts the active SDK client immediately
+
+**Response fields:**
+
+- `status`: `not_found` | `requested` | `acknowledged` | `expired`
+- `expires_at`: Unix timestamp when the cancellation request expires (default: 1 hour)
+
+### Multiplayer Sessions
+
+Share sessions between users for collaborative workflows:
+
+```bash
+# Get session metadata (owner, authorized users, message count)
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/metadata'
+
+# Get session users
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/users'
+
+# Share session with another user
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/share' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user_bob"}'
+
+# Get session history (with user attribution)
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/history'
+
+# Check system-wide multiplayer status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/multiplayer/status'
+
+# Revoke access from a user
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/unshare' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user_bob"}'
+```
+
+**Features:**
+
+- Sessions track `owner_id` and `authorized_users`
+- Message history includes `user_id` attribution for each message
+- Shared users can continue the session with their own queries
+
+### Prompt Queue
+
+Queue follow-up prompts for a session, useful when the agent is busy processing:
+
+```bash
+# Check if session is currently executing
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/executing'
+
+# Get queued prompts
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+
+# Queue a follow-up prompt
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Follow-up question here","user_id":"user_alice"}'
+
+# Check system-wide queue status
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/queue/status'
+
+# Clear the queue for a session
+curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+```
+
+**How it works:**
+
+1. If a session is executing, new prompts are queued instead of rejected
+2. After the primary query completes, queued prompts are processed in order
+3. Queue entries expire after 1 hour (configurable)
+4. Maximum queue size: 10 prompts per session
+
+### Sub-Session Spawning
+
+Agents can spawn child sessions for parallel task execution using MCP tools:
+
+```bash
+# Ask agent to spawn a child session
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question":"Use spawn_session to create a child session with task \"Analyze data\" and sandbox_type \"agent_sdk\"",
+    "user_id":"user_alice"
+  }'
+```
+
+**Available MCP tools for sub-sessions:**
+
+- `mcp__sessions__spawn_session`: Create a child session with a specific task
+- `mcp__sessions__check_session_status`: Check the status of a child session
+- `mcp__sessions__get_session_result`: Retrieve the result of a completed child session
+- `mcp__sessions__list_child_sessions`: List all child sessions for the current parent
+
+**Use cases:**
+
+- Parallel task execution (agent spawns multiple workers)
+- Divide-and-conquer workflows
+- Background processing while continuing the main conversation
+
 ## Execution Patterns
 
 This starter supports **two patterns** for running the agent. Choose based on your use case:
@@ -325,9 +457,9 @@ For more details, see [Modal's Getting Started Guide](https://modal.com/docs/gui
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                       HTTP Gateway (web_app)                         │  │
 │  │                                                                      │  │
-│  │  /health              /query, /query_stream                          │  │
-│  │  /submit              /jobs/*                                        │  │
-│  │  /service_info                                                       │  │
+│  │  /health              /query, /query_stream      /session/*/stop     │  │
+│  │  /submit              /jobs/*                    /session/*/share    │  │
+│  │  /service_info        /session/*/queue           /session/*/history  │  │
 │  └────────────────────────────────────┬─────────────────────────────────┘  │
 │                                       │                                    │
 │                                       ▼                                    │
@@ -362,7 +494,7 @@ This project uses a **single long-lived sandbox** for the Claude Agent SDK:
                                  │                       Modal Cloud                       │
    ┌──────────────┐              │  ┌─────────────────────────────────────────────────┐   │
    │              │   HTTP POST  │  │          http_app (FastAPI Gateway)             │   │
-   │    Client    │─────────────────▶  /query, /query_stream                          │   │
+   │    Client    │─────────────────▶  /query, /query_stream, /session/*              │   │
    │              │◀─ Proxy Auth ──│  /submit, /jobs/{id}                             │   │
    └──────────────┘              │  └──────────────────────────┬──────────────────────┘   │
                                  │                             │                          │
@@ -417,6 +549,7 @@ This project uses a **single long-lived sandbox** for the Claude Agent SDK:
 | **Claude Agent SDK + MCP Tools** | AI agent capabilities | The actual agent logic with its configured tools (WebSearch, file operations, etc.) |
 | **/data volume** | Agent SDK storage | Files persist at `/data` for the Agent SDK sandbox |
 | **Modal Dicts (SESSION/JOB)** | Session & job state storage | Resume conversations; track async job status |
+| **Session Management** | Stop/cancel, multiplayer, queues | Control running sessions; enable collaboration; orchestrate workflows |
 
 ### How It Works
 
