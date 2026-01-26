@@ -2,9 +2,54 @@
 
 ## Project Overview
 
-This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolated sandboxed environments. The project uses a dual-sandbox architecture:
+This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolated sandboxed environments.
+
+**Architecture**: Single sandbox using Claude Agent SDK for all agent interactions.
 - **Agent SDK Sandbox** (`svc-runner-8001`): Long-lived service for conversational queries via Claude Agent SDK
-- **CLI Sandbox** (`claude-cli-runner`): Code execution via Claude Code CLI
+
+> **Note (2026-01-26)**: The CLI sandbox and Ralph autonomous coding loop have been removed to simplify the architecture. The codebase now focuses exclusively on the Agent SDK approach. See "CLI Approach Removal" section below for details.
+
+## Session Update (2026-01-26) - CLI Approach Removal
+
+### Summary
+
+Removed the CLI sandbox and Ralph autonomous coding loop to simplify the architecture. The codebase now focuses exclusively on the Agent SDK approach.
+
+### Files Removed
+
+| File | Purpose |
+|------|---------|
+| `agent_sandbox/controllers/cli_controller.py` | CLI microservice endpoints |
+| `agent_sandbox/sandbox/cli_runner.py` | CLI sandbox management |
+| `agent_sandbox/utils/cli.py` | CLI utilities |
+| `agent_sandbox/ralph/` | Ralph autonomous coding loop (entire directory) |
+| `tests/test_ralph_*.py` | Ralph unit tests (8 files) |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `agent_sandbox/prompts/prompts.py` | Removed `RALPH_PROMPT_TEMPLATE` |
+| `agent_sandbox/schemas/stats.py` | Removed `cli` and `ralph` fields from `StatsResponse` |
+| `agent_sandbox/schemas/sandbox.py` | Removed CLI comments |
+| `agent_sandbox/schemas/session_spawn.py` | Changed `Literal["agent_sdk", "cli"]` to `Literal["agent_sdk"]` |
+| `agent_sandbox/tools/session_tools.py` | Removed CLI sandbox type support |
+| `agent_sandbox/jobs.py` | Simplified statistics to only iterate over `["agent_sdk"]` |
+
+### Breaking Changes
+
+- **Statistics API**: `GET /stats` no longer returns `cli` or `ralph` fields
+- **Child Sessions**: `spawn_session` tool only supports `sandbox_type="agent_sdk"`
+- **Ralph Endpoints**: All `/ralph/*` endpoints have been removed
+
+### Migration Notes
+
+If you have code that relied on CLI sandbox or Ralph features:
+- Use the Agent SDK sandbox for all agent interactions
+- For code execution tasks, configure appropriate tools in the Agent SDK
+- Ralph-style autonomous loops can be implemented using the Agent SDK with custom prompts
+
+---
 
 ## Session Update (2026-01-25) - Periodic Image Rebuilds
 
@@ -1313,17 +1358,15 @@ Same pattern for CLI sandbox.
 |------|---------|
 | `agent_sandbox/app.py` | Modal app, sandbox lifecycle, HTTP gateway, snapshots |
 | `agent_sandbox/controllers/controller.py` | Agent SDK microservice, session management |
-| `agent_sandbox/controllers/cli_controller.py` | CLI microservice, code execution |
 | `agent_sandbox/config/settings.py` | Configuration management |
 | `agent_sandbox/jobs.py` | Job queue, async processing, stats, snapshots |
 | `agent_sandbox/tools/registry.py` | MCP tool registration |
-| `agent_sandbox/ralph/loop.py` | Ralph autonomous coding loop |
 
 ## Modal Features in Use
 
 - **Sandboxes**: Long-lived background services with `modal.Sandbox.create()`
 - **Encrypted Tunnels**: Service discovery via `sandbox.tunnels()`
-- **Volumes**: Persistent storage at `/data` and `/data-cli`
+- **Volumes**: Persistent storage at `/data`
 - **Queue**: Job distribution via `modal.Queue`
 - **Dict**: Distributed state via `modal.Dict`
 - **Secrets**: API key management
@@ -1918,17 +1961,17 @@ The controller must call `set_parent_context(job_id)` before agent execution to 
 
 1. ✅ Statistics & Usage Tracking (Priority 5) - COMPLETE
 2. ✅ Agent SDK Sandbox Snapshots (Priority 1) - COMPLETE
-3. ✅ CLI Sandbox Snapshots (Priority 10) - COMPLETE
+3. ❌ CLI Sandbox Snapshots (Priority 10) - REMOVED (CLI approach removed)
 4. ✅ Agent SDK Warm Pool (Priority 2) - COMPLETE
-5. ✅ CLI Warm Pool (Priority 11) - COMPLETE
+5. ❌ CLI Warm Pool (Priority 11) - REMOVED (CLI approach removed)
 6. ✅ Pre-warm API (Priority 3) - COMPLETE
 7. ✅ Stop/Cancel Mid-Execution (Priority 8) - COMPLETE
 8. ✅ Follow-up Prompt Queue (Priority 7) - COMPLETE
 9. ✅ Multiplayer Session Support (Priority 6) - COMPLETE
-10. ✅ Ralph Loop Improvements (Priority 12) - COMPLETE
-11. ✅ CLI Job Workspace Improvements (Priority 13) - COMPLETE
+10. ❌ Ralph Loop Improvements (Priority 12) - REMOVED (Ralph removed)
+11. ❌ CLI Job Workspace Improvements (Priority 13) - REMOVED (CLI approach removed)
 12. ⏭️ VS Code Integration (Priority 9) - SKIP FOR NOW
-13. ✅ Sub-Session Spawning Tools (Priority 4) - COMPLETE
+13. ✅ Sub-Session Spawning Tools (Priority 4) - COMPLETE (Agent SDK only)
 
 ## Next Steps
 
