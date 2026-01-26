@@ -19,9 +19,11 @@ Important:
   `modal deploy -m agent_sandbox.deploy`.
 """
 
+import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterable
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,7 @@ from agent_sandbox.jobs import (
     acknowledge_session_cancellation,
     add_message_to_history,
     create_session_metadata,
+    dequeue_prompt,
     is_session_cancelled,
     job_workspace_root,
     mark_session_executing,
@@ -60,6 +63,7 @@ from agent_sandbox.jobs import (
 )
 from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import QueryBody
+from agent_sandbox.schemas.base import BaseSchema
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
 from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 from agent_sandbox.tools.session_tools import set_parent_context
@@ -75,6 +79,40 @@ _logger = logging.getLogger(__name__)
 _LAST_VOLUME_COMMIT_TS: float | None = None
 SESSION_STORE = modal.Dict.from_name(_settings.session_store_name, create_if_missing=True)
 SESSION_CACHE: dict[str, str] = {}
+
+# =============================================================================
+# Active Client Registry for Immediate Stop Support
+# =============================================================================
+# Maps session_id -> (ClaudeSDKClient, asyncio.Event) for active sessions.
+# Used to enable immediate session interruption via client.interrupt().
+# The Event is used to signal graceful stop requests.
+# =============================================================================
+ACTIVE_CLIENTS: dict[str, tuple[ClaudeSDKClient, asyncio.Event]] = {}
+
+
+async def _async_prompt(
+    question: str, session_id: str | None = None
+) -> AsyncIterable[dict[str, Any]]:
+    """Wrap string prompt as AsyncIterable for can_use_tool support.
+
+    The Claude Agent SDK requires AsyncIterable prompts when using can_use_tool.
+    This wrapper converts a simple string prompt into the required format.
+
+    Args:
+        question: The user's question/prompt.
+        session_id: Optional session ID to include in the message.
+
+    Yields:
+        A single user message dictionary in the required format.
+    """
+    msg: dict[str, Any] = {
+        "type": "user",
+        "message": {"role": "user", "content": question},
+        "parent_tool_use_id": None,
+    }
+    if session_id:
+        msg["session_id"] = session_id
+    yield msg
 
 
 def _require_connect_token(request: Request) -> None:
@@ -357,25 +395,34 @@ def _persist_session_id(session_key: str | None, session_id: str | None) -> None
         SESSION_CACHE[session_key] = session_id
 
 
-def _make_can_use_tool_handler(session_id: str | None = None):
+def _make_can_use_tool_handler(
+    session_id: str | None = None,
+    stop_event: asyncio.Event | None = None,
+):
     """Create a tool permission handler with session-aware cancellation checking.
 
-    This factory function creates a closure that has access to the session_id,
-    enabling the handler to check for cancellation requests before allowing tools.
+    This factory function creates a closure that has access to the session_id
+    and stop_event, enabling the handler to check for cancellation requests
+    before allowing tools.
 
     Args:
         session_id: The session ID to check for cancellation. If None,
             cancellation checking is skipped.
+        stop_event: Optional asyncio.Event that, when set, signals a stop request.
+            This provides an additional way to stop the session without relying
+            on the persistent cancellation store.
 
     Returns:
         An async function suitable for use as ClaudeAgentOptions.can_use_tool.
 
     Usage:
         ```python
+        stop_event = asyncio.Event()
         options = ClaudeAgentOptions(
-            can_use_tool=_make_can_use_tool_handler(session_id="sess_123"),
+            can_use_tool=_make_can_use_tool_handler(session_id="sess_123", stop_event=stop_event),
             ...
         )
+        # To stop: stop_event.set()
         ```
     """
 
@@ -387,9 +434,10 @@ def _make_can_use_tool_handler(session_id: str | None = None):
         """Permission handler that checks cancellation and allows web-related tools.
 
         This handler is called before each tool invocation. It:
-        1. Checks if the session has been cancelled (via POST /session/{id}/stop)
-        2. If cancelled, denies the tool call with a cancellation message
-        3. Otherwise, allows only web-related tools (WebSearch, WebFetch)
+        1. Checks if the stop_event is set (in-memory graceful stop)
+        2. Checks if the session has been cancelled (via POST /session/{id}/stop)
+        3. If cancelled by either method, denies the tool call with a cancellation message
+        4. Otherwise, allows only web-related tools (WebSearch, WebFetch)
 
         Args:
             tool_name: Name of the tool being requested.
@@ -400,7 +448,20 @@ def _make_can_use_tool_handler(session_id: str | None = None):
             PermissionResultDeny if session is cancelled or tool is not allowed.
             PermissionResultAllow if tool is allowed and session is active.
         """
-        # Check for session cancellation first
+        # Check for in-memory stop event first (fastest check)
+        if stop_event and stop_event.is_set():
+            _logger.info(
+                "agent.tool_denied.stop_event",
+                extra={"session_id": session_id, "tool_name": tool_name},
+            )
+            return PermissionResultDeny(
+                message=(
+                    "Session has been stopped. "
+                    "Please stop execution and summarize what was accomplished."
+                )
+            )
+
+        # Check for session cancellation in persistent store
         if session_id and _settings.enable_session_cancellation:
             if is_session_cancelled(session_id):
                 # Acknowledge the cancellation so it's tracked
@@ -476,14 +537,19 @@ async def _execute_agent_query(
     session_id: str | None,
     fork_session: bool,
     job_root: Path | None,
+    stop_event: asyncio.Event | None = None,
 ) -> tuple[list[Message], ResultMessage | None]:
     """Execute an agent query and return messages.
+
+    Uses connect() with AsyncIterable prompts to enable can_use_tool support,
+    which is required for graceful session cancellation.
 
     Args:
         question: The question to ask the agent.
         session_id: Optional session ID to resume.
         fork_session: Whether to fork the session.
         job_root: Optional job workspace root.
+        stop_event: Optional asyncio.Event for graceful stop signaling.
 
     Returns:
         Tuple of (messages list, result_message or None).
@@ -491,18 +557,40 @@ async def _execute_agent_query(
     messages: list[Message] = []
     result_message: ResultMessage | None = None
 
+    # Create can_use_tool handler with session cancellation support
+    can_use_tool = _make_can_use_tool_handler(session_id, stop_event)
+
     async with ClaudeSDKClient(
         options=_options(
             session_id=session_id,
             fork_session=fork_session,
             job_root=job_root,
+            can_use_tool=can_use_tool,
         )
     ) as client:
-        await client.query(question)
-        async for msg in client.receive_response():
-            messages.append(msg)
-            if isinstance(msg, ResultMessage):
-                result_message = msg
+        # Register client for potential interrupt() calls
+        tracking_session_id = session_id or "pending"
+        if stop_event is None:
+            stop_event = asyncio.Event()
+        ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
+
+        try:
+            # Use connect() with AsyncIterable to enable can_use_tool
+            await client.connect(_async_prompt(question, session_id))
+            async for msg in client.receive_response():
+                messages.append(msg)
+                if isinstance(msg, ResultMessage):
+                    result_message = msg
+                    # Update tracking with actual session_id from result
+                    actual_session_id = getattr(result_message, "session_id", None)
+                    if actual_session_id and actual_session_id != tracking_session_id:
+                        ACTIVE_CLIENTS[actual_session_id] = (client, stop_event)
+                        if tracking_session_id in ACTIVE_CLIENTS:
+                            del ACTIVE_CLIENTS[tracking_session_id]
+        finally:
+            # Clean up client registry
+            if tracking_session_id in ACTIVE_CLIENTS:
+                del ACTIVE_CLIENTS[tracking_session_id]
 
     return messages, result_message
 
@@ -511,6 +599,7 @@ def _options(
     session_id: str | None = None,
     fork_session: bool = False,
     job_root: Path | None = None,
+    can_use_tool=None,
 ) -> ClaudeAgentOptions:
     """Build default `ClaudeAgentOptions` used by this service.
 
@@ -521,6 +610,13 @@ def _options(
     The can_use_tool handler is created via _make_can_use_tool_handler() to enable
     session cancellation support. When session_id is provided, the handler will
     check for cancellation before each tool call.
+
+    Args:
+        session_id: Optional session ID to resume.
+        fork_session: Whether to fork the session.
+        job_root: Optional job workspace root for background jobs.
+        can_use_tool: Optional tool permission handler. When provided, enables
+            graceful cancellation checking before each tool call.
 
     Returns:
         A configured `ClaudeAgentOptions` instance using our local MCP servers,
@@ -541,8 +637,10 @@ def _options(
         fork_session=fork_session,
         max_turns=_settings.agent_max_turns,
     )
-    # NOTE: claude_agent_sdk.query() requires AsyncIterable prompts when using can_use_tool.
-    # For now, keep can_use_tool unset to avoid errors on string prompts.
+    # Set the can_use_tool handler if provided. This enables graceful cancellation
+    # by checking the cancellation flag before each tool call.
+    if can_use_tool is not None:
+        options.can_use_tool = can_use_tool
     return options
 
 
@@ -628,6 +726,9 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     final_status = "failed"
     final_session_id: str | None = None
 
+    # Create stop_event for graceful cancellation
+    stop_event = asyncio.Event()
+
     # Mark session as executing (for prompt queue feature)
     # We mark using resolved_session_id initially; will update after SDK returns actual ID
     if resolved_session_id and _settings.enable_prompt_queue:
@@ -643,6 +744,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             session_id=resolved_session_id,
             fork_session=body.fork_session,
             job_root=job_root,
+            stop_event=stop_event,
         )
 
         # Check if session resume failed - retry without session_id
@@ -660,6 +762,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                 session_id=None,  # Don't try to resume
                 fork_session=False,
                 job_root=job_root,
+                stop_event=stop_event,
             )
 
         text_blocks = iter_text_blocks(messages)
@@ -704,6 +807,85 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                     extra={"session_id": final_session_id, "error": str(e)},
                 )
                 # Don't fail the query - metadata is optional
+
+        # =========================================================================
+        # Prompt Queue Draining
+        # =========================================================================
+        # After primary query completes, check for queued prompts and process them.
+        # This enables clients to queue follow-up prompts while the session is busy.
+        # =========================================================================
+        if _settings.enable_prompt_queue and final_session_id:
+            queued_prompts_processed = 0
+            while True:
+                next_prompt = dequeue_prompt(final_session_id)
+                if not next_prompt:
+                    break
+
+                # Check if session was cancelled while processing queue
+                if stop_event.is_set():
+                    _logger.info(
+                        "agent.queue.cancelled",
+                        extra={
+                            "session_id": final_session_id,
+                            "prompts_remaining": "unknown",
+                        },
+                    )
+                    break
+
+                _logger.info(
+                    "agent.queue.processing",
+                    extra={
+                        "session_id": final_session_id,
+                        "prompt_id": next_prompt.get("prompt_id"),
+                        "queued_prompts_processed": queued_prompts_processed,
+                    },
+                )
+
+                # Process follow-up prompt in same session
+                queue_messages, queue_result = await _execute_agent_query(
+                    question=next_prompt["question"],
+                    session_id=final_session_id,
+                    fork_session=False,
+                    job_root=job_root,
+                    stop_event=stop_event,
+                )
+
+                # Update messages and result with queue results
+                messages.extend(queue_messages)
+                if queue_result:
+                    result_message = queue_result
+                    # Track queue message in history
+                    if _settings.enable_multiplayer_sessions:
+                        try:
+                            add_message_to_history(
+                                session_id=final_session_id,
+                                role="user",
+                                content=next_prompt["question"],
+                                user_id=next_prompt.get("user_id"),
+                            )
+                            if queue_result.result:
+                                add_message_to_history(
+                                    session_id=final_session_id,
+                                    role="assistant",
+                                    content=queue_result.result,
+                                )
+                        except Exception:
+                            pass  # Non-critical
+
+                queued_prompts_processed += 1
+
+            if queued_prompts_processed > 0:
+                # Update summary with new info
+                final_result = result_message.result if result_message else None
+                summary = build_final_summary(result_message, final_result)
+                summary["queued_prompts_processed"] = queued_prompts_processed
+                _logger.info(
+                    "agent.queue.complete",
+                    extra={
+                        "session_id": final_session_id,
+                        "queued_prompts_processed": queued_prompts_processed,
+                    },
+                )
 
         _logger.info(
             "agent.query.complete",
@@ -783,6 +965,9 @@ async def query_agent_stream(body: QueryBody, request: Request):
         start_time = time.time()
         final_status = "failed"
 
+        # Create stop_event for graceful cancellation
+        stop_event = asyncio.Event()
+
         # Mark session as executing (for prompt queue feature)
         if resolved_session_id and _settings.enable_prompt_queue:
             mark_session_executing(resolved_session_id)
@@ -795,25 +980,46 @@ async def query_agent_stream(body: QueryBody, request: Request):
             session_to_use = resolved_session_id
             retry_needed = False
 
+            # Create can_use_tool handler with session cancellation support
+            can_use_tool = _make_can_use_tool_handler(session_to_use, stop_event)
+
             async with ClaudeSDKClient(
                 options=_options(
                     session_id=session_to_use,
                     fork_session=body.fork_session,
                     job_root=job_root,
+                    can_use_tool=can_use_tool,
                 )
             ) as client:
-                await client.query(body.question)
-                async for msg in client.receive_response():
-                    messages.append(msg)
-                    if isinstance(msg, ResultMessage):
-                        result_message = msg
-                        # Check if this is a session resume error before yielding
-                        if session_to_use and _is_session_resume_error(result_message):
-                            retry_needed = True
-                            break  # Don't yield error, we'll retry
-                    if not retry_needed:
-                        serialized = serialize_message(msg)
-                        yield _format_sse(serialized["type"], serialized)
+                # Register client for potential interrupt() calls
+                tracking_session_id = session_to_use or "pending"
+                ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
+
+                try:
+                    # Use connect() with AsyncIterable to enable can_use_tool
+                    await client.connect(_async_prompt(body.question, session_to_use))
+                    async for msg in client.receive_response():
+                        messages.append(msg)
+                        if isinstance(msg, ResultMessage):
+                            result_message = msg
+                            # Update tracking with actual session_id from result
+                            actual_session_id = getattr(result_message, "session_id", None)
+                            if actual_session_id and actual_session_id != tracking_session_id:
+                                ACTIVE_CLIENTS[actual_session_id] = (client, stop_event)
+                                if tracking_session_id in ACTIVE_CLIENTS:
+                                    del ACTIVE_CLIENTS[tracking_session_id]
+                                tracking_session_id = actual_session_id
+                            # Check if this is a session resume error before yielding
+                            if session_to_use and _is_session_resume_error(result_message):
+                                retry_needed = True
+                                break  # Don't yield error, we'll retry
+                        if not retry_needed:
+                            serialized = serialize_message(msg)
+                            yield _format_sse(serialized["type"], serialized)
+                finally:
+                    # Clean up client registry
+                    if tracking_session_id in ACTIVE_CLIENTS:
+                        del ACTIVE_CLIENTS[tracking_session_id]
 
             # If session resume failed, retry with new session
             if retry_needed:
@@ -827,20 +1033,35 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 # Clear and retry
                 messages = []
                 result_message = None
+                # Create new handler without session_id for new session
+                can_use_tool_retry = _make_can_use_tool_handler(None, stop_event)
                 async with ClaudeSDKClient(
                     options=_options(
                         session_id=None,  # New session
                         fork_session=False,
                         job_root=job_root,
+                        can_use_tool=can_use_tool_retry,
                     )
                 ) as client:
-                    await client.query(body.question)
-                    async for msg in client.receive_response():
-                        messages.append(msg)
-                        if isinstance(msg, ResultMessage):
-                            result_message = msg
-                        serialized = serialize_message(msg)
-                        yield _format_sse(serialized["type"], serialized)
+                    tracking_session_id = "pending_retry"
+                    ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
+                    try:
+                        await client.connect(_async_prompt(body.question))
+                        async for msg in client.receive_response():
+                            messages.append(msg)
+                            if isinstance(msg, ResultMessage):
+                                result_message = msg
+                                actual_session_id = getattr(result_message, "session_id", None)
+                                if actual_session_id and actual_session_id != tracking_session_id:
+                                    ACTIVE_CLIENTS[actual_session_id] = (client, stop_event)
+                                    if tracking_session_id in ACTIVE_CLIENTS:
+                                        del ACTIVE_CLIENTS[tracking_session_id]
+                                    tracking_session_id = actual_session_id
+                            serialized = serialize_message(msg)
+                            yield _format_sse(serialized["type"], serialized)
+                    finally:
+                        if tracking_session_id in ACTIVE_CLIENTS:
+                            del ACTIVE_CLIENTS[tracking_session_id]
 
             text_blocks = iter_text_blocks(messages)
             final_text = None
@@ -914,3 +1135,148 @@ async def query_agent_stream(body: QueryBody, request: Request):
             _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
+
+
+# =============================================================================
+# Session Stop/Interrupt Endpoints (Internal)
+# =============================================================================
+# These endpoints are called by the HTTP gateway in app.py to stop sessions.
+# They have direct access to ACTIVE_CLIENTS for immediate stop support.
+# =============================================================================
+
+
+class StopSessionRequest(BaseSchema):
+    """Request body for stopping a session."""
+
+    mode: str = "graceful"  # "graceful" or "immediate"
+    reason: str | None = None
+    requested_by: str | None = None
+
+
+class StopSessionResponse(BaseSchema):
+    """Response from session stop request."""
+
+    ok: bool
+    session_id: str
+    mode: str
+    interrupted: bool = False
+    stop_event_set: bool = False
+    client_found: bool = False
+    message: str | None = None
+
+
+@app.post("/session/{session_id}/stop")
+async def stop_session_internal(
+    session_id: str,
+    body: StopSessionRequest | None = None,
+) -> StopSessionResponse:
+    """Stop a session mid-execution.
+
+    This internal endpoint is called by the HTTP gateway to stop sessions.
+    It has access to ACTIVE_CLIENTS for immediate stop support.
+
+    Args:
+        session_id: The session ID to stop.
+        body: Optional request body with mode, reason, and requester info.
+
+    Returns:
+        StopSessionResponse with details about what actions were taken.
+
+    Stop Modes:
+        - "graceful": Sets the stop_event, agent stops at next tool call
+        - "immediate": Calls client.interrupt() for near-instant termination
+    """
+    mode = body.mode if body else "graceful"
+    interrupted = False
+    stop_event_set = False
+    client_found = False
+
+    # Look up the active client for this session
+    client_info = ACTIVE_CLIENTS.get(session_id)
+
+    if client_info:
+        client, stop_event = client_info
+        client_found = True
+
+        # Always set the stop_event for graceful fallback
+        if stop_event and not stop_event.is_set():
+            stop_event.set()
+            stop_event_set = True
+
+        # For immediate mode, also call interrupt()
+        if mode == "immediate":
+            try:
+                await client.interrupt()
+                interrupted = True
+                _logger.info(
+                    "agent.session.interrupted",
+                    extra={
+                        "session_id": session_id,
+                        "reason": body.reason if body else None,
+                    },
+                )
+            except Exception as e:
+                _logger.warning(
+                    "agent.session.interrupt_failed",
+                    extra={"session_id": session_id, "error": str(e)},
+                )
+                # Fall back to graceful stop via stop_event (already set above)
+
+    if not client_found:
+        # No active client - might be in persistent store check
+        _logger.info(
+            "agent.session.stop_no_client",
+            extra={"session_id": session_id, "mode": mode},
+        )
+        return StopSessionResponse(
+            ok=True,
+            session_id=session_id,
+            mode=mode,
+            interrupted=False,
+            stop_event_set=False,
+            client_found=False,
+            message="No active client found for session (may have already completed)",
+        )
+
+    message = (
+        f"Session stop requested (mode={mode}). "
+        f"Interrupted: {interrupted}, Stop event set: {stop_event_set}"
+    )
+    return StopSessionResponse(
+        ok=True,
+        session_id=session_id,
+        mode=mode,
+        interrupted=interrupted,
+        stop_event_set=stop_event_set,
+        client_found=client_found,
+        message=message,
+    )
+
+
+@app.get("/session/{session_id}/status")
+async def get_session_status(session_id: str):
+    """Check if a session has an active client.
+
+    Returns whether the session is currently being processed in this controller.
+
+    Args:
+        session_id: The session ID to check.
+
+    Returns:
+        Dict with session status information.
+    """
+    client_info = ACTIVE_CLIENTS.get(session_id)
+    if client_info:
+        _, stop_event = client_info
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "active": True,
+            "stop_requested": stop_event.is_set() if stop_event else False,
+        }
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "active": False,
+        "stop_requested": False,
+    }
