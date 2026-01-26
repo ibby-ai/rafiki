@@ -99,8 +99,13 @@ class SessionStopRequest(BaseSchema):
     """Request body for stopping a session mid-execution.
 
     All fields are optional. The session_id is provided in the URL path.
+
+    Stop Modes:
+        - "graceful" (default): Sets cancellation flag, agent stops at next tool call
+        - "immediate": Calls client.interrupt() for near-instant termination
     """
 
+    mode: Literal["graceful", "immediate"] = "graceful"  # Stop mode
     reason: str | None = None  # Human-readable reason for stopping
     requested_by: str | None = None  # Identifier of who requested the stop
 
