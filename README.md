@@ -81,13 +81,25 @@ agent_sandbox/
 │   └── settings.py         # Pydantic Settings for env vars & Modal secrets
 │
 ├── agents/                  # Agent execution logic
-│   └── loop.py             # Single-shot agent interaction runner
+│   ├── base.py             # AgentConfig, AgentExecutor base classes
+│   ├── registry.py         # AgentRegistry singleton for agent type management
+│   ├── loop.py             # Single-shot agent interaction runner
+│   └── types/              # Built-in agent definitions
+│       ├── default.py      # General-purpose agent
+│       ├── marketing.py    # Marketing content specialist
+│       └── research.py     # Multi-agent research coordinator
 │
 ├── controllers/            # FastAPI service for background sandbox
 │   └── controller.py       # HTTP endpoints (/query, /query_stream, /health_check)
 │
 ├── prompts/                # Prompt definitions
-│   └── prompts.py          # SYSTEM_PROMPT and DEFAULT_QUESTION
+│   ├── prompts.py          # SYSTEM_PROMPT and DEFAULT_QUESTION
+│   ├── marketing.py        # Marketing agent prompts
+│   ├── research.py         # Research agent prompts
+│   └── subagents/          # SDK native subagent prompts
+│       ├── researcher.py
+│       ├── data_analyst.py
+│       └── report_writer.py
 │
 ├── schemas/                 # Pydantic models
 │   ├── base.py             # Base schema with validation config
@@ -113,6 +125,20 @@ modal run -m agent_sandbox.app
 
 ```bash
 modal run -m agent_sandbox.app::run_agent_remote --question "Explain REST vs gRPC"
+```
+
+- **Run with different agent types**
+
+```bash
+# Marketing agent for content creation
+modal run -m agent_sandbox.app::run_agent_remote \
+  --question "Write a tagline for a productivity app" \
+  --agent-type marketing
+
+# Research agent for multi-agent investigation
+modal run -m agent_sandbox.app::run_agent_remote \
+  --question "Research the current state of AI agents" \
+  --agent-type research
 ```
 
 ### Production Mode (Persistent Service)
@@ -362,6 +388,55 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
 - Parallel task execution (agent spawns multiple workers)
 - Divide-and-conquer workflows
 - Background processing while continuing the main conversation
+
+## Multi-Agent Architecture
+
+The system supports multiple specialized agent types with different capabilities, tools, and orchestration patterns.
+
+### Available Agent Types
+
+| Agent | Purpose | Key Tools | Orchestration |
+|-------|---------|-----------|---------------|
+| `default` | General-purpose coding | All standard tools | Can spawn any agent type |
+| `marketing` | Content, copywriting, campaigns | WebSearch, WebFetch, Read, Write | Leaf worker (no spawning) |
+| `research` | Multi-agent research coordination | Task tool, spawn_session, web tools | SDK subagents + job spawning |
+
+### Using Agent Types
+
+**CLI:**
+
+```bash
+# Default agent (backward compatible)
+modal run -m agent_sandbox.app::run_agent_remote --question "Explain Python"
+
+# Marketing agent
+modal run -m agent_sandbox.app::run_agent_remote \
+  --question "Write a product description" \
+  --agent-type marketing
+
+# Research agent with subagent coordination
+modal run -m agent_sandbox.app::run_agent_remote \
+  --question "Research AI trends and create a report" \
+  --agent-type research
+```
+
+**HTTP API:**
+
+```bash
+curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Write a tagline","agent_type":"marketing"}'
+```
+
+### Dual Orchestration
+
+The research agent demonstrates two complementary orchestration mechanisms:
+
+1. **SDK Native Subagents** (Task tool): In-process, low-latency delegation to specialized agents (researcher, data-analyst, report-writer)
+
+2. **Job-Based Spawning** (spawn_session): Parallel execution in isolated sandboxes for complex investigations
+
+See [Multi-Agent Architecture Guide](./docs/multi-agent.md) for details on creating custom agents and subagents.
 
 ## Execution Patterns
 
@@ -636,6 +711,7 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
 Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 
 - **[Architecture Overview](./docs/architecture.md)** - System architecture, component responsibilities, and request flow
+- **[Multi-Agent Architecture](./docs/multi-agent.md)** - Agent types, AgentConfig, dual orchestration, and custom agents
 - **[Controllers: Background Service](./docs/controllers.md)** - Deep dive into the controller service that runs the agent
 - **[Modal Ingress](./docs/modal-ingress.md)** - How Modal handles HTTP ingress and routes requests
 - **[API Usage Guide](./docs/api-usage.md)** - Complete guide for end users: endpoints, examples, authentication, error handling

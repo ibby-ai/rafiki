@@ -122,17 +122,39 @@ Content-Type: application/json
 ```json
 {
   "question": "Your question here",
+  "agent_type": "default",
   "session_id": null,
   "session_key": null,
   "fork_session": false
 }
 ```
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `question` | string | (required) | The question to ask the agent |
+| `agent_type` | string | `"default"` | Agent type: `"default"`, `"marketing"`, `"research"` |
+| `session_id` | string | `null` | Resume from a specific session |
+| `session_key` | string | `null` | Server-side key for session tracking |
+| `fork_session` | boolean | `false` | Fork session instead of continuing |
+
 **Request Example:**
 ```bash
 curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the capital of Canada?"}'
+```
+
+**Agent Type Example:**
+```bash
+# Marketing agent for content creation
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Write a tagline for a productivity app", "agent_type": "marketing"}'
+
+# Research agent for multi-agent investigation
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Research AI agent frameworks", "agent_type": "research"}'
 ```
 
 **Session Resumption Example:**
@@ -218,11 +240,14 @@ Content-Type: application/json
 ```json
 {
   "question": "Your question here",
+  "agent_type": "default",
   "session_id": null,
   "session_key": null,
   "fork_session": false
 }
 ```
+
+See [POST /query](#2-post-query---execute-agent-query-non-streaming) for field descriptions.
 
 **Request Example:**
 ```bash
@@ -230,6 +255,14 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query_stream \
   -H "Content-Type: application/json" \
   -d '{"question": "Explain quantum computing in detail"}' \
   --no-buffer
+```
+
+**Streaming with Agent Type:**
+```bash
+# Stream research agent response
+curl -N -X POST https://acme-corp--test-sandbox-http-app.modal.run/query_stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Research cloud computing trends", "agent_type": "research"}'
 ```
 
 **Response:** Server-Sent Events (SSE) stream
@@ -289,6 +322,7 @@ Content-Type: application/json
 ```json
 {
   "question": "Your question here",
+  "agent_type": "default",
   "tenant_id": "acme",
   "user_id": "user-123",
   "schedule_at": 1735840200,
@@ -304,11 +338,34 @@ Content-Type: application/json
 }
 ```
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `question` | string | (required) | The task for the agent |
+| `agent_type` | string | `"default"` | Agent type: `"default"`, `"marketing"`, `"research"` |
+| `tenant_id` | string | `null` | Tenant or workspace identifier |
+| `user_id` | string | `null` | End-user identifier |
+| `schedule_at` | integer | `null` | Unix timestamp to schedule execution |
+| `webhook` | object | `null` | Callback configuration |
+| `metadata` | object | `null` | Client-defined metadata |
+
 **Request Example:**
 ```bash
 curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
   -H "Content-Type: application/json" \
   -d '{"question": "Summarize the latest earnings report", "tenant_id": "acme", "user_id": "user-123"}'
+```
+
+**Background Job with Agent Type:**
+```bash
+# Submit a marketing content job
+curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "Write a comprehensive blog post about AI productivity tools",
+    "agent_type": "marketing",
+    "tenant_id": "acme",
+    "user_id": "user-123"
+  }'
 ```
 
 **Response:**
@@ -1202,6 +1259,7 @@ web_app.add_middleware(
 ## Related Documentation
 
 - [Architecture Overview](./architecture.md) - Understanding the system architecture
+- [Multi-Agent Architecture](./multi-agent.md) - Agent types, custom agents, and orchestration
 - [Controllers](./controllers.md) - How the background service works
 - [Modal Ingress](./modal-ingress.md) - How requests reach your application
 - [Configuration](./configuration.md) - Configuration options

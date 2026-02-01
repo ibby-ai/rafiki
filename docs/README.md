@@ -76,6 +76,15 @@ Explains the overall system architecture, including:
 - Production considerations
 - When to use this pattern vs alternatives
 
+### [Multi-Agent Architecture](./multi-agent.md)
+Guide to the multi-agent system:
+- Agent types (default, marketing, research)
+- Core concepts: AgentConfig, AgentRegistry, AgentExecutor
+- Dual orchestration: SDK native subagents vs job-based spawning
+- Creating custom agents and subagents
+- API usage with agent types
+- Best practices for agent design
+
 ### [Controllers: Background Service](./controllers.md)
 Deep dive into the controller service that runs the agent:
 - What the controller does and why it exists

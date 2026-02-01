@@ -160,6 +160,33 @@ The system uses a persistent sandbox for the Agent SDK:
 - `SYSTEM_PROMPT`: Configures agent behavior and tone
 - `DEFAULT_QUESTION`: Fallback query when none provided
 
+**`agent_sandbox/agents/base.py`** - Core multi-agent abstractions
+
+- `AgentConfig`: Dataclass defining agent behavior (prompts, tools, subagents)
+- `AgentExecutor`: Abstract base class for agent execution
+- `ClaudeAgentExecutor`: Default implementation using Claude Agent SDK
+- `build_agent_options()`: Central function for building ClaudeAgentOptions
+
+**`agent_sandbox/agents/registry.py`** - Agent type management
+
+- `AgentRegistry`: Singleton managing agent configurations
+- `get_agent_config(name)`: Get configuration by agent type name
+- `get_agent_executor(name)`: Get executor for agent type
+- `list_agent_types()`: List all registered agent types
+- `register_agent(config)`: Register custom agent types
+
+**`agent_sandbox/agents/types/`** - Built-in agent definitions
+
+- `default.py`: General-purpose agent (backward compatible)
+- `marketing.py`: Marketing specialist with web search
+- `research.py`: Research coordinator with SDK native subagents
+
+**`agent_sandbox/prompts/`** - Agent-specific prompts
+
+- `marketing.py`: Marketing agent system prompt
+- `research.py`: Research agent system prompt
+- `subagents/`: Prompts for SDK native subagents (researcher, data-analyst, report-writer)
+
 **`agent_sandbox/jobs.py`** - Async job processing
 
 - `enqueue_job()`: Submit job to Modal Queue
@@ -223,6 +250,57 @@ self._allowed_tools.append("mcp__utilities__my_tool_name")
 ### Modifying Agent Behavior
 
 Edit `agent_sandbox/prompts/prompts.py` to change `SYSTEM_PROMPT`.
+
+### Adding New Agent Types
+
+1. Create config in `agent_sandbox/agents/types/my_agent.py`:
+
+```python
+from agent_sandbox.agents.base import AgentConfig
+
+def my_agent_config() -> AgentConfig:
+    return AgentConfig(
+        name="my-agent",
+        display_name="My Agent",
+        description="What this agent does",
+        system_prompt="Your system prompt here",
+        allowed_tools=["Read", "Write", "WebSearch(*)"],
+        max_turns=30,
+        can_spawn_subagents=False,
+    )
+```
+
+2. Register in `agent_sandbox/agents/registry.py`:
+
+```python
+from agent_sandbox.agents.types.my_agent import my_agent_config
+
+# In AgentRegistry._initialize_defaults():
+self.register(my_agent_config())
+```
+
+3. For SDK native subagents, add `AgentDefinition` objects to `subagents` field:
+
+```python
+from claude_agent_sdk import AgentDefinition
+
+subagents = {
+    "helper": AgentDefinition(
+        description="What this subagent does",
+        tools=["Read", "Write"],
+        prompt="Subagent system prompt",
+        model="haiku",
+    ),
+}
+
+return AgentConfig(
+    name="my-agent",
+    # ... other fields ...
+    subagents=subagents,
+)
+```
+
+See `docs/multi-agent.md` for comprehensive documentation on the multi-agent architecture.
 
 ### Adjusting Runtime Configuration
 
