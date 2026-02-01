@@ -21,6 +21,7 @@ class QueryBody(BaseSchema):
     """Request body for agent queries."""
 
     question: str
+    agent_type: str = "default"  # Agent type: "default", "marketing", "research", etc.
     session_id: str | None = None
     session_key: str | None = None
     fork_session: bool = False

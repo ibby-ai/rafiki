@@ -26,6 +26,7 @@ import time
 from collections.abc import AsyncIterable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import modal
 from claude_agent_sdk import (
@@ -40,7 +41,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
-from agent_sandbox.agents.loop import build_agent_options
+from agent_sandbox.agents import build_agent_options, get_agent_config
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.controllers.middleware import RequestIdMiddleware
 from agent_sandbox.controllers.serialization import (
@@ -61,11 +62,9 @@ from agent_sandbox.jobs import (
     record_session_end,
     record_session_start,
 )
-from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
 from agent_sandbox.schemas import QueryBody
 from agent_sandbox.schemas.base import BaseSchema
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
-from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
 from agent_sandbox.tools.session_tools import set_parent_context
 
 app = FastAPI()
@@ -395,9 +394,22 @@ def _persist_session_id(session_key: str | None, session_id: str | None) -> None
         SESSION_CACHE[session_key] = session_id
 
 
+def _is_tool_allowed(tool_name: str, allowed_tools: list[str]) -> bool:
+    """Check if tool name is allowed by explicit or wildcard patterns."""
+    if tool_name in allowed_tools:
+        return True
+    for allowed in allowed_tools:
+        if allowed.endswith("(*)"):
+            prefix = allowed[:-3]
+            if tool_name == prefix or tool_name.startswith(prefix):
+                return True
+    return False
+
+
 def _make_can_use_tool_handler(
     session_id: str | None = None,
     stop_event: asyncio.Event | None = None,
+    allowed_tools: list[str] | None = None,
 ):
     """Create a tool permission handler with session-aware cancellation checking.
 
@@ -411,6 +423,7 @@ def _make_can_use_tool_handler(
         stop_event: Optional asyncio.Event that, when set, signals a stop request.
             This provides an additional way to stop the session without relying
             on the persistent cancellation store.
+        allowed_tools: List of tools to allow when not cancelled.
 
     Returns:
         An async function suitable for use as ClaudeAgentOptions.can_use_tool.
@@ -419,7 +432,11 @@ def _make_can_use_tool_handler(
         ```python
         stop_event = asyncio.Event()
         options = ClaudeAgentOptions(
-            can_use_tool=_make_can_use_tool_handler(session_id="sess_123", stop_event=stop_event),
+            can_use_tool=_make_can_use_tool_handler(
+                session_id="sess_123",
+                stop_event=stop_event,
+                allowed_tools=["Read", "Write"],
+            ),
             ...
         )
         # To stop: stop_event.set()
@@ -431,13 +448,13 @@ def _make_can_use_tool_handler(
         tool_input: dict[str, Any],
         ctx: ToolPermissionContext,
     ):
-        """Permission handler that checks cancellation and allows web-related tools.
+        """Permission handler that checks cancellation and allows configured tools.
 
         This handler is called before each tool invocation. It:
         1. Checks if the stop_event is set (in-memory graceful stop)
         2. Checks if the session has been cancelled (via POST /session/{id}/stop)
         3. If cancelled by either method, denies the tool call with a cancellation message
-        4. Otherwise, allows only web-related tools (WebSearch, WebFetch)
+        4. Otherwise, allows tools in the configured allowlist
 
         Args:
             tool_name: Name of the tool being requested.
@@ -477,13 +494,21 @@ def _make_can_use_tool_handler(
                     )
                 )
 
-        # Allow web-related tools
-        if tool_name.startswith("WebSearch") or tool_name.startswith("WebFetch"):
+        if allowed_tools is None:
+            return PermissionResultDeny(message="No allowed tools configured")
+
+        if _is_tool_allowed(tool_name, allowed_tools):
             return PermissionResultAllow(updated_input=tool_input)
 
         return PermissionResultDeny(message=f"Tool {tool_name} is not allowed")
 
     return can_use_tool
+
+
+def _get_effective_allowed_tools(agent_type: str) -> list[str]:
+    """Return allowed tools for the agent, including subagent dependencies."""
+    config = get_agent_config(agent_type)
+    return config.get_effective_allowed_tools()
 
 
 async def allow_web_only(
@@ -538,6 +563,7 @@ async def _execute_agent_query(
     fork_session: bool,
     job_root: Path | None,
     stop_event: asyncio.Event | None = None,
+    agent_type: str = "default",
 ) -> tuple[list[Message], ResultMessage | None]:
     """Execute an agent query and return messages.
 
@@ -550,6 +576,7 @@ async def _execute_agent_query(
         fork_session: Whether to fork the session.
         job_root: Optional job workspace root.
         stop_event: Optional asyncio.Event for graceful stop signaling.
+        agent_type: Type of agent to use (e.g., "default", "marketing", "research").
 
     Returns:
         Tuple of (messages list, result_message or None).
@@ -558,7 +585,8 @@ async def _execute_agent_query(
     result_message: ResultMessage | None = None
 
     # Create can_use_tool handler with session cancellation support
-    can_use_tool = _make_can_use_tool_handler(session_id, stop_event)
+    allowed_tools = _get_effective_allowed_tools(agent_type)
+    can_use_tool = _make_can_use_tool_handler(session_id, stop_event, allowed_tools)
 
     async with ClaudeSDKClient(
         options=_options(
@@ -566,10 +594,11 @@ async def _execute_agent_query(
             fork_session=fork_session,
             job_root=job_root,
             can_use_tool=can_use_tool,
+            agent_type=agent_type,
         )
     ) as client:
         # Register client for potential interrupt() calls
-        tracking_session_id = session_id or "pending"
+        tracking_session_id = session_id or f"pending-{uuid4()}"
         if stop_event is None:
             stop_event = asyncio.Event()
         ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
@@ -587,6 +616,7 @@ async def _execute_agent_query(
                         ACTIVE_CLIENTS[actual_session_id] = (client, stop_event)
                         if tracking_session_id in ACTIVE_CLIENTS:
                             del ACTIVE_CLIENTS[tracking_session_id]
+                        tracking_session_id = actual_session_id
         finally:
             # Clean up client registry
             if tracking_session_id in ACTIVE_CLIENTS:
@@ -600,8 +630,9 @@ def _options(
     fork_session: bool = False,
     job_root: Path | None = None,
     can_use_tool=None,
+    agent_type: str = "default",
 ) -> ClaudeAgentOptions:
-    """Build default `ClaudeAgentOptions` used by this service.
+    """Build `ClaudeAgentOptions` for the specified agent type.
 
     Uses "acceptEdits" permission mode which auto-approves file edits but still
     requires tool permission checks via can_use_tool. This is safer than
@@ -617,25 +648,36 @@ def _options(
         job_root: Optional job workspace root for background jobs.
         can_use_tool: Optional tool permission handler. When provided, enables
             graceful cancellation checking before each tool call.
+        agent_type: Type of agent to use (e.g., "default", "marketing", "research").
 
     Returns:
-        A configured `ClaudeAgentOptions` instance using our local MCP servers,
-        allowed tools, and `SYSTEM_PROMPT`.
+        A configured `ClaudeAgentOptions` instance using the agent's MCP servers,
+        allowed tools, and system prompt.
     """
-    system_prompt = SYSTEM_PROMPT
+    # Get agent configuration
+    config = get_agent_config(agent_type)
+    allowed_tools = config.get_effective_allowed_tools()
+
+    # Build system prompt with job context if needed
+    system_prompt = config.system_prompt
     if job_root is not None:
         system_prompt = (
-            f"{SYSTEM_PROMPT}\n\n"
+            f"{system_prompt}\n\n"
             "This is a background job."
             f" Write all created files under {job_root} so they are persisted."
         )
+
+    # Determine max_turns from config or settings
+    max_turns = config.max_turns or _settings.agent_max_turns
+
     options = build_agent_options(
-        get_mcp_servers(),
-        get_allowed_tools(),
+        config.get_mcp_servers(),
+        allowed_tools,
         system_prompt,
+        subagents=config.get_subagents(),
         resume=session_id,
         fork_session=fork_session,
-        max_turns=_settings.agent_max_turns,
+        max_turns=max_turns,
     )
     # Set the can_use_tool handler if provided. This enables graceful cancellation
     # by checking the cancellation flag before each tool call.
@@ -745,6 +787,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             fork_session=body.fork_session,
             job_root=job_root,
             stop_event=stop_event,
+            agent_type=body.agent_type,
         )
 
         # Check if session resume failed - retry without session_id
@@ -763,6 +806,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                 fork_session=False,
                 job_root=job_root,
                 stop_event=stop_event,
+                agent_type=body.agent_type,
             )
 
         text_blocks = iter_text_blocks(messages)
@@ -848,6 +892,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                     fork_session=False,
                     job_root=job_root,
                     stop_event=stop_event,
+                    agent_type=body.agent_type,
                 )
 
                 # Update messages and result with queue results
@@ -981,7 +1026,12 @@ async def query_agent_stream(body: QueryBody, request: Request):
             retry_needed = False
 
             # Create can_use_tool handler with session cancellation support
-            can_use_tool = _make_can_use_tool_handler(session_to_use, stop_event)
+            allowed_tools = _get_effective_allowed_tools(body.agent_type)
+            can_use_tool = _make_can_use_tool_handler(
+                session_to_use,
+                stop_event,
+                allowed_tools,
+            )
 
             async with ClaudeSDKClient(
                 options=_options(
@@ -989,10 +1039,11 @@ async def query_agent_stream(body: QueryBody, request: Request):
                     fork_session=body.fork_session,
                     job_root=job_root,
                     can_use_tool=can_use_tool,
+                    agent_type=body.agent_type,
                 )
             ) as client:
                 # Register client for potential interrupt() calls
-                tracking_session_id = session_to_use or "pending"
+                tracking_session_id = session_to_use or f"pending-{uuid4()}"
                 ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
 
                 try:
@@ -1034,16 +1085,21 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 messages = []
                 result_message = None
                 # Create new handler without session_id for new session
-                can_use_tool_retry = _make_can_use_tool_handler(None, stop_event)
+                can_use_tool_retry = _make_can_use_tool_handler(
+                    None,
+                    stop_event,
+                    allowed_tools,
+                )
                 async with ClaudeSDKClient(
                     options=_options(
                         session_id=None,  # New session
                         fork_session=False,
                         job_root=job_root,
                         can_use_tool=can_use_tool_retry,
+                        agent_type=body.agent_type,
                     )
                 ) as client:
-                    tracking_session_id = "pending_retry"
+                    tracking_session_id = f"pending-{uuid4()}"
                     ACTIVE_CLIENTS[tracking_session_id] = (client, stop_event)
                     try:
                         await client.connect(_async_prompt(body.question))
@@ -1168,6 +1224,7 @@ class StopSessionResponse(BaseSchema):
 @app.post("/session/{session_id}/stop")
 async def stop_session_internal(
     session_id: str,
+    request: Request,
     body: StopSessionRequest | None = None,
 ) -> StopSessionResponse:
     """Stop a session mid-execution.
@@ -1186,6 +1243,8 @@ async def stop_session_internal(
         - "graceful": Sets the stop_event, agent stops at next tool call
         - "immediate": Calls client.interrupt() for near-instant termination
     """
+    _require_connect_token(request)
+
     mode = body.mode if body else "graceful"
     interrupted = False
     stop_event_set = False
