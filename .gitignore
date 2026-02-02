@@ -219,9 +219,24 @@ __marimo__/
 .DS_Store
 code_snapshot.md
 .codesnapshot.json
+**/.uv-cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.coverage/
+**/.tox/
+**/.nox/
+**/.hypothesis/
+**/.coverage/
+**/.coverage.*/
+
 
 # Strategy documents (internal, not version tracked)
 notes/
 
 # Agent working files
 .agent/
+.serena/
+
+# Editor-specific directories
+.cursor/

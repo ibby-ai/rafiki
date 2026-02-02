@@ -9,6 +9,8 @@
       "**/.pytest_cache": true,
       "**/.mypy_cache": true,
       "**/.ruff_cache": true,
+      "**/.uv-cache": true,
+      "**/.serena": true,
       "**/.venv": false,
       "**/venv": false,
       "**/env": false,
