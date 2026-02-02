@@ -61,6 +61,20 @@ class Settings(BaseSettings):
         description="Include the modal auth secret in sandbox/function secrets.",
     )
 
+    # LangSmith tracing (Claude Agent SDK)
+    # See: https://docs.langchain.com/langsmith/trace-claude-agent-sdk
+    enable_langsmith_tracing: bool = Field(
+        default=False,
+        description=(
+            "When True, include the LangSmith Modal secret so agent runs trace to LangSmith. "
+            "Local runs use LANGSMITH_API_KEY (and optionally LANGSMITH_PROJECT) from env."
+        ),
+    )
+    langsmith_secret_name: str = Field(
+        default="langsmith-secret",
+        description="Modal secret name for LangSmith (keys: LANGSMITH_API_KEY, optionally LANGSMITH_PROJECT).",
+    )
+
     # Security settings
     # enforce_connect_token: Require Modal connect token in X-Verified-User-Data header
     enforce_connect_token: bool = False
@@ -533,6 +547,14 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
             modal.Secret.from_name(
                 settings.modal_auth_secret_name,
                 required_keys=["SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET"],
+            )
+        )
+
+    if settings.enable_langsmith_tracing:
+        secrets.append(
+            modal.Secret.from_name(
+                settings.langsmith_secret_name,
+                required_keys=["LANGSMITH_API_KEY"],
             )
         )
 

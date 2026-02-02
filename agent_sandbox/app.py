@@ -183,7 +183,13 @@ def _base_anthropic_sdk_image() -> modal.Image:
     """
     return (
         modal.Image.debian_slim(python_version="3.11")
-        .pip_install("claude-agent-sdk", "fastapi", "uvicorn", "httpx")
+        .pip_install(
+            "claude-agent-sdk",
+            "fastapi",
+            "uvicorn",
+            "httpx",
+            "langsmith[claude-agent-sdk]",
+        )
         .pip_install("uv")
         .apt_install("curl")
         .run_commands(
@@ -3401,7 +3407,9 @@ class AgentRunner:
         subsequent container starts, avoiding re-initialization overhead.
         """
         from agent_sandbox.agents import build_agent_options, get_agent_config
+        from agent_sandbox.tracing import ensure_langsmith_configured
 
+        ensure_langsmith_configured()
         config = get_agent_config(self.agent_type)
         system_prompt = self.system_prompt or config.system_prompt
         max_turns = config.max_turns or _settings.agent_max_turns
@@ -3422,6 +3430,9 @@ class AgentRunner:
         reinitialize any state that can't be serialized (e.g., network connections).
         Also serves as fallback if snapshot wasn't taken or is corrupted.
         """
+        from agent_sandbox.tracing import ensure_langsmith_configured
+
+        ensure_langsmith_configured()
         if getattr(self, "_options", None) is None:
             from agent_sandbox.agents import build_agent_options, get_agent_config
 
