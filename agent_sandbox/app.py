@@ -107,7 +107,7 @@ from agent_sandbox.jobs import (
     update_job,
     update_prewarm_ready,
 )
-from agent_sandbox.prompts.prompts import DEFAULT_QUESTION, SYSTEM_PROMPT
+from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
 from agent_sandbox.schemas import (
     ArtifactListResponse,
     JobStatusResponse,
@@ -3389,7 +3389,8 @@ class AgentRunner:
     See: https://modal.com/docs/guide/memory-snapshot
     """
 
-    system_prompt: str = modal.parameter(default=SYSTEM_PROMPT)
+    agent_type: str = modal.parameter(default="default")
+    system_prompt: str = modal.parameter(default="")
 
     @modal.enter(snap=True)
     def _snapshot_setup(self) -> None:
@@ -3399,14 +3400,18 @@ class AgentRunner:
         _options object will be serialized into the snapshot and restored on
         subsequent container starts, avoiding re-initialization overhead.
         """
-        from agent_sandbox.agents.loop import build_agent_options
-        from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+        from agent_sandbox.agents import build_agent_options, get_agent_config
+
+        config = get_agent_config(self.agent_type)
+        system_prompt = self.system_prompt or config.system_prompt
+        max_turns = config.max_turns or _settings.agent_max_turns
 
         self._options = build_agent_options(
-            get_mcp_servers(),
-            get_allowed_tools(),
-            self.system_prompt,
-            max_turns=_settings.agent_max_turns,
+            config.get_mcp_servers(),
+            config.get_effective_allowed_tools(),
+            system_prompt,
+            subagents=config.get_subagents(),
+            max_turns=max_turns,
         )
 
     @modal.enter(snap=False)
@@ -3418,14 +3423,18 @@ class AgentRunner:
         Also serves as fallback if snapshot wasn't taken or is corrupted.
         """
         if getattr(self, "_options", None) is None:
-            from agent_sandbox.agents.loop import build_agent_options
-            from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+            from agent_sandbox.agents import build_agent_options, get_agent_config
+
+            config = get_agent_config(self.agent_type)
+            system_prompt = self.system_prompt or config.system_prompt
+            max_turns = config.max_turns or _settings.agent_max_turns
 
             self._options = build_agent_options(
-                get_mcp_servers(),
-                get_allowed_tools(),
-                self.system_prompt,
-                max_turns=_settings.agent_max_turns,
+                config.get_mcp_servers(),
+                config.get_effective_allowed_tools(),
+                system_prompt,
+                subagents=config.get_subagents(),
+                max_turns=max_turns,
             )
 
     @modal.exit()
@@ -3454,7 +3463,10 @@ class AgentRunner:
     volumes={"/data": _get_persist_volume()},
     **_function_runtime_kwargs(include_autoscale=False),
 )
-def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
+def run_agent_remote(
+    question: str = DEFAULT_QUESTION,
+    agent_type: str = "default",
+) -> None:
     """Run the agent once in a short-lived Modal function.
 
     This is useful for synchronous, on-demand runs. For long-running, low-latency
@@ -3462,8 +3474,9 @@ def run_agent_remote(question: str = DEFAULT_QUESTION) -> None:
 
     Args:
         question: Natural-language query to send to the agent.
+        agent_type: Agent type to use (e.g., "default", "marketing", "research").
     """
-    AgentRunner().run.remote(question)
+    AgentRunner(agent_type=agent_type).run.remote(question)
 
 
 @app.function(image=agent_sdk_image, secrets=agent_sdk_secrets, timeout=600)
