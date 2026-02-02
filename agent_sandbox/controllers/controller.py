@@ -66,9 +66,6 @@ from agent_sandbox.schemas import QueryBody
 from agent_sandbox.schemas.base import BaseSchema
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
 from agent_sandbox.tools.session_tools import set_parent_context
-from agent_sandbox.tracing import ensure_langsmith_configured
-
-ensure_langsmith_configured()
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)

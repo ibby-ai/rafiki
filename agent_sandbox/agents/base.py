@@ -162,6 +162,9 @@ def build_agent_options(
         defined in `agent_sandbox.tools` and the environment is configured in
         `agent_sandbox.config.settings`.
     """
+    from agent_sandbox.tracing import ensure_langsmith_configured
+
+    ensure_langsmith_configured()
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,

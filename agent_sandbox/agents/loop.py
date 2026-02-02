@@ -21,7 +21,6 @@ from agent_sandbox.agents.base import build_agent_options
 from agent_sandbox.agents.registry import get_agent_config, list_agent_types
 from agent_sandbox.config.settings import get_settings
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
-from agent_sandbox.tracing import ensure_langsmith_configured
 
 _settings = get_settings()
 
@@ -46,7 +45,6 @@ async def run_agent(
         session_id: Optional session ID to resume from.
         fork_session: Whether to fork the session.
     """
-    ensure_langsmith_configured()
     # Get agent configuration
     config = get_agent_config(agent_type)
 
