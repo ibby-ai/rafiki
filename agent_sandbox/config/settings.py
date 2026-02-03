@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     enforce_connect_token: bool = False
     # require_proxy_auth: Require Modal workspace auth for public HTTP endpoints
     require_proxy_auth: bool = False
+    # enforce_internal_auth: Require Cloudflare internal auth token for HTTP endpoints
+    enforce_internal_auth: bool = False
+    # internal_auth_secret: HMAC secret for Cloudflare Worker internal auth
+    internal_auth_secret: str | None = None
 
     # Timeouts
     service_timeout: int = Field(default=60, description="Health check timeout (seconds)")
@@ -555,6 +559,14 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
             modal.Secret.from_name(
                 settings.langsmith_secret_name,
                 required_keys=["LANGSMITH_API_KEY"],
+            )
+        )
+
+    if settings.enforce_internal_auth:
+        secrets.append(
+            modal.Secret.from_name(
+                "internal-auth-secret",
+                required_keys=["INTERNAL_AUTH_SECRET"],
             )
         )
 
