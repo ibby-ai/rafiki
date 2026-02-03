@@ -12,13 +12,14 @@ Client → Cloudflare Worker → SessionAgent DO → Modal Backend → Sandbox
 
 ## Authentication
 
-All requests require authentication via Bearer token:
+The Worker currently **accepts** a Bearer token but does **not enforce** it yet.
+Enforcement is planned. TODO: enforce Authorization validation.
 
 ```http
 Authorization: Bearer <token>
 ```
 
-The Worker validates tokens and generates internal auth tokens for Modal backend requests.
+The Worker/DOs generate internal auth tokens (`X-Internal-Auth`) for Modal backend requests.
 
 ## REST API Endpoints
 
@@ -65,11 +66,14 @@ Execute an agent query and return the complete response.
 - `question` (required): The query text
 - `agent_type` (optional): Agent type to use (default: "default")
 - `session_id` (optional): Existing session ID to resume
-- `session_key` (optional): Client-provided session key (mapped to session_id)
+- `session_key` (optional): Treated as a session_id alias (no KV lookup yet)
 - `fork_session` (optional): Fork from existing session (default: false)
 - `job_id` (optional): Associate with a job workspace
 - `user_id` (optional): User identifier for statistics
 - `warm_id` (optional): Pre-warm correlation ID
+
+**Session resolution (current behavior):**
+- `session_id` → `session_key` → `randomUUID()` (no KV lookup yet)
 
 **Response:**
 
@@ -100,6 +104,8 @@ Execute an agent query and return the complete response.
 
 Execute an agent query with real-time streaming via WebSocket.
 
+If the request is not a WebSocket upgrade, the Worker returns `426 Upgrade Required`.
+
 **Request:** Send the query as the first WebSocket message:
 
 ```json
@@ -113,6 +119,17 @@ Execute an agent query with real-time streaming via WebSocket.
 `/query_stream?session_id=sess_abc123`
 
 **WebSocket Messages (Server → Client):**
+
+```json
+{
+  "type": "connection_ack",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {
+    "status": "idle"
+  }
+}
+```
 
 ```json
 {
@@ -139,6 +156,9 @@ Execute an agent query with real-time streaming via WebSocket.
 ```
 
 Note: `assistant_message.data.content` is plain text extracted from assistant content blocks.
+`assistant_message.data.partial` is always `false` in the current implementation.
+
+System/result/unknown SSE events are forwarded as `execution_state` messages.
 
 ```json
 {
@@ -516,7 +536,7 @@ The Worker generates signed tokens for Modal backend requests:
 **Token Format:**
 
 ```
-<base64(payload)>.<base64(signature)>
+<base64(payload bytes)>.<base64(signature bytes)>
 ```
 
 **Payload:**
@@ -530,10 +550,13 @@ The Worker generates signed tokens for Modal backend requests:
 ```
 
 **Signature:** HMAC-SHA256 of payload using `INTERNAL_AUTH_SECRET`
+**TTL:** 5 minutes
+
+The token is sent as `X-Internal-Auth` (raw value, no `Bearer` prefix).
 
 ### Modal Backend Endpoints
 
-The Worker forwards requests to these Modal endpoints:
+The Worker forwards requests to these **internal** Modal endpoints (all require `X-Internal-Auth`):
 
 - `POST /query` - Execute agent query
 - `POST /query_stream` - Streaming query (SSE)
@@ -584,9 +607,9 @@ Recommended rate limits:
 ### Setup Secrets
 
 ```bash
-# Modal API credentials
-wrangler secret put MODAL_TOKEN_ID
-wrangler secret put MODAL_TOKEN_SECRET
+# Modal API credentials (planned, TODO)
+# wrangler secret put MODAL_TOKEN_ID
+# wrangler secret put MODAL_TOKEN_SECRET
 
 # Internal signing secrets
 wrangler secret put INTERNAL_AUTH_SECRET

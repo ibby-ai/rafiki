@@ -17,8 +17,8 @@ This document maps how Cloudflare Durable Objects integrate with the existing Mo
 | **Volume Management**     | Modal Volume API              | Modal Volume API (unchanged)              | Modal      |
 | **Agent Execution**       | Modal Sandbox + controller.py | Modal Sandbox + controller.py (unchanged) | Modal      |
 | **Artifact Storage**      | Modal Volume                  | Modal Volume (unchanged)                  | Modal      |
-| **Authentication**        | Optional Connect tokens       | Cloudflare Worker + signed tokens         | Cloudflare |
-| **Rate Limiting**         | None                          | Cloudflare KV                             | Cloudflare |
+| **Authentication**        | Optional Connect tokens       | Cloudflare Worker (client auth planned, TODO) + signed tokens (internal) | Cloudflare |
+| **Rate Limiting**         | None                          | Planned (Cloudflare KV, TODO)             | Cloudflare |
 | **Real-time Fan-out**     | N/A                           | EventBus DO                               | Cloudflare |
 
 ---
@@ -39,24 +39,20 @@ Client → Modal Gateway → Modal Sandbox (controller.py) → Agent SDK
 
 ```
 Client → CF Worker → SessionAgent DO → Modal Sandbox (controller.py) → Agent SDK
-                  ↓
-               EventBus DO (broadcast updates)
 ```
 
 **Changes:**
 
-- **CF Worker**: Validates auth, resolves session ID, routes to SessionAgent DO
+- **CF Worker**: Validates auth (planned, TODO), resolves session ID (`session_id || session_key || randomUUID`, no KV lookup yet), routes to SessionAgent DO
 - **SessionAgent DO**:
   - Stores session state (status, current prompt)
   - Stores message history in SQLite
   - Forwards query to Modal backend
-  - Broadcasts updates via EventBus DO
   - Returns response to client
 - **Modal Backend**:
   - Receives authenticated request from DO
   - Executes agent query (unchanged)
   - Returns result to DO
-- **EventBus DO**: Broadcasts session updates to subscribed WebSocket clients
 
 **Modal Changes Required:**
 
@@ -68,13 +64,7 @@ Client → CF Worker → SessionAgent DO → Modal Sandbox (controller.py) → A
 
 #### `/query_stream` (Streaming)
 
-**Current Flow:**
-
-```
-Client → Modal Gateway → Modal Sandbox (SSE) → Client
-```
-
-**Target Flow:**
+**Current Flow (Cloudflare WS):**
 
 ```
 Client ←→ CF Worker (WS) ←→ SessionAgent DO (WS) → Modal Sandbox (SSE)
@@ -82,24 +72,30 @@ Client ←→ CF Worker (WS) ←→ SessionAgent DO (WS) → Modal Sandbox (SSE)
                               EventBus DO (broadcast)
 ```
 
-**Changes:**
+**Internal-Only Flow (Modal SSE):**
 
-- **CF Worker**: Accepts WebSocket upgrade and forwards to SessionAgent DO
+```
+Client → Modal Gateway → Modal Sandbox (SSE) → Client
+```
+
+**Notes:**
+
+- **CF Worker**: Accepts WebSocket upgrade and forwards to SessionAgent DO.
 - **SessionAgent DO**:
-  - Accepts WebSocket connection from Worker
-  - Calls Modal `/query_stream` SSE endpoint
-  - Converts SSE events to WebSocket messages
-  - Broadcasts to connected session WebSockets
-  - Stores final messages in SQLite
-- **Modal Backend**:
-  - SSE endpoint unchanged
-  - WebSocket remains internal-only
-
-**Modal Changes Required:**
-
-- None (SSE endpoint remains compatible)
+  - Accepts WebSocket connection from Worker.
+  - Calls Modal `/query_stream` SSE endpoint.
+  - Converts SSE events to WebSocket messages.
+  - Broadcasts to EventBus DO.
+  - Stores final messages in SQLite.
+- **Modal Backend**: SSE endpoint unchanged; WebSocket remains internal-only.
 
 ---
+
+#### `/ws` or `/events` (EventBus WebSocket)
+
+- WebSocket upgrade endpoint for real-time fan-out.
+- Alias endpoints: `/ws` and `/events`.
+- Query params: `user_id`, `tenant_id`, `session_ids` (comma-separated).
 
 ### Job Endpoints
 
@@ -108,46 +104,23 @@ Client ←→ CF Worker (WS) ←→ SessionAgent DO (WS) → Modal Sandbox (SSE)
 **Current Flow:**
 
 ```
-Client → Modal Gateway → Modal Queue (JOB_QUEUE) → Worker picks up
-```
-
-**Future Flow:**
-
-```
-Client → CF Worker → SessionAgent DO → Modal Queue (JOB_QUEUE) → Worker picks up
-              ↓
-           EventBus DO (notify job queued)
+Client → CF Worker → Modal Queue (JOB_QUEUE) → Worker picks up
 ```
 
 **Changes:**
 
-- **CF Worker**: Validates auth, generates job ID, routes to SessionAgent DO
-- **SessionAgent DO**:
-  - Associates job with session
-  - Stores job metadata in session state
-  - Forwards to Modal backend for queueing
-  - Broadcasts job queued event
-- **Modal Backend**:
-  - Enqueues job (unchanged)
-  - Returns job ID confirmation
-- **EventBus DO**: Notifies subscribed clients of job submission
+- **CF Worker**: Generates job ID and forwards to Modal backend (no DO involvement yet)
+- **Modal Backend**: Enqueues job (unchanged) and returns job ID confirmation
 
-**Modal Changes Required:**
+**Planned (TODO, Not Yet Implemented):**
 
-- Accept job submissions from Cloudflare (with auth)
-- Optional: Webhook back to Cloudflare for job updates
+- SessionAgent DO association and EventBus notifications for job submissions
 
 ---
 
 #### `/jobs/{job_id}` (Job Status)
 
 **Current Flow:**
-
-```
-Client → Modal Gateway → Modal Dict (JOB_RESULTS) → Response
-```
-
-**Future Flow:**
 
 ```
 Client → CF Worker → Modal Backend → Modal Dict (JOB_RESULTS) → Response
@@ -612,8 +585,11 @@ class Settings(BaseSettings):
      │ SSE events:
      │ - assistant
      │ - tool_use
+     │ - tool_result
+     │ - system
      │ - result
      │ - done
+     │ - error
      ▼
 ┌──────────────────┐
 │ SessionAgent DO  │
@@ -633,6 +609,8 @@ class Settings(BaseSettings):
 ---
 
 ## Rollout Plan
+
+**Status note:** In this repository, `/query`, `/query_stream`, `/submit`, and `/jobs/*` are already routed through the Cloudflare Worker.
 
 ### Phase 0: Preparation (Week 1)
 
@@ -690,7 +668,7 @@ class Settings(BaseSettings):
 - Error rate by endpoint
 - WebSocket connection count
 - DO invocation count and duration
-- KV read/write operations
+- KV read/write operations (planned, TODO)
 
 **Modal Backend:**
 
@@ -704,7 +682,7 @@ class Settings(BaseSettings):
 - SQLite query performance
 - WebSocket message throughput
 - Storage usage per session
-- Alarm execution time (EventBus cleanup)
+- Alarm execution time (EventBus cleanup, planned, TODO)
 
 ### Logging
 

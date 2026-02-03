@@ -34,9 +34,19 @@ This document describes the authentication flow and routing logic between Cloudf
 
 ## Authentication Flow
 
+### Current State (Implemented)
+
+- **Internal auth only:** Worker/DO → Modal requests are signed with `X-Internal-Auth`.
+- **Client auth not enforced yet:** `Authorization` headers are accepted but not validated.
+- **KV rate limiting not implemented yet.**
+
+### Planned (TODO, Not Yet Enforced)
+
 ### 1. Client → Worker Authentication
 
 **Options:**
+
+These client auth mechanisms are planned and not enforced in the current Worker. TODO: implement enforcement.
 
 #### Option A: Session Tokens (Recommended)
 
@@ -204,6 +214,7 @@ const token = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
 ```
 
 **Token TTL:** 5 minutes with ±60s skew tolerance.
+**Header:** `X-Internal-Auth: <token>` (no `Bearer` prefix)
 
 **Token Validation (Modal):**
 

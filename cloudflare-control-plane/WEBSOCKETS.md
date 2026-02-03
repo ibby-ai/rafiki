@@ -120,8 +120,7 @@ Sent immediately after WebSocket connection is established.
   "session_id": "sess_abc123",
   "timestamp": 1234567890000,
   "data": {
-    "status": "idle",
-    "message_count": 42
+    "status": "idle"
   }
 }
 ```
@@ -193,7 +192,7 @@ Note: `assistant_message.data.content` is plain text extracted from assistant co
 **Fields:**
 
 - `content`: Message text
-- `partial`: `true` for streaming chunks, `false` for complete message
+- `partial`: always `false` in the current implementation
 
 ---
 
@@ -278,19 +277,10 @@ Sent when query execution fails.
   "session_id": "sess_abc123",
   "timestamp": 1234567890000,
   "data": {
-    "error": "Tool execution failed: File not found",
-    "code": "tool_error"
+    "error": "Tool execution failed: File not found"
   }
 }
 ```
-
-**Error codes:**
-
-- `tool_error`: Tool execution failed
-- `permission_denied`: User denied tool approval
-- `rate_limit`: Rate limit exceeded
-- `timeout`: Query execution timed out
-- `internal_error`: Internal server error
 
 ---
 
@@ -305,8 +295,7 @@ Sent when a follow-up prompt is queued.
   "timestamp": 1234567890000,
   "data": {
     "prompt_id": "prompt-uuid",
-    "queue_length": 3,
-    "position": 2
+    "queue_length": 3
   }
 }
 ```
@@ -315,7 +304,7 @@ Sent when a follow-up prompt is queued.
 
 #### 10. Execution State
 
-Sent periodically during long-running executions.
+Emitted for system/result/unknown SSE events or other execution signals. Payload is a passthrough.
 
 ```json
 {
@@ -360,52 +349,10 @@ Keep-alive message to maintain connection.
 
 ---
 
-#### 2. Stop Execution
+#### Planned Client Events (TODO, Not Yet Implemented)
 
-Request to stop current execution.
-
-```json
-{
-  "type": "stop",
-  "session_id": "sess_abc123",
-  "timestamp": 1234567890000,
-  "data": {
-    "reason": "user_cancel"
-  }
-}
-```
-
-**Response:**
-
-```json
-{
-  "type": "session_update",
-  "session_id": "sess_abc123",
-  "timestamp": 1234567890000,
-  "data": {
-    "status": "idle",
-    "stopped": true
-  }
-}
-```
-
----
-
-#### 3. Approve Tool
-
-Approve a tool use (for permission-gated tools).
-
-```json
-{
-  "type": "approve_tool",
-  "session_id": "sess_abc123",
-  "timestamp": 1234567890000,
-  "data": {
-    "tool_use_id": "toolu_abc123",
-    "approved": true
-  }
-}
-```
+- `stop` (request execution stop)
+- `approve_tool` (permission-gated tool approvals)
 
 ---
 
@@ -436,8 +383,7 @@ wss://worker.example.com/ws?user_id=user-123&session_ids=sess_abc,sess_def
   "timestamp": 1234567890000,
   "data": {
     "connection_id": "conn-uuid",
-    "session_ids": ["sess_abc", "sess_def"],
-    "user_id": "user-123"
+    "session_ids": ["sess_abc", "sess_def"]
   }
 }
 ```
@@ -467,9 +413,11 @@ All events from SessionAgent DOs are broadcast to relevant EventBus connections.
 
 ---
 
-#### 3. Presence Update
+#### 3. Presence Update (Planned, TODO)
 
-Sent when users join/leave sessions.
+Sent when users join/leave sessions (not emitted yet).
+
+**Planned (TODO, Not Yet Implemented):**
 
 ```json
 {
@@ -487,7 +435,7 @@ Sent when users join/leave sessions.
 
 ### Client → Server Events
 
-#### 1. Subscribe to Session
+#### 1. Subscribe to Session (Planned, TODO)
 
 ```json
 {
@@ -500,22 +448,11 @@ Sent when users join/leave sessions.
 }
 ```
 
-**Response:**
-
-```json
-{
-  "type": "subscription_ack",
-  "session_id": "sess_xyz",
-  "timestamp": 1234567890000,
-  "data": {
-    "subscribed": true
-  }
-}
-```
+Response acknowledgments are not emitted in the current implementation.
 
 ---
 
-#### 2. Unsubscribe from Session
+#### 2. Unsubscribe from Session (Planned, TODO)
 
 ```json
 {
@@ -551,9 +488,6 @@ Client                 Worker                 SessionAgent DO
   │                      │                          │
   │←─session_update─────────────────────────────────┤
   │←─assistant_message──────────────────────────────┤
-  │                      │                          │
-  │──stop───────────────────────────────────────────→│
-  │←─session_update─────────────────────────────────┤
   │                      │                          │
   │──close─────────────────────────────────────────→│
   │←─close──────────────────────────────────────────┤
@@ -641,7 +575,7 @@ class AgentWebSocket {
 - SessionAgent DO: ~1,000 concurrent WebSocket connections
 - EventBus DO: ~10,000 concurrent WebSocket connections
 
-**Rate Limiting:**
+**Rate Limiting (Planned, TODO):**
 
 ```typescript
 // Limit new connections per user
@@ -682,8 +616,8 @@ data: {"session_id": "sess_abc"}
 
 - SSE is internal only (Modal → SessionAgent).
 - WebSocket is the external contract (Client → Worker → SessionAgent).
-- `data` is forwarded as the raw SSE JSON payload.
-- Unknown SSE events are surfaced as `execution_state`.
+- Assistant content blocks are parsed into `assistant_message`, `tool_use`, or `tool_result`.
+- System/result/unknown SSE events are surfaced as `execution_state`.
 
 ```typescript
 async function bridgeSSEToWebSocket(
@@ -693,7 +627,7 @@ async function bridgeSSEToWebSocket(
   const response = await fetch(sseUrl, {
     headers: {
       "Accept": "text/event-stream",
-      "Authorization": `Bearer ${await this.generateInternalAuthToken()}`
+      "X-Internal-Auth": await this.generateInternalAuthToken()
     }
   });
 
@@ -750,12 +684,12 @@ private mapSSEEventToWSType(sseEvent: string): string {
   const mapping: Record<string, string> = {
     "assistant": "assistant_message",
     "tool_use": "tool_use",
-    "result": "tool_result",
+    "tool_result": "tool_result",
     "done": "query_complete",
     "error": "query_error"
   };
 
-  return mapping[sseEvent] || sseEvent;
+  return mapping[sseEvent] || "execution_state";
 }
 ```
 
@@ -800,7 +734,7 @@ npm install -g wscat
 
 # Connect to SessionAgent
 wscat -c "wss://worker.example.com/query_stream" \
-  -H "Authorization: Bearer <token>"
+  -H "Authorization: Bearer <token>"  # accepted but not enforced yet
 
 # Send query
 > {"question": "What is the capital of Canada?", "session_id": "sess_abc"}

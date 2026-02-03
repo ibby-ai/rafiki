@@ -18,16 +18,16 @@ flowchart TB
 
         subgraph DurableObjects["Durable Objects"]
             SessionDO["SessionAgent DO<br/>- Session state<br/>- Messages<br/>- Prompt queue"]
-            EventBusDO["EventBus DO<br/>- WebSocket fan-out<br/>- Presence tracking<br/>- Notifications"]
+            EventBusDO["EventBus DO<br/>- WebSocket fan-out<br/>- Presence tracking (planned, TODO)<br/>- Notifications"]
         end
 
-        KV["KV Namespace<br/>- Session cache<br/>- Rate limits"]
+        KV["KV Namespace (planned, TODO)<br/>- Session cache<br/>- Rate limits"]
     end
 
     subgraph Modal["Modal Backend"]
         Gateway["HTTP Gateway<br/>(Optional)"]
 
-        SandboxMgr["Sandbox Manager<br/>- Lifecycle<br/>- Discovery<br/>- Health checks"]
+        SandboxMgr["Sandbox Lifecycle<br/>(app.py)<br/>- Create/Reuse<br/>- Tunnel discovery<br/>- Health checks"]
 
         subgraph Sandbox["Modal Sandbox"]
             Controller["Controller<br/>(FastAPI)"]
@@ -53,10 +53,9 @@ flowchart TB
 
     Worker --> SessionDO
     Worker --> EventBusDO
-    Worker --> KV
+    Worker -.planned (TODO).-> KV
 
     SessionDO --> SandboxMgr
-    SessionDO --> Queue
     SessionDO --> EventBusDO
 
     EventBusDO -.WebSocket.-> WebApp
@@ -83,20 +82,26 @@ flowchart TB
 
 **Responsibilities:**
 
-- Authenticate incoming requests (Bearer tokens, API keys, JWT)
+- Accept incoming requests and route to DOs or Modal backend
+- Client authentication (Bearer tokens, API keys, JWT) **planned (TODO)**
 - Route requests to appropriate Durable Objects
 - Proxy job/artifact requests to Modal backend
 - Handle CORS and security headers
-- Rate limiting (via KV)
+- Rate limiting (via KV) **planned (TODO)**
+
+**Current auth status:**
+
+- Client `Authorization` headers are accepted but not enforced yet
+- Internal `X-Internal-Auth` is enforced on Modal endpoints
 
 **Endpoints:**
 
 - `POST /query` - Route to SessionAgent DO
-- `POST /query_stream` - WebSocket upgrade to SessionAgent DO
+- `GET /query_stream` - WebSocket upgrade to SessionAgent DO
 - `POST /submit` - Forward to Modal job queue
 - `GET /jobs/{id}` - Proxy to Modal backend
-- `GET /session/{id}/*` - Route to SessionAgent DO
-- `WebSocket /ws` - Connect to EventBus DO
+- `GET /session/{id}/{subpath}` - Route to SessionAgent DO (`/state`, `/messages`, `/stop`, `/queue`)
+- `WebSocket /ws` or `/events` - Connect to EventBus DO
 
 **Scalability:**
 
@@ -161,8 +166,8 @@ execution_state (key, value, updated_at)
 - Tag connections by user, tenant, session IDs
 - Broadcast events from SessionAgent DOs
 - Filter events based on subscriptions
-- Track user presence (who's online)
-- Clean up stale connections (via alarms)
+- Track user presence (planned, TODO)
+- Clean up stale connections (via alarms, planned, TODO)
 
 **Durable Storage:**
 
@@ -184,7 +189,7 @@ execution_state (key, value, updated_at)
 
 - One DO per `tenant_id` or `user_id`
 - Persists connection metadata across hibernation
-- Alarm-based cleanup every 1 minute
+- Alarm-based cleanup every 1 minute (planned, TODO)
 
 **Scalability:**
 
@@ -196,7 +201,7 @@ execution_state (key, value, updated_at)
 
 #### 4. KV Namespace
 
-**Purpose:** Edge caching and rate limiting
+**Purpose:** Edge caching and rate limiting (planned, TODO)
 
 **Responsibilities:**
 
@@ -268,8 +273,9 @@ execution_state (key, value, updated_at)
 
 **Authentication:**
 
-- Verify internal auth token from Cloudflare
-- Optional: Modal Connect tokens
+- Verify internal auth token from Cloudflare (required for all non-health endpoints)
+- Token format: raw `payload.signature` (no `Bearer` prefix)
+- Optional: Modal Connect tokens (internal gateway → controller)
 
 ---
 
@@ -331,23 +337,19 @@ sequenceDiagram
     participant Client
     participant Worker
     participant SessionDO as SessionAgent DO
-    participant EventBus as EventBus DO
     participant Modal as Modal Backend
     participant Sandbox
 
     Client->>Worker: POST /query
     Note over Client,Worker: {"question": "What is 2+2?"}
 
-    Worker->>Worker: Validate token
-    Worker->>Worker: Resolve session_id
+    Worker->>Worker: Validate token (planned, TODO)
+    Worker->>Worker: Resolve session_id (session_id || session_key || random)
 
     Worker->>SessionDO: POST /query
 
     SessionDO->>SessionDO: Update state (executing)
     SessionDO->>SessionDO: Store message (user)
-
-    SessionDO->>EventBus: Broadcast (session_update)
-    EventBus->>Client: WebSocket (status: executing)
 
     SessionDO->>Modal: POST /query + auth token
     Modal->>Sandbox: Forward request
@@ -358,9 +360,6 @@ sequenceDiagram
     Modal->>SessionDO: Response
     SessionDO->>SessionDO: Store messages (assistant)
     SessionDO->>SessionDO: Update state (idle)
-
-    SessionDO->>EventBus: Broadcast (query_complete)
-    EventBus->>Client: WebSocket (result)
 
     SessionDO->>Worker: Response
     Worker->>Client: JSON response
@@ -379,7 +378,7 @@ sequenceDiagram
     participant Modal as Modal Backend
     participant Sandbox
 
-    Client->>Worker: WebSocket /query_stream
+    Client->>Worker: WebSocket /query_stream (GET upgrade)
     Worker->>SessionDO: WebSocket upgrade
     SessionDO->>Client: connection_ack
 
@@ -388,13 +387,13 @@ sequenceDiagram
     SessionDO->>SessionDO: Update state (executing)
     SessionDO->>EventBus: Broadcast (query_start)
 
-    SessionDO->>Modal: SSE /query_stream + auth
+    SessionDO->>Modal: POST /query_stream (SSE) + auth
     Modal->>Sandbox: Execute agent
 
     loop Streaming Response
-        Sandbox->>Modal: SSE event (assistant)
-        Modal->>SessionDO: SSE chunk
-        SessionDO->>Client: WebSocket (assistant_message)
+        Sandbox->>Modal: SSE event (assistant/tool_use/tool_result/system/result)
+        Modal->>SessionDO: SSE event
+        SessionDO->>Client: WebSocket (assistant_message/tool_use/tool_result/execution_state)
         SessionDO->>EventBus: Broadcast (assistant_message)
     end
 
@@ -415,7 +414,6 @@ sequenceDiagram
 sequenceDiagram
     participant Client
     participant Worker
-    participant SessionDO as SessionAgent DO
     participant Modal as Modal Backend
     participant Queue as Job Queue
     participant JobWorker as Job Worker
@@ -425,9 +423,7 @@ sequenceDiagram
     Note over Client,Worker: {"question": "Analyze dataset"}
 
     Worker->>Worker: Generate job_id
-    Worker->>SessionDO: Associate job with session
-
-    SessionDO->>Modal: POST /submit + job_id
+    Worker->>Modal: POST /submit + job_id + auth token
     Modal->>Queue: Enqueue job
     Modal->>Worker: {"job_id": "..."}
 
