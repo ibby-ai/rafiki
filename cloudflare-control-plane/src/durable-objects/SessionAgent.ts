@@ -16,6 +16,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { buildInternalAuthToken } from "../auth/internalAuth";
 import type {
   Env,
   Message,
@@ -164,6 +165,74 @@ export class SessionAgent extends DurableObject<Env> {
     }
   }
 
+  private extractSessionInfoFromUrl(request: Request): {
+    sessionId?: string;
+    sessionKey?: string;
+    userId?: string;
+    tenantId?: string;
+  } {
+    const url = new URL(request.url);
+    const getParam = (name: string): string | undefined => {
+      const value = url.searchParams.get(name);
+      return value && value.length > 0 ? value : undefined;
+    };
+
+    return {
+      sessionId: getParam("session_id"),
+      sessionKey: getParam("session_key"),
+      userId: getParam("user_id"),
+      tenantId: getParam("tenant_id")
+    };
+  }
+
+  private async reconcileSessionIdentity(params: {
+    sessionId?: string | null;
+    sessionKey?: string | null;
+    userId?: string | null;
+    tenantId?: string | null;
+  }): Promise<void> {
+    if (!this.sessionState) return;
+
+    let changed = false;
+    const incomingSessionId = params.sessionId ?? undefined;
+    const doId = this.ctx.id.toString();
+
+    if (incomingSessionId) {
+      const currentSessionId = this.sessionState.session_id;
+      if (!currentSessionId || currentSessionId === doId) {
+        if (currentSessionId !== incomingSessionId) {
+          this.sessionState.session_id = incomingSessionId;
+          changed = true;
+        }
+      } else if (currentSessionId !== incomingSessionId) {
+        console.warn("Session ID mismatch; keeping stored value", {
+          stored_session_id: currentSessionId,
+          incoming_session_id: incomingSessionId,
+          do_id: doId
+        });
+      }
+    }
+
+    if (params.sessionKey && params.sessionKey !== this.sessionState.session_key) {
+      this.sessionState.session_key = params.sessionKey;
+      changed = true;
+    }
+
+    if (params.userId && params.userId !== this.sessionState.user_id) {
+      this.sessionState.user_id = params.userId;
+      changed = true;
+    }
+
+    if (params.tenantId && params.tenantId !== this.sessionState.tenant_id) {
+      this.sessionState.tenant_id = params.tenantId;
+      changed = true;
+    }
+
+    if (changed) {
+      await this.saveSessionState();
+    }
+  }
+
   /**
    * Handle HTTP requests to this DO
    */
@@ -207,7 +276,15 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Handle WebSocket upgrade for real-time session updates
    */
-  private handleWebSocketUpgrade(request: Request): Response {
+  private async handleWebSocketUpgrade(request: Request): Promise<Response> {
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId
+    });
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     
@@ -235,8 +312,8 @@ export class SessionAgent extends DurableObject<Env> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     try {
       const data = typeof message === "string" ? message : new TextDecoder().decode(message);
-      const msg = JSON.parse(data) as WebSocketMessage;
-      
+      const msg = JSON.parse(data) as Record<string, unknown>;
+
       // Handle ping/pong
       if (msg.type === "ping") {
         ws.send(JSON.stringify({
@@ -245,6 +322,13 @@ export class SessionAgent extends DurableObject<Env> {
           timestamp: Date.now(),
           data: {}
         }));
+        return;
+      }
+
+      const queryBody = this.extractQueryRequest(msg);
+      if (queryBody) {
+        await this.handleStreamingQuery(ws, queryBody);
+        return;
       }
     } catch (error) {
       console.error("WebSocket message error:", error);
@@ -274,11 +358,486 @@ export class SessionAgent extends DurableObject<Env> {
     }
   }
 
+  private broadcastToEventBus(message: WebSocketMessage): void {
+    if (!this.sessionState?.session_id) return;
+
+    const busName =
+      this.sessionState.tenant_id ||
+      this.sessionState.user_id ||
+      "anonymous";
+    const doId = this.env.EVENT_BUS.idFromName(busName);
+    const doStub = this.env.EVENT_BUS.get(doId);
+
+    const payload = {
+      message,
+      filter: {
+        session_ids: [this.sessionState.session_id]
+      }
+    };
+
+    this.ctx.waitUntil(
+      doStub.fetch(
+        new Request("https://internal/broadcast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+      ).catch(error => {
+        console.error("Failed to broadcast to EventBus:", error);
+      })
+    );
+  }
+
+  private extractQueryRequest(msg: Record<string, unknown>): QueryRequest | null {
+    if (typeof msg.question === "string") {
+      return msg as QueryRequest;
+    }
+
+    if (msg.type === "query" && msg.data && typeof msg.data === "object") {
+      const data = msg.data as Record<string, unknown>;
+      if (typeof data.question === "string") {
+        return data as QueryRequest;
+      }
+    }
+
+    return null;
+  }
+
+  private mapSSEEventToWSType(event: string): WebSocketMessage["type"] {
+    if (event === "assistant") return "assistant_message";
+    if (event === "tool_use") return "tool_use";
+    if (event === "tool_result") return "tool_result";
+    if (event === "done") return "query_complete";
+    if (event === "error") return "query_error";
+    return "execution_state";
+  }
+
+  private async handleStreamingQuery(ws: WebSocket, body: QueryRequest): Promise<void> {
+    if (!this.sessionState) {
+      ws.send(JSON.stringify({
+        type: "query_error",
+        session_id: "",
+        timestamp: Date.now(),
+        data: { error: "Session state not initialized" }
+      } satisfies WebSocketMessage));
+      return;
+    }
+
+    await this.reconcileSessionIdentity({
+      sessionId: body.session_id,
+      sessionKey: body.session_key,
+      userId: body.user_id
+    });
+
+    if (this.sessionState.status === "executing") {
+      ws.send(JSON.stringify({
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: "Session already executing" }
+      } satisfies WebSocketMessage));
+      return;
+    }
+
+    this.sessionState.status = "executing";
+    this.sessionState.current_prompt = body.question;
+    this.sessionState.last_active_at = Date.now();
+    if (body.user_id) {
+      this.sessionState.user_id = body.user_id;
+    }
+    await this.saveSessionState();
+
+    this.broadcastToWebSockets({
+      type: "session_update",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        status: "executing",
+        current_prompt: body.question
+      }
+    } satisfies SessionUpdateMessage);
+    this.broadcastToEventBus({
+      type: "session_update",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        status: "executing",
+        current_prompt: body.question
+      }
+    } satisfies SessionUpdateMessage);
+
+    this.broadcastToWebSockets({
+      type: "query_start",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        question: body.question,
+        agent_type: body.agent_type || "default"
+      }
+    });
+    this.broadcastToEventBus({
+      type: "query_start",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        question: body.question,
+        agent_type: body.agent_type || "default"
+      }
+    });
+
+    const capturedMessages: Message[] = [];
+    let receivedDone = false;
+    let receivedError = false;
+    let latestResult: Record<string, unknown> | null = null;
+
+    const publishWs = (message: WebSocketMessage): void => {
+      this.broadcastToWebSockets(message);
+      this.broadcastToEventBus(message);
+    };
+
+    try {
+      await this.streamModalSSE(
+        {
+          ...body,
+          session_id: this.sessionState.session_id
+        },
+        async (event, data) => {
+          const sessionId = this.sessionState?.session_id || "";
+          const timestamp = Date.now();
+
+          if (event === "assistant" || event === "user" || event === "system" || event === "result") {
+            capturedMessages.push(data as Message);
+          }
+
+          if (event === "assistant") {
+            if (data && typeof data === "object") {
+              const message = data as Record<string, unknown>;
+              const content = message.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (!block || typeof block !== "object") {
+                    publishWs({
+                      type: "execution_state",
+                      session_id: sessionId,
+                      timestamp,
+                      data: { event: "assistant_block", data: block }
+                    });
+                    continue;
+                  }
+
+                  const blockRecord = block as Record<string, unknown>;
+                  const blockType = blockRecord.type;
+
+                  if (blockType === "text" && typeof blockRecord.text === "string") {
+                    publishWs({
+                      type: "assistant_message",
+                      session_id: sessionId,
+                      timestamp,
+                      data: {
+                        content: blockRecord.text,
+                        partial: false
+                      }
+                    });
+                    continue;
+                  }
+
+                  if (blockType === "tool_use") {
+                    publishWs({
+                      type: "tool_use",
+                      session_id: sessionId,
+                      timestamp,
+                      data: {
+                        tool_use_id: blockRecord.id,
+                        name: blockRecord.name,
+                        input: blockRecord.input
+                      }
+                    });
+                    continue;
+                  }
+
+                  if (blockType === "tool_result") {
+                    publishWs({
+                      type: "tool_result",
+                      session_id: sessionId,
+                      timestamp,
+                      data: {
+                        tool_use_id: blockRecord.tool_use_id,
+                        content: blockRecord.content,
+                        is_error: blockRecord.is_error
+                      }
+                    });
+                    continue;
+                  }
+
+                  publishWs({
+                    type: "execution_state",
+                    session_id: sessionId,
+                    timestamp,
+                    data: { event: "assistant_block", data: block }
+                  });
+                }
+              } else {
+                publishWs({
+                  type: "execution_state",
+                  session_id: sessionId,
+                  timestamp,
+                  data: { event: "assistant_message", data }
+                });
+              }
+            } else {
+              publishWs({
+                type: "execution_state",
+                session_id: sessionId,
+                timestamp,
+                data: { event: "assistant_message", data }
+              });
+            }
+            return;
+          }
+
+          if (event === "tool_use" || event === "tool_result") {
+            publishWs({
+              type: this.mapSSEEventToWSType(event),
+              session_id: sessionId,
+              timestamp,
+              data
+            });
+            return;
+          }
+
+          if (event === "result") {
+            if (data && typeof data === "object") {
+              latestResult = data as Record<string, unknown>;
+            }
+            publishWs({
+              type: "execution_state",
+              session_id: sessionId,
+              timestamp,
+              data: { event, data }
+            });
+            return;
+          }
+
+          if (event === "done") {
+            receivedDone = true;
+            const summary = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+            let durationMs = 0;
+            const summaryDuration = summary.duration_ms;
+            if (typeof summaryDuration === "number" && Number.isFinite(summaryDuration)) {
+              durationMs = summaryDuration;
+            } else if (latestResult && typeof latestResult.duration_ms === "number") {
+              durationMs = latestResult.duration_ms as number;
+            }
+
+            publishWs({
+              type: "query_complete",
+              session_id: sessionId,
+              timestamp,
+              data: {
+                messages: capturedMessages,
+                duration_ms: durationMs,
+                summary
+              }
+            });
+
+            this.sessionState.status = "idle";
+            this.sessionState.current_prompt = undefined;
+            this.sessionState.last_active_at = Date.now();
+            await this.saveSessionState();
+
+            if (capturedMessages.length > 0) {
+              await this.storeMessages(capturedMessages);
+            }
+            return;
+          }
+
+          if (event === "error") {
+            receivedError = true;
+            const errorMessage = (() => {
+              if (data && typeof data === "object") {
+                const obj = data as Record<string, unknown>;
+                if (typeof obj.error === "string") {
+                  return obj.error;
+                }
+              }
+              return typeof data === "string" ? data : "Modal streaming error";
+            })();
+
+            publishWs({
+              type: "query_error",
+              session_id: sessionId,
+              timestamp,
+              data: { error: errorMessage }
+            });
+
+            this.sessionState.status = "error";
+            this.sessionState.current_prompt = undefined;
+            this.sessionState.last_active_at = Date.now();
+            await this.saveSessionState();
+            return;
+          }
+
+          publishWs({
+            type: "execution_state",
+            session_id: sessionId,
+            timestamp,
+            data: { event, data }
+          });
+        }
+      );
+
+      if (!receivedDone && !receivedError) {
+        const timestamp = Date.now();
+        const sessionId = this.sessionState?.session_id || "";
+        publishWs({
+          type: "query_error",
+          session_id: sessionId,
+          timestamp,
+          data: { error: "Modal stream ended without completion" }
+        });
+
+        if (this.sessionState) {
+          this.sessionState.status = "error";
+          this.sessionState.current_prompt = undefined;
+          this.sessionState.last_active_at = Date.now();
+          await this.saveSessionState();
+        }
+      }
+    } catch (error) {
+      this.sessionState.status = "error";
+      this.sessionState.last_active_at = Date.now();
+      await this.saveSessionState();
+
+      const errorMessage = error instanceof Error ? error.message : "Streaming error";
+      const errorEvent: WebSocketMessage = {
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: errorMessage }
+      };
+      this.broadcastToWebSockets(errorEvent);
+      this.broadcastToEventBus(errorEvent);
+    }
+  }
+
+  private async streamModalSSE(
+    body: QueryRequest,
+    onEvent: (event: string, data: unknown) => Promise<void>
+  ): Promise<void> {
+    const modalUrl = this.sessionState?.modal_sandbox_url || this.env.MODAL_API_BASE_URL;
+    const url = `${modalUrl}/query_stream`;
+
+    const authToken = await buildInternalAuthToken(this.env.INTERNAL_AUTH_SECRET);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "X-Internal-Auth": authToken
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `Modal streaming failed (${response.status})`);
+    }
+
+    if (!response.body) {
+      throw new Error("Modal streaming response has no body");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let currentEvent: string | null = null;
+    let dataLines: string[] = [];
+
+    const emitEvent = async (): Promise<void> => {
+      if (!currentEvent && dataLines.length === 0) {
+        return;
+      }
+
+      if (dataLines.length === 0) {
+        currentEvent = null;
+        return;
+      }
+
+      const eventName = currentEvent || "message";
+      const dataStr = dataLines.join("\n");
+      let parsed: unknown = dataStr;
+      try {
+        parsed = JSON.parse(dataStr);
+      } catch {
+        console.warn("Failed to parse SSE JSON payload", {
+          event: eventName
+        });
+      }
+      await onEvent(eventName, parsed);
+
+      currentEvent = null;
+      dataLines = [];
+    };
+
+    const handleLine = async (rawLine: string): Promise<void> => {
+      const line = rawLine.replace(/\r$/, "");
+
+      if (line === "") {
+        await emitEvent();
+        return;
+      }
+
+      if (line.startsWith(":")) {
+        return;
+      }
+
+      if (line.startsWith("id:") || line.startsWith("retry:")) {
+        return;
+      }
+
+      if (line.startsWith("event:")) {
+        currentEvent = line.slice(6).trim();
+        dataLines = [];
+        return;
+      }
+
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const rawLine of lines) {
+        await handleLine(rawLine);
+      }
+    }
+
+    if (buffer.length > 0) {
+      await handleLine(buffer);
+    }
+
+    await emitEvent();
+  }
+
   /**
    * Handle query execution
    */
   private async handleQuery(request: Request): Promise<Response> {
     const body = await request.json() as QueryRequest;
+
+    await this.reconcileSessionIdentity({
+      sessionId: body.session_id,
+      sessionKey: body.session_key,
+      userId: body.user_id
+    });
     
     // Update session state
     if (!this.sessionState) {
@@ -351,20 +910,91 @@ export class SessionAgent extends DurableObject<Env> {
 
   /**
    * Store messages in durable storage
+   *
+   * Note: Modal backend serializes messages with "type" field ("user", "assistant", "system", "result"),
+   * but our schema expects "role". We map user/assistant types to roles and skip system/result messages.
    */
-  private async storeMessages(messages: Message[]): Promise<void> {
+  private async storeMessages(messages: unknown[]): Promise<void> {
     const sql = this.ctx.storage.sql;
-    
+
     for (const message of messages) {
+      const msg = message as Record<string, unknown>;
+
+      const role = this.extractRole(msg);
+
+      if (!role || (role !== "user" && role !== "assistant")) {
+        console.warn("Skipping message with invalid role", {
+          type: msg.type,
+          role: msg.role,
+          keys: Object.keys(msg)
+        });
+        continue; // Skip non-storable message types (system, result, etc.)
+      }
+
+      if (msg.content === undefined || msg.content === null) {
+        console.warn("Skipping message with missing content", {
+          type: msg.type,
+          role: msg.role,
+          keys: Object.keys(msg)
+        });
+        continue;
+      }
+
+      const contentJson = JSON.stringify(msg.content);
+      if (contentJson === undefined) {
+        console.warn("Skipping message with non-serializable content", {
+          type: msg.type,
+          role: msg.role,
+          keys: Object.keys(msg)
+        });
+        continue;
+      }
+
       const id = crypto.randomUUID();
       sql.exec(
         `INSERT INTO messages (id, role, content, created_at) VALUES (?, ?, ?, ?)`,
         id,
-        message.role,
-        JSON.stringify(message.content),
+        role,
+        contentJson,
         Date.now()
       );
     }
+  }
+
+  private normalizeRole(value: unknown): "user" | "assistant" | null {
+    if (typeof value !== "string") return null;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "user" || normalized === "assistant") {
+      return normalized;
+    }
+    return null;
+  }
+
+  private extractRole(msg: Record<string, unknown>): "user" | "assistant" | null {
+    const roleFromType = this.normalizeRole(msg.type);
+    if (roleFromType) {
+      return roleFromType;
+    }
+
+    const roleFromRole = this.normalizeRole(msg.role);
+    if (roleFromRole) {
+      return roleFromRole;
+    }
+
+    const nested = msg.message;
+    if (nested && typeof nested === "object") {
+      const nestedRecord = nested as Record<string, unknown>;
+      const nestedType = this.normalizeRole(nestedRecord.type);
+      if (nestedType) {
+        return nestedType;
+      }
+      const nestedRole = this.normalizeRole(nestedRecord.role);
+      if (nestedRole) {
+        return nestedRole;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -372,6 +1002,12 @@ export class SessionAgent extends DurableObject<Env> {
    */
   private async handleQueuePrompt(request: Request): Promise<Response> {
     const body = await request.json() as QueryRequest;
+
+    await this.reconcileSessionIdentity({
+      sessionId: body.session_id,
+      sessionKey: body.session_key,
+      userId: body.user_id
+    });
     
     const sql = this.ctx.storage.sql;
     const id = crypto.randomUUID();
@@ -414,6 +1050,8 @@ export class SessionAgent extends DurableObject<Env> {
    * Get session state
    */
   private async handleGetState(request: Request): Promise<Response> {
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
     return new Response(
       JSON.stringify({ ok: true, state: this.sessionState }),
       { status: 200, headers: { "Content-Type": "application/json" } }
@@ -424,6 +1062,8 @@ export class SessionAgent extends DurableObject<Env> {
    * Get session messages
    */
   private async handleGetMessages(request: Request): Promise<Response> {
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
     const sql = this.ctx.storage.sql;
     const rows = sql.exec(
       `SELECT id, role, content, created_at FROM messages ORDER BY created_at ASC`
@@ -453,6 +1093,9 @@ export class SessionAgent extends DurableObject<Env> {
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
+
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
     
     // Call Modal backend to stop execution
     const modalResponse = await this.callModalBackend({
@@ -480,7 +1123,7 @@ export class SessionAgent extends DurableObject<Env> {
     const url = `${modalUrl}${req.endpoint}`;
     
     // Generate internal auth token
-    const authToken = await this.generateInternalAuthToken();
+    const authToken = await buildInternalAuthToken(this.env.INTERNAL_AUTH_SECRET);
     
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -512,34 +1155,4 @@ export class SessionAgent extends DurableObject<Env> {
     }
   }
 
-  /**
-   * Generate internal authentication token for Modal backend
-   */
-  private async generateInternalAuthToken(): Promise<string> {
-    const payload = {
-      service: "cloudflare-worker",
-      issued_at: Date.now(),
-      expires_at: Date.now() + 300000 // 5 minutes
-    };
-    
-    const payloadStr = JSON.stringify(payload);
-    const encoder = new TextEncoder();
-    const data = encoder.encode(payloadStr);
-    const key = encoder.encode(this.env.INTERNAL_AUTH_SECRET);
-    
-    // Simple HMAC signing (in production, use proper JWT library)
-    const signature = await crypto.subtle.importKey(
-      "raw",
-      key,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    ).then(cryptoKey => 
-      crypto.subtle.sign("HMAC", cryptoKey, data)
-    ).then(sig => 
-      btoa(String.fromCharCode(...new Uint8Array(sig)))
-    );
-    
-    return `${btoa(payloadStr)}.${signature}`;
-  }
 }

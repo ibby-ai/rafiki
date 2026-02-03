@@ -53,8 +53,17 @@ export interface QueryResponse {
   error?: string;
 }
 
+/**
+ * Message from Modal backend.
+ *
+ * Note: Modal serializes messages with "type" field (user, assistant, system, result),
+ * not "role". We keep both for compatibility, but "type" is the primary field from Modal.
+ */
 export interface Message {
-  role: "user" | "assistant";
+  /** Message type from Modal serialization (primary field) */
+  type?: "user" | "assistant" | "system" | "result" | "stream_event";
+  /** Legacy role field - may not be present from Modal */
+  role?: "user" | "assistant";
   content: MessageContent[];
 }
 
@@ -181,6 +190,7 @@ export interface QueryCompleteMessage extends WebSocketMessage {
   data: {
     messages: Message[];
     duration_ms: number;
+    summary?: Record<string, unknown>;
   };
 }
 

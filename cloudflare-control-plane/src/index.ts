@@ -13,6 +13,7 @@
  * 4. DO → Modal: Signed request with internal auth token
  */
 
+import { buildInternalAuthToken } from "./auth/internalAuth";
 import { EventBus } from "./durable-objects/EventBus";
 import { SessionAgent } from "./durable-objects/SessionAgent";
 import type {
@@ -55,8 +56,10 @@ export default {
           JSON.stringify({ ok: true, service: "cloudflare-control-plane" }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
-      } else if (path === "/query" || path === "/query_stream") {
-        response = await handleQuery(request, env, path === "/query_stream");
+      } else if (path === "/query") {
+        response = await handleQuery(request, env);
+      } else if (path === "/query_stream") {
+        response = await handleQueryStream(request, env);
       } else if (path === "/submit") {
         response = await handleJobSubmit(request, env);
       } else if (path.startsWith("/jobs/")) {
@@ -69,12 +72,17 @@ export default {
         response = new Response("Not found", { status: 404 });
       }
       
+      // WebSocket responses must be returned as-is
+      if (response.status === 101 || response.webSocket) {
+        return response;
+      }
+
       // Add CORS headers to response
       const headers = new Headers(response.headers);
       for (const [key, value] of Object.entries(corsHeaders)) {
         headers.set(key, value);
       }
-      
+
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
@@ -102,102 +110,55 @@ export default {
 /**
  * Handle query requests (sync and streaming)
  */
-async function handleQuery(request: Request, env: Env, streaming: boolean): Promise<Response> {
+async function handleQuery(request: Request, env: Env): Promise<Response> {
   const body = await request.json() as QueryRequest;
-  
+
   // Resolve or create session
   const sessionId = body.session_id || body.session_key || crypto.randomUUID();
-  
+  const forwardedBody: QueryRequest = {
+    ...body,
+    session_id: sessionId
+  };
+
   // Get SessionAgent DO
   const doId = env.SESSION_AGENT.idFromName(sessionId);
   const doStub = env.SESSION_AGENT.get(doId);
-  
-  if (streaming) {
-    // For streaming, establish WebSocket connection to SessionAgent
-    // and proxy events to client
-    return handleStreamingQuery(doStub, body);
-  } else {
-    // For non-streaming, forward to SessionAgent and return response
-    const response = await doStub.fetch(
-      new Request("https://internal/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      })
-    );
-    
-    return response;
-  }
+
+  // For non-streaming, forward to SessionAgent and return response
+  const response = await doStub.fetch(
+    new Request("https://internal/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(forwardedBody)
+    })
+  );
+
+  return response;
 }
 
 /**
- * Handle streaming query via WebSocket
+ * Handle streaming query via WebSocket upgrade
  */
-async function handleStreamingQuery(doStub: DurableObjectStub, body: QueryRequest): Promise<Response> {
-  // Create WebSocket pair
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  
-  // Connect to SessionAgent DO via WebSocket
-  const doWsResponse = await doStub.fetch(
-    new Request("https://internal/query", {
-      method: "POST",
-      headers: { 
-        "Upgrade": "websocket",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    })
+async function handleQueryStream(request: Request, env: Env): Promise<Response> {
+  if (request.headers.get("Upgrade") !== "websocket") {
+    return new Response("WebSocket upgrade required", { status: 426 });
+  }
+
+  const url = new URL(request.url);
+  const sessionId =
+    url.searchParams.get("session_id") ||
+    url.searchParams.get("session_key") ||
+    crypto.randomUUID();
+  if (!url.searchParams.get("session_id")) {
+    url.searchParams.set("session_id", sessionId);
+  }
+
+  const doId = env.SESSION_AGENT.idFromName(sessionId);
+  const doStub = env.SESSION_AGENT.get(doId);
+
+  return doStub.fetch(
+    new Request(`https://internal/query_stream?${url.searchParams.toString()}`, request)
   );
-  
-  if (doWsResponse.status !== 101) {
-    return new Response("Failed to upgrade to WebSocket", { status: 500 });
-  }
-  
-  const doWebSocket = doWsResponse.webSocket;
-  if (!doWebSocket) {
-    return new Response("No WebSocket in response", { status: 500 });
-  }
-  
-  // Proxy messages between client and DO
-  doWebSocket.accept();
-  
-  doWebSocket.addEventListener("message", (event) => {
-    try {
-      server.send(event.data);
-    } catch (error) {
-      console.error("Failed to forward message to client:", error);
-    }
-  });
-  
-  server.addEventListener("message", (event) => {
-    try {
-      doWebSocket.send(event.data);
-    } catch (error) {
-      console.error("Failed to forward message to DO:", error);
-    }
-  });
-  
-  doWebSocket.addEventListener("close", () => {
-    try {
-      server.close();
-    } catch (error) {
-      console.error("Failed to close client socket:", error);
-    }
-  });
-  
-  server.addEventListener("close", () => {
-    try {
-      doWebSocket.close();
-    } catch (error) {
-      console.error("Failed to close DO socket:", error);
-    }
-  });
-  
-  return new Response(null, {
-    status: 101,
-    webSocket: client
-  });
 }
 
 /**
@@ -211,7 +172,7 @@ async function handleJobSubmit(request: Request, env: Env): Promise<Response> {
   
   // Forward to Modal backend for job queueing
   const modalUrl = `${env.MODAL_API_BASE_URL}/submit`;
-  const authToken = await generateInternalAuthToken(env);
+  const authToken = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
   
   const response = await fetch(modalUrl, {
     method: "POST",
@@ -256,7 +217,7 @@ async function handleJobsEndpoint(request: Request, env: Env, path: string): Pro
   
   // Forward to Modal backend
   const modalUrl = `${env.MODAL_API_BASE_URL}${path}`;
-  const authToken = await generateInternalAuthToken(env);
+  const authToken = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
   
   const response = await fetch(modalUrl, {
     method: request.method,
@@ -285,10 +246,13 @@ async function handleSessionEndpoint(request: Request, env: Env, path: string): 
   // Get SessionAgent DO
   const doId = env.SESSION_AGENT.idFromName(sessionId);
   const doStub = env.SESSION_AGENT.get(doId);
-  
+
+  const forwardUrl = new URL(`https://internal${subpath || "/state"}`);
+  forwardUrl.searchParams.set("session_id", sessionId);
+
   // Forward request to DO
   const response = await doStub.fetch(
-    new Request(`https://internal${subpath || "/state"}`, {
+    new Request(forwardUrl.toString(), {
       method: request.method,
       headers: request.headers,
       body: request.body
@@ -322,35 +286,4 @@ async function handleEventBusConnection(request: Request, env: Env): Promise<Res
   );
   
   return response;
-}
-
-/**
- * Generate internal authentication token for Modal backend
- */
-async function generateInternalAuthToken(env: Env): Promise<string> {
-  const payload = {
-    service: "cloudflare-worker",
-    issued_at: Date.now(),
-    expires_at: Date.now() + 300000 // 5 minutes
-  };
-  
-  const payloadStr = JSON.stringify(payload);
-  const encoder = new TextEncoder();
-  const data = encoder.encode(payloadStr);
-  const key = encoder.encode(env.INTERNAL_AUTH_SECRET);
-  
-  // Simple HMAC signing (in production, use proper JWT library)
-  const signature = await crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  ).then(cryptoKey => 
-    crypto.subtle.sign("HMAC", cryptoKey, data)
-  ).then(sig => 
-    btoa(String.fromCharCode(...new Uint8Array(sig)))
-  );
-  
-  return `${btoa(payloadStr)}.${signature}`;
 }
