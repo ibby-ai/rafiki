@@ -62,6 +62,7 @@ from agent_sandbox.jobs import (
     record_session_end,
     record_session_start,
 )
+from agent_sandbox.middleware.cloudflare_auth import internal_auth_middleware
 from agent_sandbox.schemas import QueryBody
 from agent_sandbox.schemas.base import BaseSchema
 from agent_sandbox.schemas.responses import ErrorResponse, QueryResponse
@@ -69,6 +70,7 @@ from agent_sandbox.tools.session_tools import set_parent_context
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
+app.middleware("http")(internal_auth_middleware)
 _settings = get_settings()
 _logger = logging.getLogger(__name__)
 

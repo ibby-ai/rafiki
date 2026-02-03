@@ -107,6 +107,10 @@ from agent_sandbox.jobs import (
     update_job,
     update_prewarm_ready,
 )
+from agent_sandbox.middleware.cloudflare_auth import (
+    INTERNAL_AUTH_HEADER,
+    internal_auth_middleware,
+)
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
 from agent_sandbox.schemas import (
     ArtifactListResponse,
@@ -162,6 +166,7 @@ _settings = Settings()
 _logger = logging.getLogger(__name__)
 
 web_app = FastAPI()
+web_app.middleware("http")(internal_auth_middleware)
 
 web_app.add_middleware(
     CORSMiddleware,
@@ -1048,12 +1053,16 @@ async def query_proxy(request: Request, body: QueryBody):
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     # Optional: per-request connect token (verified in sandbox service)
-    headers = {}
+    headers: dict[str, str] = {}
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
         )
-        headers = {"Authorization": f"Bearer {creds.token}"}
+        headers["Authorization"] = f"Bearer {creds.token}"
+
+    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
+    if internal_auth:
+        headers[INTERNAL_AUTH_HEADER] = internal_auth
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
         r = await client.post(
@@ -1145,12 +1154,16 @@ async def query_stream(request: Request, body: QueryBody):
     if sb is None or url is None:
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
-    headers = {}
+    headers: dict[str, str] = {}
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
         )
-        headers = {"Authorization": f"Bearer {creds.token}"}
+        headers["Authorization"] = f"Bearer {creds.token}"
+
+    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
+    if internal_auth:
+        headers[INTERNAL_AUTH_HEADER] = internal_auth
 
     # Track session_id from stream for post-completion snapshot
     captured_session_id: str | None = None
@@ -1692,6 +1705,7 @@ async def prewarm_status_endpoint() -> WarmStatusResponse:
 async def stop_session(
     session_id: str,
     body: SessionStopRequest | None = None,
+    request: Request | None = None,
 ) -> SessionStopResponse:
     """Stop an agent session mid-execution.
 
@@ -1748,10 +1762,16 @@ async def stop_session(
     if mode == "immediate":
         try:
             _, service_url = await get_or_start_background_sandbox_aio()
+            headers: dict[str, str] = {}
+            if request is not None:
+                internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
+                if internal_auth:
+                    headers[INTERNAL_AUTH_HEADER] = internal_auth
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 r = await client.post(
                     f"{service_url.rstrip('/')}/session/{session_id}/stop",
                     json={"mode": "immediate", "reason": reason, "requested_by": requested_by},
+                    headers=headers or None,
                 )
                 if r.status_code == 200:
                     controller_response = r.json()
