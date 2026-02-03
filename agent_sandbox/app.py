@@ -177,6 +177,13 @@ web_app.add_middleware(
 )
 
 
+def _add_internal_auth_header(request: Request, headers: dict[str, str]) -> None:
+    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
+    if not internal_auth:
+        raise HTTPException(status_code=401, detail="Missing internal auth token")
+    headers[INTERNAL_AUTH_HEADER] = internal_auth
+
+
 def _base_anthropic_sdk_image() -> modal.Image:
     """Build a base image with Python, FastAPI, uvicorn, httpx and Claude SDK.
 
@@ -1060,9 +1067,7 @@ async def query_proxy(request: Request, body: QueryBody):
         )
         headers["Authorization"] = f"Bearer {creds.token}"
 
-    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
-    if internal_auth:
-        headers[INTERNAL_AUTH_HEADER] = internal_auth
+    _add_internal_auth_header(request, headers)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
         r = await client.post(
@@ -1161,9 +1166,7 @@ async def query_stream(request: Request, body: QueryBody):
         )
         headers["Authorization"] = f"Bearer {creds.token}"
 
-    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
-    if internal_auth:
-        headers[INTERNAL_AUTH_HEADER] = internal_auth
+    _add_internal_auth_header(request, headers)
 
     # Track session_id from stream for post-completion snapshot
     captured_session_id: str | None = None
@@ -1704,8 +1707,8 @@ async def prewarm_status_endpoint() -> WarmStatusResponse:
 @web_app.post("/session/{session_id}/stop", response_model=SessionStopResponse)
 async def stop_session(
     session_id: str,
+    request: Request,
     body: SessionStopRequest | None = None,
-    request: Request | None = None,
 ) -> SessionStopResponse:
     """Stop an agent session mid-execution.
 
@@ -1763,10 +1766,7 @@ async def stop_session(
         try:
             _, service_url = await get_or_start_background_sandbox_aio()
             headers: dict[str, str] = {}
-            if request is not None:
-                internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
-                if internal_auth:
-                    headers[INTERNAL_AUTH_HEADER] = internal_auth
+            _add_internal_auth_header(request, headers)
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 r = await client.post(
                     f"{service_url.rstrip('/')}/session/{session_id}/stop",
@@ -2512,6 +2512,11 @@ SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
 
+# Dedicated deployed app name for sandbox management.
+# Using App.lookup() ensures the app is deployed (not ephemeral), which is
+# required for named sandboxes to work with Sandbox.from_name().
+SANDBOX_APP_NAME = "sandbox-manager-app"
+
 
 # =============================================================================
 # GLOBAL STATE MANAGEMENT
@@ -2574,7 +2579,9 @@ def cleanup_sessions():
     by attempting to fetch its tunnel URLs. Updates SESSIONS status accordingly.
     """
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        # Ensure sandbox-manager-app exists (required for from_name to work)
+        modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         _ = sb.tunnels()  # Will raise NotFoundError if sandbox is gone
         SESSIONS[SANDBOX_NAME] = {**SESSIONS.get(SANDBOX_NAME, {}), "status": "running"}
     except modal_exc.NotFoundError:
@@ -2602,6 +2609,7 @@ def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
     """
     pool_name = generate_pool_sandbox_name()
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
 
     try:
         sb = modal.Sandbox.create(
@@ -2611,7 +2619,7 @@ def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
             "0.0.0.0",
             "--port",
             str(SERVICE_PORT),
-            app=app,
+            app=sandbox_app,
             image=agent_sdk_image,
             secrets=agent_sdk_secrets,
             workdir="/root/app",
@@ -2969,9 +2977,12 @@ def get_or_start_background_sandbox(
     # Modal sandboxes can be given names. This allows multiple workers (or even
     # separate Modal function invocations) to discover and reuse the same
     # long-running sandbox. This is key to the "persistent service" pattern.
+    # Using App.lookup() ensures the app is deployed (not ephemeral), which is
+    # required for Sandbox.from_name() to work in both dev and prod modes.
     # -------------------------------------------------------------------------
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         tunnels = sb.tunnels()
         if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
             SANDBOX = sb
@@ -3085,8 +3096,11 @@ def get_or_start_background_sandbox(
     # -------------------------------------------------------------------------
     # If no existing sandbox was found, create one. This runs uvicorn inside
     # an isolated container with its own filesystem, network, and resources.
+    # Using App.lookup() ensures sandbox is associated with a deployed app,
+    # allowing Sandbox.from_name() to work in both dev and prod modes.
     # -------------------------------------------------------------------------
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
     try:
         SANDBOX = modal.Sandbox.create(
             # Command to run inside the sandbox (uvicorn starts our FastAPI app)
@@ -3097,7 +3111,7 @@ def get_or_start_background_sandbox(
             "--port",
             str(SERVICE_PORT),
             # MODAL-SPECIFIC PARAMETERS EXPLAINED:
-            app=app,  # Associates sandbox with this Modal App
+            app=sandbox_app,  # Associates sandbox with deployed sandbox-manager-app
             image=sandbox_image,  # Container image (base or snapshot for restoration)
             secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
             workdir="/root/app",  # Working directory inside container
@@ -3117,13 +3131,8 @@ def get_or_start_background_sandbox(
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        try:
-            SANDBOX = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
+        # With a deployed app, from_name works in both dev and prod modes
+        SANDBOX = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
 
     # Optional: set tags after creation (useful for filtering in Modal dashboard)
     SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
@@ -3216,9 +3225,12 @@ async def get_or_start_background_sandbox_aio(
     if SANDBOX and SERVICE_URL:
         return SANDBOX, SERVICE_URL
 
-    # Attempt global reuse by name across workers/processes
+    # Attempt global reuse by name across workers/processes.
+    # Using App.lookup() ensures the app is deployed (not ephemeral), which is
+    # required for Sandbox.from_name() to work in both dev and prod modes.
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         # Poll tunnels until URL appears (mirrors sync behavior)
         deadline = anyio.current_time() + 30
         url = None
@@ -3322,8 +3334,11 @@ async def get_or_start_background_sandbox_aio(
                 "Error checking warm pool (async), will create new sandbox", exc_info=True
             )
 
-    # Create with persistent volume
+    # Create with persistent volume.
+    # Using App.lookup() ensures sandbox is associated with a deployed app,
+    # allowing Sandbox.from_name() to work in both dev and prod modes.
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
     try:
         SANDBOX = await modal.Sandbox.create.aio(
             "uvicorn",
@@ -3332,7 +3347,7 @@ async def get_or_start_background_sandbox_aio(
             "0.0.0.0",
             "--port",
             str(SERVICE_PORT),
-            app=app,
+            app=sandbox_app,  # Associates sandbox with deployed sandbox-manager-app
             image=sandbox_image,  # Use snapshot image if available
             secrets=agent_sdk_secrets,
             workdir="/root/app",
@@ -3345,13 +3360,8 @@ async def get_or_start_background_sandbox_aio(
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        try:
-            SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
+        # With a deployed app, from_name works in both dev and prod modes
+        SANDBOX = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
 
     # Optional: set tags after creation
     await SANDBOX.set_tags.aio(
