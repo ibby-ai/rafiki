@@ -57,7 +57,7 @@ Use this checklist to deploy the Cloudflare control plane.
 
 ### Add Authentication Middleware
 
-- [ ] Create `agent_sandbox/middleware/cloudflare_auth.py`
+- [ ] Create `agent_sandbox/middleware/cloudflare_auth.py` (requires `X-Internal-Auth` on all non-health endpoints)
 - [ ] Copy implementation from `cloudflare-control-plane/INTEGRATION.md`
 - [ ] Update `agent_sandbox/controllers/controller.py` to use middleware
 - [ ] Add middleware import and app.middleware("http") call
@@ -73,8 +73,8 @@ Use this checklist to deploy the Cloudflare control plane.
 ### Update Settings
 
 - [ ] Edit `agent_sandbox/config/settings.py`
-- [ ] Add `internal_auth_secret: str | None` field
-- [ ] Update `get_modal_secrets()` to include "internal-auth-secret"
+- [ ] Add `internal_auth_secret: str | None` field and require it at startup
+- [ ] Update `get_modal_secrets()` to always include "internal-auth-secret"
 
 ### Deploy Modal Changes
 

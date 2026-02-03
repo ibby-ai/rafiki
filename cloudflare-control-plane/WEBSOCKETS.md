@@ -188,6 +188,8 @@ Sent as the agent generates text responses.
 }
 ```
 
+Note: `assistant_message.data.content` is plain text extracted from assistant content blocks.
+
 **Fields:**
 
 - `content`: Message text
@@ -255,7 +257,11 @@ Sent when query execution finishes.
         "content": [{ "type": "text", "text": "..." }]
       }
     ],
-    "duration_ms": 1234
+    "duration_ms": 1234,
+    "summary": {
+      "text": "The capital of Canada is Ottawa.",
+      "is_complete": true
+    }
   }
 }
 ```
@@ -673,6 +679,11 @@ data: {"session_id": "sess_abc"}
 ```
 
 **SessionAgent DO (Bridge):**
+
+- SSE is internal only (Modal → SessionAgent).
+- WebSocket is the external contract (Client → Worker → SessionAgent).
+- `data` is forwarded as the raw SSE JSON payload.
+- Unknown SSE events are surfaced as `execution_state`.
 
 ```typescript
 async function bridgeSSEToWebSocket(

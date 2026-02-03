@@ -146,7 +146,9 @@ curl -X POST https://your-worker.workers.dev/query \
 ### Query (Streaming via WebSocket)
 
 ```javascript
-const ws = new WebSocket("wss://your-worker.workers.dev/query_stream");
+const ws = new WebSocket(
+  "wss://your-worker.workers.dev/query_stream?session_id=sess_abc123"
+);
 
 ws.onopen = () => {
   ws.send(

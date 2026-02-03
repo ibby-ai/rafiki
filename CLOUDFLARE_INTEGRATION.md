@@ -71,13 +71,14 @@ This integration adds Cloudflare Workers + Durable Objects as a control plane la
 
 ### Modal Backend Changes Required
 
-**Add authentication middleware** to verify requests from Cloudflare:
+**Add authentication middleware** to verify requests from Cloudflare (required for all non-health endpoints):
 
 ```python
 # agent_sandbox/middleware/cloudflare_auth.py (new file)
-def verify_internal_token(authorization: str = Header(...)) -> dict:
+# X-Internal-Auth is required on all non-health endpoints.
+# See cloudflare-control-plane/INTEGRATION.md for full implementation.
+def verify_internal_token(raw_token: str) -> dict:
     """Verify HMAC-signed token from Cloudflare Worker."""
-    # Implementation in INTEGRATION.md
     ...
 
 # agent_sandbox/controllers/controller.py (update)
@@ -86,7 +87,7 @@ from agent_sandbox.middleware.cloudflare_auth import internal_auth_middleware
 app.middleware("http")(internal_auth_middleware)
 ```
 
-**Add secret**:
+**Add secret** (required):
 
 ```bash
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
@@ -130,7 +131,7 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflar
 
 ### 5. Developer Experience
 
-- Same API surface (backward compatible)
+- Cloudflare control plane is the primary API surface
 - WebSocket-first for streaming
 - Easy to add new clients
 - Better error handling at edge

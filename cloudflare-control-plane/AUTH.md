@@ -191,19 +191,19 @@ DO signs requests with internal secret to prove they're from authorized control 
 **Token Generation (DO):**
 
 ```typescript
-async function generateInternalAuthToken(env: Env): Promise<string> {
-  const payload = {
-    service: "cloudflare-worker",
-    issued_at: Date.now(),
-    expires_at: Date.now() + 300000, // 5 minutes
-  };
+import { buildInternalAuthToken } from "./auth/internalAuth";
 
-  const payloadStr = JSON.stringify(payload);
-  const signature = await hmacSHA256(payloadStr, env.INTERNAL_AUTH_SECRET);
-
-  return `${btoa(payloadStr)}.${signature}`;
-}
+const token = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
+// Send token in X-Internal-Auth header to Modal backend
 ```
+
+**Token Format (exact):**
+
+```
+<base64(payload_json_bytes)>.<base64(hmac_sha256(payload_json_bytes))>
+```
+
+**Token TTL:** 5 minutes with ±60s skew tolerance.
 
 **Token Validation (Modal):**
 
@@ -213,15 +213,11 @@ import hmac
 import hashlib
 import json
 import base64
-from fastapi import HTTPException, Header
+from fastapi import HTTPException
 
-def verify_internal_token(authorization: str = Header(...)) -> dict:
+def verify_internal_token(raw_token: str) -> dict:
     """Verify internal auth token from Cloudflare Worker."""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
-
-    token = authorization[7:]
-    parts = token.split(".")
+    parts = raw_token.split(".")
     if len(parts) != 2:
         raise HTTPException(401, "Invalid token format")
 
@@ -229,25 +225,35 @@ def verify_internal_token(authorization: str = Header(...)) -> dict:
 
     # Decode payload
     try:
-        payload_str = base64.b64decode(payload_b64).decode("utf-8")
-        payload = json.loads(payload_str)
+        payload_bytes = base64.b64decode(payload_b64, validate=True)
+        payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception:
-        raise HTTPException(401, "Invalid payload")
+        raise HTTPException(401, "Invalid token payload")
 
-    # Check expiration
-    if payload["expires_at"] < time.time() * 1000:
+    if payload.get("service") != "cloudflare-worker":
+        raise HTTPException(401, "Invalid token service")
+
+    issued_at = int(payload["issued_at"])
+    expires_at = int(payload["expires_at"])
+    now_ms = int(time.time() * 1000)
+
+    if issued_at > now_ms + 60_000:
+        raise HTTPException(401, "Token issued in the future")
+    if expires_at < now_ms - 60_000:
         raise HTTPException(401, "Token expired")
+    if expires_at < issued_at:
+        raise HTTPException(401, "Invalid token timestamps")
 
     # Verify signature
     secret = os.environ["INTERNAL_AUTH_SECRET"]
+    signature_bytes = base64.b64decode(signature_b64, validate=True)
     expected_sig = hmac.new(
         secret.encode("utf-8"),
-        payload_b64.encode("utf-8"),
+        payload_bytes,
         hashlib.sha256
     ).digest()
-    expected_sig_b64 = base64.b64encode(expected_sig).decode("utf-8")
 
-    if not hmac.compare_digest(expected_sig_b64, signature_b64):
+    if not hmac.compare_digest(expected_sig, signature_bytes):
         raise HTTPException(401, "Invalid signature")
 
     return payload

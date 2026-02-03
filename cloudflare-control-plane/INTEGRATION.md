@@ -74,32 +74,30 @@ Client → CF Worker → SessionAgent DO → Modal Sandbox (controller.py) → A
 Client → Modal Gateway → Modal Sandbox (SSE) → Client
 ```
 
-**Future Flow:**
+**Target Flow:**
 
 ```
-Client ←→ CF Worker (WS proxy) ←→ SessionAgent DO (WS) → Modal Sandbox (SSE)
-                                      ↓
-                                  EventBus DO (broadcast)
+Client ←→ CF Worker (WS) ←→ SessionAgent DO (WS) → Modal Sandbox (SSE)
+                                 ↓
+                              EventBus DO (broadcast)
 ```
 
 **Changes:**
 
-- **CF Worker**: Establishes WebSocket with client, proxies to SessionAgent DO
+- **CF Worker**: Accepts WebSocket upgrade and forwards to SessionAgent DO
 - **SessionAgent DO**:
   - Accepts WebSocket connection from Worker
-  - Polls Modal backend SSE endpoint
+  - Calls Modal `/query_stream` SSE endpoint
   - Converts SSE events to WebSocket messages
-  - Broadcasts to connected clients
+  - Broadcasts to connected session WebSockets
   - Stores final messages in SQLite
 - **Modal Backend**:
   - SSE endpoint unchanged
-  - May add WebSocket support later (optional)
-- **EventBus DO**: Broadcasts streaming updates to other clients
+  - WebSocket remains internal-only
 
 **Modal Changes Required:**
 
 - None (SSE endpoint remains compatible)
-- Optional: Add native WebSocket support for efficiency
 
 ---
 
@@ -390,6 +388,8 @@ VALUES ('msg-uuid', 'user', '[{"type":"text","text":"..."}]', 1234567890);
 
 ### Add Internal Auth Middleware
 
+All non-health endpoints must include `X-Internal-Auth`.
+
 **File:** `agent_sandbox/middleware/cloudflare_auth.py` (new)
 
 ```python
@@ -403,13 +403,9 @@ import time
 from fastapi import HTTPException, Header, Request
 from typing import Optional
 
-def verify_internal_token(authorization: str = Header(...)) -> dict:
+def verify_internal_token(raw_token: str) -> dict:
     """Verify internal auth token from Cloudflare Worker."""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
-
-    token = authorization[7:]
-    parts = token.split(".")
+    parts = raw_token.split(".")
     if len(parts) != 2:
         raise HTTPException(401, "Invalid token format")
 
@@ -417,51 +413,66 @@ def verify_internal_token(authorization: str = Header(...)) -> dict:
 
     # Decode payload
     try:
-        payload_str = base64.b64decode(payload_b64).decode("utf-8")
-        payload = json.loads(payload_str)
+        payload_bytes = base64.b64decode(payload_b64, validate=True)
+        payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception as e:
-        raise HTTPException(401, f"Invalid payload: {e}")
+        raise HTTPException(401, f"Invalid token payload: {e}")
 
     # Check service
     if payload.get("service") != "cloudflare-worker":
         raise HTTPException(401, "Invalid service")
 
-    # Check expiration
-    if payload.get("expires_at", 0) < time.time() * 1000:
+    issued_at = int(payload.get("issued_at", 0))
+    expires_at = int(payload.get("expires_at", 0))
+    now_ms = int(time.time() * 1000)
+
+    if issued_at > now_ms + 60_000:
+        raise HTTPException(401, "Token issued in the future")
+    if expires_at < now_ms - 60_000:
         raise HTTPException(401, "Token expired")
+    if expires_at < issued_at:
+        raise HTTPException(401, "Invalid token timestamps")
 
     # Verify signature
     secret = os.environ.get("INTERNAL_AUTH_SECRET")
     if not secret:
         raise HTTPException(500, "Internal auth secret not configured")
 
+    signature_bytes = base64.b64decode(signature_b64, validate=True)
     expected_sig = hmac.new(
         secret.encode("utf-8"),
-        payload_b64.encode("utf-8"),
+        payload_bytes,
         hashlib.sha256
     ).digest()
-    expected_sig_b64 = base64.b64encode(expected_sig).decode("utf-8")
 
     # Use constant-time comparison
-    if not hmac.compare_digest(expected_sig_b64, signature_b64):
+    if not hmac.compare_digest(expected_sig, signature_bytes):
         raise HTTPException(401, "Invalid signature")
 
     return payload
 
 async def internal_auth_middleware(request: Request, call_next):
     """Middleware to verify internal auth for all Cloudflare requests."""
-    # Check if request is from Cloudflare (by path or header)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.url.path in {"/health", "/health_check"}:
+        return await call_next(request)
+    # Require X-Internal-Auth on all non-health endpoints
     internal_auth_header = request.headers.get("X-Internal-Auth")
-
-    if internal_auth_header:
-        try:
-            verify_internal_token(f"Bearer {internal_auth_header}")
-        except HTTPException as e:
-            return Response(
-                content=json.dumps({"ok": False, "error": e.detail}),
-                status_code=e.status_code,
-                media_type="application/json"
-            )
+    if not internal_auth_header:
+        return Response(
+            content=json.dumps({"ok": False, "error": "Missing internal auth token"}),
+            status_code=401,
+            media_type="application/json"
+        )
+    try:
+        verify_internal_token(internal_auth_header)
+    except HTTPException as e:
+        return Response(
+            content=json.dumps({"ok": False, "error": e.detail}),
+            status_code=e.status_code,
+            media_type="application/json"
+        )
 
     response = await call_next(request)
     return response
@@ -498,7 +509,7 @@ modal secret create internal-auth-secret \
 class Settings(BaseSettings):
     # ... existing settings ...
 
-    # Internal auth secret for Cloudflare Worker
+    # Internal auth secret for Cloudflare Worker (required)
     internal_auth_secret: str | None = None
 
     def get_modal_secrets(self) -> list[modal.Secret]:
@@ -506,9 +517,7 @@ class Settings(BaseSettings):
             modal.Secret.from_name("anthropic-secret"),
         ]
 
-        # Add internal auth secret if configured
-        if self.internal_auth_secret or os.environ.get("INTERNAL_AUTH_SECRET"):
-            secrets.append(modal.Secret.from_name("internal-auth-secret"))
+        secrets.append(modal.Secret.from_name("internal-auth-secret"))
 
         return secrets
 ```

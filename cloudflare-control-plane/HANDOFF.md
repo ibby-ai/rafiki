@@ -235,15 +235,15 @@ CREATE TABLE prompt_queue (id TEXT, question TEXT, queued_at INT, priority INT);
 
 ### 4. Modal Backend Integration
 
-**Required Changes** (minimal, backward-compatible):
+**Required Changes** (breaking, Cloudflare-first):
 
 1. **Add Authentication Middleware**:
 
 ```python
 # agent_sandbox/middleware/cloudflare_auth.py (new file)
-def verify_internal_token(authorization: str = Header(...)) -> dict:
+def verify_internal_token(raw_token: str) -> dict:
     """Verify HMAC-signed token from Cloudflare Worker."""
-    # Decode token, verify signature, check expiration
+    # X-Internal-Auth required on all non-health endpoints.
     # Implementation in INTEGRATION.md section "Add Internal Auth Middleware"
     ...
 
@@ -264,16 +264,15 @@ modal secret create internal-auth-secret \
 ```python
 # agent_sandbox/config/settings.py (update)
 class Settings(BaseSettings):
-    internal_auth_secret: str | None = None  # Add this field
+    internal_auth_secret: str | None = None  # Required
 
     def get_modal_secrets(self) -> list[modal.Secret]:
         secrets = [modal.Secret.from_name("anthropic-secret")]
-        if self.internal_auth_secret:
-            secrets.append(modal.Secret.from_name("internal-auth-secret"))
+        secrets.append(modal.Secret.from_name("internal-auth-secret"))
         return secrets
 ```
 
-**All existing endpoints remain compatible**—no breaking changes to Modal API.
+**Cloudflare control plane is the primary interface**—direct Modal access is no longer supported without `X-Internal-Auth`.
 
 ---
 

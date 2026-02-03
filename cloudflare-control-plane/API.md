@@ -96,11 +96,21 @@ Execute an agent query and return the complete response.
 
 ### Query (Streaming)
 
-**POST** `/query_stream` (WebSocket upgrade)
+**GET** `/query_stream` (WebSocket upgrade)
 
 Execute an agent query with real-time streaming via WebSocket.
 
-**Request:** Same as `/query` endpoint
+**Request:** Send the query as the first WebSocket message:
+
+```json
+{
+  "question": "What is the capital of Canada?",
+  "session_id": "sess_abc123"
+}
+```
+
+**Recommended:** Include `session_id` as a query string parameter for session resume:
+`/query_stream?session_id=sess_abc123`
 
 **WebSocket Messages (Server → Client):**
 
@@ -128,6 +138,8 @@ Execute an agent query with real-time streaming via WebSocket.
 }
 ```
 
+Note: `assistant_message.data.content` is plain text extracted from assistant content blocks.
+
 ```json
 {
   "type": "query_complete",
@@ -135,7 +147,11 @@ Execute an agent query with real-time streaming via WebSocket.
   "timestamp": 1234567890000,
   "data": {
     "messages": [...],
-    "duration_ms": 1234
+    "duration_ms": 1234,
+    "summary": {
+      "text": "The capital of Canada is Ottawa.",
+      "is_complete": true
+    }
   }
 }
 ```
