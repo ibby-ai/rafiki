@@ -1,0 +1,46 @@
+// Cloudflare Worker configuration for Agent Sandbox Control Plane
+{
+  "name": "agent-sandbox-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSION_AGENT",
+        "class_name": "SessionAgent",
+        "script_name": "agent-sandbox-control-plane"
+      },
+      {
+        "name": "EVENT_BUS",
+        "class_name": "EventBus",
+        "script_name": "agent-sandbox-control-plane"
+      }
+    ]
+  },
+  "vars": {
+    "MODAL_API_BASE_URL": "https://api.modal.com/v1",
+    "ENVIRONMENT": "development"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SESSION_CACHE",
+      "id": "placeholder_will_be_generated"
+    }
+  ],
+  // Secrets to be added via wrangler secret put:
+  // - MODAL_TOKEN_ID: Modal API token ID
+  // - MODAL_TOKEN_SECRET: Modal API token secret
+  // - INTERNAL_AUTH_SECRET: Internal signing secret for Worker <-> Modal auth
+  // - SESSION_SIGNING_SECRET: Secret for signing session tokens
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionAgent", "EventBus"]
+    }
+  ]
+}
