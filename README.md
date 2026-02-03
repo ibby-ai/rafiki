@@ -698,11 +698,18 @@ All non-health HTTP endpoints require a valid `X-Internal-Auth` header generated
 Cloudflare control plane. The Modal backend will fail fast if the internal auth secret
 is missing.
 
+Token format is the raw `payload.signature` value (no `Bearer` prefix).
+
 Create the Modal secret:
 
 ```bash
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
 ```
+
+### Sandbox Lookup (Named Sandboxes)
+
+Background sandboxes are resolved via a dedicated Modal app name: `sandbox-manager-app`.
+This ensures `Sandbox.from_name()` works consistently in both dev and prod.
 
 ## Troubleshooting
 
@@ -711,7 +718,7 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflar
 - **Check service health**: Once `modal serve` is running, verify with:
 
   ```bash
-  curl "${DEV_URL}/health_check"
+  curl "${DEV_URL}/health"
   ```
 
 - **Volume persistence**: Remember to write files to `/data`, not `/tmp` or other ephemeral locations

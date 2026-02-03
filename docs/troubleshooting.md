@@ -19,8 +19,8 @@ modal run -m agent_sandbox.app
 # 4. Check gateway health (if running)
 curl "${DEV_URL}/health"
 
-# 5. Check background sandbox health (full service check)
-curl "${DEV_URL}/health_check"
+# 5. Check background sandbox info (internal only)
+curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
 ```
 
 ---
@@ -83,6 +83,28 @@ modal.exception.AuthError: Not authenticated
 modal setup
 # Follow the prompts to authenticate
 ```
+
+---
+
+### "Missing internal auth token" (401)
+
+**Symptoms:**
+- `{"ok": false, "error": "Missing internal auth token"}`
+- HTTP 401 from Modal gateway endpoints (`/query`, `/query_stream`, `/submit`, `/jobs/*`)
+
+**Cause:** Modal endpoints now require `X-Internal-Auth` on all non-health requests.
+
+**Solutions:**
+
+1. **Use the Cloudflare Worker for public traffic** (recommended).
+2. **For internal calls**, include the header:
+   ```bash
+   -H "X-Internal-Auth: <internal-token>"
+   ```
+3. **Ensure the secret exists**:
+   ```bash
+   modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+   ```
 
 ---
 
@@ -172,14 +194,35 @@ sandbox_memory: int = 4096  # Increase from 2048
    modal serve -m agent_sandbox.app
    ```
 
-2. **Use a health check ping** to keep the sandbox warm:
+2. **Use a gateway ping** to keep the sandbox warm:
    ```bash
    # Run every 5 minutes via cron or external service
-   # Use /health_check (not /health) to ensure the sandbox stays active
-   curl "${DEV_URL}/health_check"
+   # /service_info triggers sandbox discovery (internal-only)
+   curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
    ```
 
 3. **Accept cold starts** if traffic is sporadic (saves costs)
+
+---
+
+### Hot-Reload Conflict (Modal serve + Wrangler)
+
+**Symptoms:**
+- `modal serve` crashes or restarts unexpectedly
+- Errors during dev when Wrangler updates its local SQLite state
+
+**Cause:** Wrangler’s dev server can modify its local SQLite state while Modal hot-reload is running, which can cause file contention.
+
+**Workaround:**
+1. Stop both dev servers.
+2. Restart `modal serve -m agent_sandbox.app`.
+3. Restart `wrangler dev` for the Cloudflare worker.
+
+If the issue persists, terminate and recreate the background sandbox:
+```bash
+modal run -m agent_sandbox.app::terminate_service_sandbox
+modal serve -m agent_sandbox.app
+```
 
 ---
 
@@ -321,7 +364,7 @@ _allowed_tools = [
    ```bash
    # Available endpoints:
    GET  /health         # Gateway health
-   GET  /health_check   # Service health (proxied)
+  GET  /health_check   # Service health (internal-only, controller)
    POST /query          # Agent query
    POST /query_stream   # Streaming query
    GET  /service_info   # Sandbox information

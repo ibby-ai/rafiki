@@ -110,6 +110,7 @@ def _options() -> ClaudeAgentOptions:
 ### GET /health_check
 
 **Purpose:** Liveness/readiness probe
+**Internal Only:** Accessible via the sandbox tunnel; not exposed as a public endpoint.
 
 **Response:**
 
@@ -203,6 +204,7 @@ async def query_agent(body: QueryBody, request: Request):
 ### POST /query_stream
 
 **Purpose:** Execute a streaming agent query via Server-Sent Events (SSE)
+**Note:** WebSocket streaming is handled by the Cloudflare control plane; the controller is SSE-only.
 
 **Request Body:**
 
@@ -252,6 +254,12 @@ async def query_agent_stream(body: QueryBody, request: Request):
 ```
 
 ## Security Features
+
+### Internal Auth Middleware (Required)
+
+All non-health endpoints require `X-Internal-Auth` and are intended to be
+called only by `http_app` or the Cloudflare control plane. The token must be the
+raw `payload.signature` value (no `Bearer` prefix).
 
 ### Modal Connect Token Support
 
