@@ -63,6 +63,18 @@ CHILD_SESSION_REGISTRY = modal.Dict.from_name(
 )
 
 
+class JobIdError(ValueError):
+    """Base error for job_id validation and collision failures."""
+
+
+class InvalidJobIdError(JobIdError):
+    """Raised when a provided job_id is not a valid UUID."""
+
+
+class DuplicateJobIdError(JobIdError):
+    """Raised when a provided job_id already exists."""
+
+
 def normalize_job_id(job_id: str | None) -> str | None:
     """Normalize and validate job IDs to prevent injection attacks.
 
@@ -440,6 +452,7 @@ def _normalize_webhook(value: WebhookConfig | dict[str, Any] | None) -> dict[str
 def enqueue_job(
     question: str,
     *,
+    job_id: str | None = None,
     tenant_id: str | None = None,
     user_id: str | None = None,
     schedule_at: int | float | None = None,
@@ -456,8 +469,22 @@ def enqueue_job(
 
     Returns:
         The unique job_id (UUID4) that can be used to track status.
+
+    Raises:
+        InvalidJobIdError: Provided job_id is not a valid UUID.
+        DuplicateJobIdError: Provided job_id already exists in JOB_RESULTS.
     """
-    job_id = str(uuid.uuid4())
+    if job_id is not None:
+        normalized = normalize_job_id(job_id)
+        if not normalized:
+            raise InvalidJobIdError("job_id must be a valid UUID")
+        if JOB_RESULTS.get(normalized):
+            raise DuplicateJobIdError("job_id already exists")
+        job_id = normalized
+    else:
+        job_id = str(uuid.uuid4())
+        while JOB_RESULTS.get(job_id):
+            job_id = str(uuid.uuid4())
     now = int(time.time())
     normalized_schedule_at = _normalize_schedule_at(schedule_at)
     normalized_webhook = _normalize_webhook(webhook)
@@ -2171,473 +2198,6 @@ def get_cancellation_status() -> dict[str, Any]:
         "requested": requested,
         "acknowledged": acknowledged,
         "expired": expired,
-    }
-
-
-# =============================================================================
-# Prompt Queue API
-# =============================================================================
-# Functions for managing per-session follow-up prompt queues.
-#
-# When a session is actively executing a query, follow-up prompts can be
-# queued instead of being rejected. These queued prompts are processed
-# sequentially after the current query completes.
-#
-# Queue Entry Structure:
-#   PROMPT_QUEUE[session_id] = {
-#       "session_id": str,       # Session this queue belongs to
-#       "prompts": [             # List of queued prompts (FIFO order)
-#           {
-#               "prompt_id": str,      # Unique ID for this prompt
-#               "question": str,       # The prompt text
-#               "user_id": str | None, # Who submitted the prompt
-#               "queued_at": int,      # Unix timestamp when queued
-#               "expires_at": int,     # Unix timestamp when prompt expires
-#               "metadata": dict,      # Optional metadata
-#           }
-#       ],
-#       "updated_at": int,       # Unix timestamp of last update
-#   }
-#
-# Queue Lifecycle:
-#   1. Client submits prompt while session is executing
-#   2. Server queues the prompt (if under limit)
-#   3. Agent completes current query
-#   4. Server dequeues next prompt and submits to agent
-#   5. Repeat until queue is empty
-#
-# Usage:
-#   - queue_prompt(): Add a prompt to session queue
-#   - dequeue_prompt(): Get and remove next prompt from queue
-#   - get_session_queue(): View all pending prompts
-#   - clear_session_queue(): Clear all prompts for a session
-#   - get_prompt_queue_status(): Overall queue statistics
-
-PROMPT_QUEUE = modal.Dict.from_name(_settings.prompt_queue_store_name, create_if_missing=True)
-
-# Session execution state tracking.
-# Stores which sessions are currently executing queries.
-#   SESSION_EXECUTION_STATE[session_id] = {
-#       "session_id": str,       # Session ID
-#       "status": str,           # "executing" | "idle"
-#       "started_at": int,       # When execution started
-#       "updated_at": int,       # Last status update
-#   }
-SESSION_EXECUTION_STATE = modal.Dict.from_name(
-    "agent-session-execution-state", create_if_missing=True
-)
-
-
-def mark_session_executing(session_id: str) -> dict[str, Any]:
-    """Mark a session as currently executing a query.
-
-    Called when a query starts to prevent queued prompts from being
-    processed until the current query completes.
-
-    Args:
-        session_id: The session ID that is starting execution.
-
-    Returns:
-        The execution state entry.
-    """
-    now = int(time.time())
-    entry = {
-        "session_id": session_id,
-        "status": "executing",
-        "started_at": now,
-        "updated_at": now,
-    }
-    SESSION_EXECUTION_STATE[session_id] = entry
-    return entry
-
-
-def mark_session_idle(session_id: str) -> dict[str, Any] | None:
-    """Mark a session as idle (not currently executing).
-
-    Called when a query completes to allow queued prompts to be processed.
-
-    Args:
-        session_id: The session ID that finished execution.
-
-    Returns:
-        The updated execution state entry, or None if not found.
-    """
-    now = int(time.time())
-    entry = SESSION_EXECUTION_STATE.get(session_id)
-    if not entry:
-        entry = {"session_id": session_id}
-
-    entry.update(
-        {
-            "status": "idle",
-            "updated_at": now,
-        }
-    )
-    SESSION_EXECUTION_STATE[session_id] = entry
-    return entry
-
-
-def is_session_executing(session_id: str) -> bool:
-    """Check if a session is currently executing a query.
-
-    Args:
-        session_id: The session ID to check.
-
-    Returns:
-        True if session is executing, False otherwise.
-    """
-    entry = SESSION_EXECUTION_STATE.get(session_id)
-    if not entry:
-        return False
-    return entry.get("status") == "executing"
-
-
-def queue_prompt(
-    session_id: str,
-    question: str,
-    user_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Add a follow-up prompt to the session's queue.
-
-    Called when a prompt arrives while the session is executing another query.
-    The prompt is queued and will be processed after the current query completes.
-
-    Args:
-        session_id: The session ID to queue the prompt for.
-        question: The prompt text to queue.
-        user_id: Optional identifier of who submitted the prompt.
-        metadata: Optional metadata to associate with the prompt.
-
-    Returns:
-        Dict with queue status:
-        - queued: True if prompt was queued successfully
-        - prompt_id: Unique ID for this queued prompt
-        - position: Position in queue (1-indexed)
-        - error: Error message if queueing failed
-
-    Raises:
-        None - errors are returned in the response dict.
-
-    Usage:
-        ```python
-        if is_session_executing(session_id):
-            result = queue_prompt(session_id, "follow-up question")
-            if result["queued"]:
-                print(f"Prompt queued at position {result['position']}")
-        ```
-    """
-    now = int(time.time())
-    expiry = now + _settings.prompt_queue_entry_expiry_seconds
-
-    # Get or create queue entry
-    queue_entry = PROMPT_QUEUE.get(session_id) or {
-        "session_id": session_id,
-        "prompts": [],
-        "updated_at": now,
-    }
-
-    # Check queue limit
-    if len(queue_entry["prompts"]) >= _settings.max_queued_prompts_per_session:
-        return {
-            "queued": False,
-            "error": f"Queue limit reached ({_settings.max_queued_prompts_per_session})",
-            "queue_size": len(queue_entry["prompts"]),
-        }
-
-    # Create prompt entry
-    prompt_id = str(uuid.uuid4())
-    prompt_entry = {
-        "prompt_id": prompt_id,
-        "question": question,
-        "user_id": user_id,
-        "queued_at": now,
-        "expires_at": expiry,
-        "metadata": metadata or {},
-    }
-
-    # Add to queue
-    queue_entry["prompts"].append(prompt_entry)
-    queue_entry["updated_at"] = now
-    PROMPT_QUEUE[session_id] = queue_entry
-
-    return {
-        "queued": True,
-        "prompt_id": prompt_id,
-        "position": len(queue_entry["prompts"]),
-        "expires_at": expiry,
-        "queue_size": len(queue_entry["prompts"]),
-    }
-
-
-def dequeue_prompt(session_id: str) -> dict[str, Any] | None:
-    """Get and remove the next prompt from the session's queue.
-
-    Called after a query completes to get the next prompt to process.
-    Expired prompts are skipped and removed.
-
-    Args:
-        session_id: The session ID to dequeue from.
-
-    Returns:
-        The next prompt entry if available, None if queue is empty or all expired.
-        Returns dict with:
-        - prompt_id: Unique ID of the prompt
-        - question: The prompt text
-        - user_id: Who submitted (if provided)
-        - queued_at: When it was queued
-        - metadata: Associated metadata
-
-    Usage:
-        ```python
-        while True:
-            prompt = dequeue_prompt(session_id)
-            if not prompt:
-                break
-            # Process the prompt
-            await process_query(prompt["question"])
-        ```
-    """
-    now = int(time.time())
-    queue_entry = PROMPT_QUEUE.get(session_id)
-    if not queue_entry or not queue_entry.get("prompts"):
-        return None
-
-    prompts = queue_entry["prompts"]
-
-    # Find first non-expired prompt
-    while prompts:
-        prompt = prompts.pop(0)  # FIFO order
-        queue_entry["updated_at"] = now
-        PROMPT_QUEUE[session_id] = queue_entry
-
-        # Check if expired
-        if now > prompt.get("expires_at", 0):
-            continue  # Skip expired prompts
-
-        return prompt
-
-    # All prompts were expired
-    return None
-
-
-def peek_next_prompt(session_id: str) -> dict[str, Any] | None:
-    """View the next prompt in queue without removing it.
-
-    Args:
-        session_id: The session ID to peek at.
-
-    Returns:
-        The next prompt entry if available, None if queue is empty.
-    """
-    now = int(time.time())
-    queue_entry = PROMPT_QUEUE.get(session_id)
-    if not queue_entry or not queue_entry.get("prompts"):
-        return None
-
-    # Find first non-expired prompt
-    for prompt in queue_entry["prompts"]:
-        if now <= prompt.get("expires_at", 0):
-            return prompt
-
-    return None
-
-
-def get_session_queue(session_id: str) -> list[dict[str, Any]]:
-    """Get all pending prompts in a session's queue.
-
-    Returns only non-expired prompts. Expired prompts are filtered out
-    but not removed (they'll be cleaned up on dequeue).
-
-    Args:
-        session_id: The session ID to get queue for.
-
-    Returns:
-        List of prompt entries, each containing:
-        - prompt_id: Unique ID
-        - question: The prompt text
-        - user_id: Who submitted
-        - queued_at: Unix timestamp
-        - expires_at: Unix timestamp
-        - metadata: Associated metadata
-
-    Usage:
-        ```python
-        queue = get_session_queue(session_id)
-        print(f"Pending prompts: {len(queue)}")
-        for i, prompt in enumerate(queue, 1):
-            print(f"{i}. {prompt['question'][:50]}...")
-        ```
-    """
-    now = int(time.time())
-    queue_entry = PROMPT_QUEUE.get(session_id)
-    if not queue_entry or not queue_entry.get("prompts"):
-        return []
-
-    # Filter out expired prompts
-    return [p for p in queue_entry["prompts"] if now <= p.get("expires_at", 0)]
-
-
-def get_queue_size(session_id: str) -> int:
-    """Get the number of non-expired prompts in a session's queue.
-
-    Args:
-        session_id: The session ID to check.
-
-    Returns:
-        Number of pending (non-expired) prompts.
-    """
-    return len(get_session_queue(session_id))
-
-
-def clear_session_queue(session_id: str) -> int:
-    """Clear all prompts from a session's queue.
-
-    Args:
-        session_id: The session ID to clear.
-
-    Returns:
-        Number of prompts that were cleared.
-
-    Usage:
-        ```python
-        cleared = clear_session_queue(session_id)
-        print(f"Cleared {cleared} queued prompts")
-        ```
-    """
-    queue_entry = PROMPT_QUEUE.get(session_id)
-    if not queue_entry or not queue_entry.get("prompts"):
-        return 0
-
-    count = len(queue_entry["prompts"])
-    queue_entry["prompts"] = []
-    queue_entry["updated_at"] = int(time.time())
-    PROMPT_QUEUE[session_id] = queue_entry
-    return count
-
-
-def remove_queued_prompt(session_id: str, prompt_id: str) -> bool:
-    """Remove a specific prompt from the queue by its ID.
-
-    Args:
-        session_id: The session ID.
-        prompt_id: The prompt ID to remove.
-
-    Returns:
-        True if prompt was found and removed, False otherwise.
-    """
-    queue_entry = PROMPT_QUEUE.get(session_id)
-    if not queue_entry or not queue_entry.get("prompts"):
-        return False
-
-    original_len = len(queue_entry["prompts"])
-    queue_entry["prompts"] = [p for p in queue_entry["prompts"] if p.get("prompt_id") != prompt_id]
-
-    if len(queue_entry["prompts"]) < original_len:
-        queue_entry["updated_at"] = int(time.time())
-        PROMPT_QUEUE[session_id] = queue_entry
-        return True
-
-    return False
-
-
-def cleanup_expired_queue_entries() -> dict[str, int]:
-    """Remove expired prompts from all session queues.
-
-    Called periodically to clean up stale queue entries.
-
-    Returns:
-        Dict with cleanup statistics:
-        - sessions_checked: Number of sessions processed
-        - prompts_removed: Total expired prompts removed
-        - empty_queues_cleared: Queues that became empty and were deleted
-
-    Usage:
-        ```python
-        # In scheduled maintenance
-        stats = cleanup_expired_queue_entries()
-        print(f"Removed {stats['prompts_removed']} expired prompts")
-        ```
-    """
-    now = int(time.time())
-    sessions_checked = 0
-    prompts_removed = 0
-    empty_queues_cleared = 0
-
-    try:
-        for session_id, queue_entry in list(PROMPT_QUEUE.items()):
-            sessions_checked += 1
-            if not queue_entry.get("prompts"):
-                continue
-
-            original_len = len(queue_entry["prompts"])
-            queue_entry["prompts"] = [
-                p for p in queue_entry["prompts"] if now <= p.get("expires_at", 0)
-            ]
-
-            removed = original_len - len(queue_entry["prompts"])
-            if removed > 0:
-                prompts_removed += removed
-                if not queue_entry["prompts"]:
-                    # Queue is now empty, delete it
-                    try:
-                        del PROMPT_QUEUE[session_id]
-                        empty_queues_cleared += 1
-                    except KeyError:
-                        pass
-                else:
-                    queue_entry["updated_at"] = now
-                    PROMPT_QUEUE[session_id] = queue_entry
-    except Exception:
-        pass
-
-    return {
-        "sessions_checked": sessions_checked,
-        "prompts_removed": prompts_removed,
-        "empty_queues_cleared": empty_queues_cleared,
-    }
-
-
-def get_prompt_queue_status() -> dict[str, Any]:
-    """Get current status of prompt queues across all sessions.
-
-    Returns:
-        Dict with queue statistics:
-        - sessions_with_queues: Number of sessions that have queues
-        - total_queued_prompts: Total prompts across all queues
-        - expired_prompts: Prompts past their expiry
-        - max_queue_size: Configured limit per session
-        - entry_expiry_seconds: Configured expiry time
-
-    Usage:
-        ```python
-        status = get_prompt_queue_status()
-        print(f"Total queued prompts: {status['total_queued_prompts']}")
-        ```
-    """
-    now = int(time.time())
-    sessions_with_queues = 0
-    total_queued = 0
-    expired = 0
-
-    try:
-        for _, queue_entry in PROMPT_QUEUE.items():
-            if queue_entry.get("prompts"):
-                sessions_with_queues += 1
-                for prompt in queue_entry["prompts"]:
-                    total_queued += 1
-                    if now > prompt.get("expires_at", 0):
-                        expired += 1
-    except Exception:
-        pass
-
-    return {
-        "sessions_with_queues": sessions_with_queues,
-        "total_queued_prompts": total_queued,
-        "active_prompts": total_queued - expired,
-        "expired_prompts": expired,
-        "max_queue_size": _settings.max_queued_prompts_per_session,
-        "entry_expiry_seconds": _settings.prompt_queue_entry_expiry_seconds,
     }
 
 
