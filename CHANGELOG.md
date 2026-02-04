@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-04
+
+### Added
+
+- Cloudflare-first control plane as the primary public API surface
+- KV-backed session key mapping (`session_key:<scope>:<session_key>` → `session_id`)
+- Edge rate limiting via Cloudflare Rate Limiting binding
+- Expanded Cloudflare documentation for auth, WebSockets, and operations
+
+### Changed
+
+- Public traffic now routes through Cloudflare Workers + Durable Objects
+- Modal gateway endpoints are internal-only and require `X-Internal-Auth`
+- Updated documentation for Phase 3 rollout status and Cloudflare usage
+
+### Breaking Changes
+
+- Clients must call the Cloudflare Worker URL for public API requests
+- Direct access to Modal endpoints without `X-Internal-Auth` returns 401
+- Session resumption should prefer `session_id` over `session_key` for stability
+- Modal prompt queue endpoints removed; use Cloudflare `/session/{id}/queue`
+
 ## [0.5.0] - 2026-01-07
 
 ### Added

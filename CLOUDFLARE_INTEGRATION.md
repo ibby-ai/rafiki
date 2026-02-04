@@ -53,7 +53,8 @@ This integration adds Cloudflare Workers + Durable Objects as a control plane la
 1. **Worker**: API gateway, authentication, routing
 2. **SessionAgent DO**: Per-session state, messages, prompt queue (SQLite)
 3. **EventBus DO**: Real-time WebSocket fan-out for multiplayer
-4. **KV**: Session cache, rate limits
+4. **KV**: Session key mapping cache (scoped keys)
+5. **Rate Limiter**: Cloudflare Rate Limiting binding for edge throttling
 
 ### Modal Layer (Existing, Unchanged)
 
@@ -138,29 +139,17 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflar
 
 ## Migration Path
 
-### Phase 0: Setup (Week 1)
+### Phase 1-2: Canary + Rollout (Complete)
 
-- Deploy Cloudflare infrastructure
-- Add Modal auth middleware
-- Test in staging
+- Route traffic gradually through Cloudflare
+- Validate WebSocket streaming and session persistence
+- Keep Modal gateway internal-only
 
-### Phase 1: Canary (Week 2-3)
+### Phase 3: Cloudflare-first (Complete)
 
-- Route 10% traffic to Cloudflare
-- Monitor closely
-- Keep Modal gateway as fallback
-
-### Phase 2: Rollout (Week 4-6)
-
-- Gradually increase: 25% → 50% → 90%
-- Enable WebSocket features
-- Migrate active sessions
-
-### Phase 3: Complete (Week 7-8)
-
-- Route 100% to Cloudflare
-- Remove Modal gateway code
-- Archive old configs
+- Route 100% of public traffic to Cloudflare
+- Enforce client authentication at the edge
+- Require `X-Internal-Auth` for Modal endpoints
 
 ### Phase 4: Optimize (Ongoing)
 
@@ -237,6 +226,15 @@ wscat -c "wss://your-worker.workers.dev/query_stream"
 ### Q: Do I need to rewrite my Modal code?
 
 **A:** No. All Modal sandbox execution logic remains unchanged. Only add authentication middleware.
+
+## Breaking Changes (Phase 3)
+
+- **Public entry point moved to Cloudflare**: clients must call the Worker URL.
+- **Modal gateway is internal-only**: direct calls require `X-Internal-Auth`.
+- **Authorization required** on Worker endpoints (`/health` is the only exception).
+- **Session resumption**: `session_key` is mapped to `session_id` in KV using
+  `session_key:<scope>:<session_key>` keys (default TTL 30 days). Clients should
+  persist `session_id` for best stability.
 
 ### Q: Are there breaking changes to the API?
 

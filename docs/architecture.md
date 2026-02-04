@@ -119,16 +119,15 @@ def http_app():
 - Results stored in JOB_RESULTS Modal Dict
 - Optional cron scheduling via `job_queue_cron` setting
 
-### 4. Modal Dicts (SESSION_STORE / JOB_RESULTS)
+### 4. Modal Dicts (JOB_RESULTS only)
 
 **What they do:**
-- **SESSION_STORE**: Maps `session_key` → last `session_id` for resumption
 - **JOB_RESULTS**: Stores job metadata and results by `job_id`
 
 **Key characteristics:**
 - Distributed key-value storage
 - Persists across sandbox restarts
-- Enables session continuity and job tracking
+- Enables job tracking (session continuity now handled by Cloudflare KV)
 
 ### 5. Agent SDK Sandbox (svc-runner-8001)
 

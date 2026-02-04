@@ -18,14 +18,14 @@ flowchart TB
 
         subgraph DurableObjects["Durable Objects"]
             SessionDO["SessionAgent DO<br/>- Session state<br/>- Messages<br/>- Prompt queue"]
-            EventBusDO["EventBus DO<br/>- WebSocket fan-out<br/>- Presence tracking (planned, TODO)<br/>- Notifications"]
+            EventBusDO["EventBus DO<br/>- WebSocket fan-out<br/>- Presence tracking<br/>- Notifications"]
         end
 
-        KV["KV Namespace (planned, TODO)<br/>- Session cache<br/>- Rate limits"]
+        KV["KV Namespace<br/>- Session cache"]
     end
 
     subgraph Modal["Modal Backend"]
-        Gateway["HTTP Gateway<br/>(Optional)"]
+        Gateway["HTTP Gateway<br/>(Internal only)"]
 
         SandboxMgr["Sandbox Lifecycle<br/>(app.py)<br/>- Create/Reuse<br/>- Tunnel discovery<br/>- Health checks"]
 
@@ -53,7 +53,7 @@ flowchart TB
 
     Worker --> SessionDO
     Worker --> EventBusDO
-    Worker -.planned (TODO).-> KV
+    Worker --> KV
 
     SessionDO --> SandboxMgr
     SessionDO --> EventBusDO
@@ -83,15 +83,15 @@ flowchart TB
 **Responsibilities:**
 
 - Accept incoming requests and route to DOs or Modal backend
-- Client authentication (Bearer tokens, API keys, JWT) **planned (TODO)**
+- Client authentication (session tokens)
 - Route requests to appropriate Durable Objects
 - Proxy job/artifact requests to Modal backend
 - Handle CORS and security headers
-- Rate limiting (via KV) **planned (TODO)**
+- Rate limiting (Cloudflare Rate Limiting binding)
 
 **Current auth status:**
 
-- Client `Authorization` headers are accepted but not enforced yet
+- Client `Authorization` is enforced on all public endpoints
 - Internal `X-Internal-Auth` is enforced on Modal endpoints
 
 **Endpoints:**
@@ -166,8 +166,8 @@ execution_state (key, value, updated_at)
 - Tag connections by user, tenant, session IDs
 - Broadcast events from SessionAgent DOs
 - Filter events based on subscriptions
-- Track user presence (planned, TODO)
-- Clean up stale connections (via alarms, planned, TODO)
+- Track user presence
+- Clean up stale connections (via alarms)
 
 **Durable Storage:**
 
@@ -189,7 +189,7 @@ execution_state (key, value, updated_at)
 
 - One DO per `tenant_id` or `user_id`
 - Persists connection metadata across hibernation
-- Alarm-based cleanup every 1 minute (planned, TODO)
+- Alarm-based cleanup every 1 minute
 
 **Scalability:**
 
@@ -201,26 +201,20 @@ execution_state (key, value, updated_at)
 
 #### 4. KV Namespace
 
-**Purpose:** Edge caching and rate limiting (planned, TODO)
+**Purpose:** Edge caching for session key → session ID mapping
 
 **Responsibilities:**
 
-- Cache `session_key` → `session_id` mappings (TTL: 24h)
-- Rate limit counters (per user/IP)
-- API key → user context lookups
-- Pre-warm correlation IDs
+- Cache `session_key` → `session_id` mappings (default TTL: 30 days)
+- Pre-warm correlation IDs (optional)
 
 **Example Keys:**
 
-- `skey:user-123-session` → `sess_abc123`
-- `ratelimit:user-123:1234567` → `42`
-- `apikey:sk_live_abc` → `{"user_id": "user-123", ...}`
+- `session_key:tenant-456:user-123-session` → `sess_abc123`
 
 **TTLs:**
 
-- Session keys: 24 hours
-- Rate limits: 1 minute (rolling window)
-- API keys: No expiration (manual invalidation)
+- Session keys: 30 days (configurable via `SESSION_KEY_TTL_SECONDS`)
 
 ---
 
@@ -343,8 +337,8 @@ sequenceDiagram
     Client->>Worker: POST /query
     Note over Client,Worker: {"question": "What is 2+2?"}
 
-    Worker->>Worker: Validate token (planned, TODO)
-    Worker->>Worker: Resolve session_id (session_id || session_key || random)
+    Worker->>Worker: Validate token
+    Worker->>Worker: Resolve session_id (session_id || KV(session_key) || random)
 
     Worker->>SessionDO: POST /query
 
@@ -529,14 +523,14 @@ sequenceDiagram
 │                     Authentication Flow                      │
 └─────────────────────────────────────────────────────────────┘
 
-Client Token (Session Token / API Key / JWT)
+Client Token (Session Token)
     │
     ▼
 ┌──────────────────────────────────────────────┐
 │ Cloudflare Worker                            │
 │ - Validate token signature                   │
 │ - Check expiration                           │
-│ - Extract user_id, tenant_id, permissions    │
+│ - Extract user_id, tenant_id                 │
 └──────────────────┬───────────────────────────┘
                    │ Context headers
                    ▼
@@ -656,19 +650,18 @@ Client Token (Session Token / API Key / JWT)
 
 ---
 
-### Phase 3: Full Cutover (Week 7-8)
+### Phase 3: Cloudflare-First Cutover (Complete)
 
-- Route 100% traffic to Cloudflare
-- Deprecate Modal `@modal.asgi_app()` gateway
-- Keep Modal backend for execution only
-- Archive old deployment configs
+- Route 100% of public traffic to Cloudflare
+- Keep Modal gateway internal-only (requires `X-Internal-Auth`)
+- Modal remains execution backend only
+- Session state and prompt queues fully owned by Cloudflare DOs
 
-**Cleanup:**
+**Cleanup (Completed):**
 
-- Remove Modal gateway code (`agent_sandbox/app.py:http_app`)
-- Remove Modal Dicts for session state (`SESSION_STORE`, `PROMPT_QUEUE`)
-- Update all documentation
-- Announce to users
+- Remove Modal Dict session state and prompt queue usage
+- Enforce internal auth middleware on all Modal non-health endpoints
+- Update documentation and deployment configs
 
 ---
 
@@ -837,7 +830,7 @@ logger.info(
 ### Short-term (3-6 months)
 
 - [ ] Add caching layer (KV for frequent queries)
-- [ ] Implement rate limiting per user/tenant
+- [x] Implement rate limiting per user/tenant (Rate Limiting binding)
 - [ ] Add presence tracking UI (who's editing)
 - [ ] Support voice input/output (WebRTC)
 - [ ] Mobile SDKs (iOS, Android)

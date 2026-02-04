@@ -96,6 +96,7 @@ time curl -s https://your-worker.workers.dev/health
 
 **Request Headers:**
 ```
+Authorization: Bearer <session_token>
 Content-Type: application/json
 ```
 
@@ -115,12 +116,13 @@ Content-Type: application/json
 | `question` | string | (required) | The question to ask the agent |
 | `agent_type` | string | `"default"` | Agent type: `"default"`, `"marketing"`, `"research"` |
 | `session_id` | string | `null` | Resume from a specific session |
-| `session_key` | string | `null` | Session key alias for `session_id` (no KV lookup yet in Cloudflare) |
+| `session_key` | string | `null` | Session key mapped to `session_id` via KV (`session_key:<scope>:<session_key>`) |
 | `fork_session` | boolean | `false` | Fork session instead of continuing |
 
 **Request Example:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the capital of Canada?"}'
 ```
@@ -129,11 +131,13 @@ curl -X POST https://your-worker.workers.dev/query \
 ```bash
 # Marketing agent for content creation
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Write a tagline for a productivity app", "agent_type": "marketing"}'
 
 # Research agent for multi-agent investigation
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Research AI agent frameworks", "agent_type": "research"}'
 ```
@@ -141,6 +145,7 @@ curl -X POST https://your-worker.workers.dev/query \
 **Session Resumption Example:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Continue the plan", "session_key": "user-123"}'
 ```
@@ -181,7 +186,7 @@ curl -X POST https://your-worker.workers.dev/query \
 
 **Session fields:**
 - `session_id`: Resume from a specific session returned by a prior response.
-- `session_key`: Cloudflare Worker treats this as a session_id alias (no KV lookup yet). Modal gateway uses a server-side session store.
+- `session_key`: Cloudflare Worker resolves this via KV (`session_key:<scope>:<session_key>`) and persists the mapping (default TTL 30 days).
 - `fork_session`: When resuming, start a new branched session instead of continuing the original.
 
 **Status Codes:**
@@ -199,6 +204,7 @@ curl -X POST https://your-worker.workers.dev/query \
 **Example with Error Handling:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Explain Python"}' \
   -w "\nHTTP Status: %{http_code}\n"
@@ -211,6 +217,9 @@ curl -X POST https://your-worker.workers.dev/query \
 #### Cloudflare Worker (WebSocket, Public)
 
 **Endpoint:** `GET /query_stream` (WebSocket upgrade required)
+
+Authentication is required via `Authorization: Bearer <session_token>` header
+or `token=<session_token>` query parameter.
 
 **Request:** Open a WebSocket and send the query as the first message:
 
@@ -227,7 +236,7 @@ curl -X POST https://your-worker.workers.dev/query \
 
 **Example (wscat):**
 ```bash
-wscat -c wss://your-worker.workers.dev/query_stream
+wscat -c "wss://your-worker.workers.dev/query_stream?token=<session_token>"
 > {"question":"Explain quantum computing in detail"}
 ```
 
@@ -255,6 +264,7 @@ wscat -c wss://your-worker.workers.dev/query_stream
 
 **Request Headers:**
 ```
+Authorization: Bearer <session_token>
 Content-Type: application/json
 ```
 
@@ -334,6 +344,7 @@ Content-Type: application/json
 **Request Example:**
 ```bash
 curl -X POST https://your-worker.workers.dev/submit \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Summarize the latest earnings report", "tenant_id": "acme", "user_id": "user-123"}'
 ```
@@ -342,6 +353,7 @@ curl -X POST https://your-worker.workers.dev/submit \
 ```bash
 # Submit a marketing content job
 curl -X POST https://your-worker.workers.dev/submit \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "question": "Write a comprehensive blog post about AI productivity tools",
@@ -390,7 +402,8 @@ curl -X POST https://your-worker.workers.dev/submit \
 
 **Request Example:**
 ```bash
-curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response (Queued):**
@@ -469,7 +482,8 @@ curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
 
 **Request Example:**
 ```bash
-curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts
+curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -502,7 +516,8 @@ curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/a
 
 **Request Example:**
 ```bash
-curl -O https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts/report.md
+curl -O https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts/report.md \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -523,7 +538,8 @@ curl -O https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12
 
 **Request Example:**
 ```bash
-curl -X DELETE https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+curl -X DELETE https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -543,7 +559,61 @@ curl -X DELETE https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1f
 
 ---
 
-### 9. GET /service_info - Service Information
+### 9. /session/{session_id}/queue - Prompt Queue (Cloudflare)
+
+**Purpose:** Manage queued follow-up prompts for a session
+
+**Endpoints:**
+
+- `GET /session/{session_id}/queue` - List queued prompts
+- `POST /session/{session_id}/queue` - Queue a prompt
+- `DELETE /session/{session_id}/queue` - Clear the queue
+- `DELETE /session/{session_id}/queue/{prompt_id}` - Remove a single prompt
+
+**Request Headers:**
+```
+Authorization: Bearer <session_token>
+Content-Type: application/json
+```
+
+**Request Example (queue prompt):**
+```bash
+curl -X POST https://your-worker.workers.dev/session/sess_abc123/queue \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Follow-up question","user_id":"user-123"}'
+```
+
+**Response (list queue):**
+```json
+{
+  "ok": true,
+  "session_id": "sess_abc123",
+  "is_executing": false,
+  "queue_size": 1,
+  "max_queue_size": 10,
+  "prompts": [
+    {
+      "prompt_id": "prompt-uuid",
+      "question": "Follow-up question",
+      "user_id": "user-123",
+      "queued_at": 1735840100,
+      "expires_at": 1735843700,
+      "position": 1
+    }
+  ]
+}
+```
+
+**Status Codes:**
+- `200 OK`: Success
+- `401 Unauthorized`: Missing or invalid authentication token
+- `404 Not Found`: Session not found
+- `429 Too Many Requests`: Queue limit reached
+
+---
+
+### 10. GET /service_info - Service Information
 
 **Purpose:** Get information about the background sandbox service
 
@@ -553,7 +623,8 @@ curl -X DELETE https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1f
 
 **Request:**
 ```bash
-curl https://acme-corp--test-sandbox-http-app.modal.run/service_info
+curl https://acme-corp--test-sandbox-http-app.modal.run/service_info \
+  -H "X-Internal-Auth: <internal-token>"
 ```
 
 **Response:**
@@ -596,12 +667,13 @@ function extractText(messages) {
     .join('\n');
 }
 
-async function askAgent(question, baseUrl) {
+async function askAgent(question, baseUrl, sessionToken) {
   try {
     const response = await fetch(`${baseUrl}/query`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
       },
       body: JSON.stringify({ question })
     });
@@ -620,15 +692,18 @@ async function askAgent(question, baseUrl) {
 
 // Usage
 const baseUrl = 'https://your-worker.workers.dev';
-const answer = await askAgent("What is Python?");
+const sessionToken = '<session_token>';
+const answer = await askAgent("What is Python?", baseUrl, sessionToken);
 console.log(answer);
 ```
 
 ### JavaScript/WebSocket (Streaming, Cloudflare)
 
 ```javascript
-function streamAgentWebSocket(question, baseUrl, onEvent) {
-  const ws = new WebSocket(`${baseUrl.replace('https://', 'wss://')}/query_stream`);
+function streamAgentWebSocket(question, baseUrl, sessionToken, onEvent) {
+  const ws = new WebSocket(
+    `${baseUrl.replace('https://', 'wss://')}/query_stream?token=${sessionToken}`
+  );
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ question }));
@@ -647,7 +722,8 @@ function streamAgentWebSocket(question, baseUrl, onEvent) {
 
 // Usage
 const baseUrl = 'https://your-worker.workers.dev';
-streamAgentWebSocket("Explain machine learning", baseUrl, (event) => {
+const sessionToken = '<session_token>';
+streamAgentWebSocket("Explain machine learning", baseUrl, sessionToken, (event) => {
   if (event.type === 'assistant_message') {
     process.stdout.write(event.data.content);
   }
@@ -742,11 +818,15 @@ streamAgentResponse(
 ```javascript
 // Example server action or API route usage
 const baseUrl = 'https://your-worker.workers.dev';
+const sessionToken = process.env.SESSION_TOKEN ?? '<session_token>';
 
 export async function submitJob(question, userId) {
   const response = await fetch(`${baseUrl}/submit`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${sessionToken}`,
+    },
     body: JSON.stringify({
       question,
       tenant_id: 'acme',
@@ -891,8 +971,14 @@ from typing import Optional
 class AgentClient:
     """Client with session management for multi-turn conversations."""
 
-    def __init__(self, base_url: str, session_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        session_token: str,
+        session_key: Optional[str] = None,
+    ):
         self.base_url = base_url
+        self.session_token = session_token
         self.session_key = session_key
         self.last_session_id = None
 
@@ -908,7 +994,7 @@ class AgentClient:
         """
         payload = {"question": question}
 
-        # Use session_key (Cloudflare treats as session_id alias; Modal can map server-side)
+        # Use session_key (Cloudflare resolves via KV mapping)
         if self.session_key:
             payload["session_key"] = self.session_key
         # Or use explicit session_id from prior response
@@ -921,7 +1007,8 @@ class AgentClient:
         response = requests.post(
             f"{self.base_url}/query",
             json=payload,
-            timeout=120
+            timeout=120,
+            headers={"Authorization": f"Bearer {self.session_token}"},
         )
         response.raise_for_status()
         result = response.json()
@@ -930,9 +1017,10 @@ class AgentClient:
         self.last_session_id = result.get("session_id")
         return result
 
-# Usage with session_key (Cloudflare alias behavior)
+# Usage with session_key (KV-backed mapping)
 client = AgentClient(
     base_url="https://your-worker.workers.dev",
+    session_token="session-token",
     session_key="user-123"
 )
 
@@ -954,6 +1042,7 @@ print(result["summary"]["text"])
 **Simple Query:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Hello, how are you?"}'
 ```
@@ -961,6 +1050,7 @@ curl -X POST https://your-worker.workers.dev/query \
 **Query with Pretty JSON Output:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is Python?"}' \
   | jq '.'
@@ -968,13 +1058,14 @@ curl -X POST https://your-worker.workers.dev/query \
 
 **Streaming Query (WebSocket):**
 ```bash
-wscat -c wss://your-worker.workers.dev/query_stream
+wscat -c "wss://your-worker.workers.dev/query_stream?token=<session_token>"
 > {"question":"Explain quantum computing"}
 ```
 
 **Save Response to File:**
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Write a Python tutorial"}' \
   -o response.json
@@ -993,6 +1084,7 @@ function AgentQuery() {
   const [summary, setSummary] = useState(null);
 
   const baseUrl = 'https://your-worker.workers.dev';
+  const sessionToken = '<session_token>';
 
   const extractText = (messages) =>
     messages
@@ -1009,7 +1101,10 @@ function AgentQuery() {
     try {
       const res = await fetch(`${baseUrl}/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
         body: JSON.stringify({ question })
       });
 
@@ -1027,7 +1122,7 @@ function AgentQuery() {
     setStreaming(true);
     setResponse('');
 
-    const wsUrl = `${baseUrl.replace('https://', 'wss://')}/query_stream`;
+    const wsUrl = `${baseUrl.replace('https://', 'wss://')}/query_stream?token=${sessionToken}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
@@ -1085,8 +1180,13 @@ export default AgentQuery;
 
 ### Cloudflare Worker (Public)
 
-The Worker accepts `Authorization: Bearer <token>` today, but **does not enforce** it yet.
-Client auth enforcement is planned. TODO: enforce client auth in the Worker.
+All public endpoints (everything except `GET /health`) require
+`Authorization: Bearer <token>`. Phase 3 supports **session tokens only**,
+signed with `SESSION_SIGNING_SECRET`. WebSocket connections may pass the token
+as a `token` query parameter.
+
+All request examples in this document should be considered to include the
+`Authorization` header, even when omitted for brevity.
 
 ```bash
 curl -X POST https://your-worker.workers.dev/query \
@@ -1106,6 +1206,13 @@ curl -X POST https://<org>--test-sandbox-http-app.modal.run/query \
   -H "X-Internal-Auth: <internal-token>" \
   -d '{"question": "..."}'
 ```
+
+### Rate Limiting
+
+Edge rate limits are enforced via the Cloudflare Rate Limiting binding
+(`RATE_LIMITER`). Exceeding limits returns `429 Too Many Requests` with a JSON
+error body. Defaults are configured in `wrangler.jsonc` and should be tuned per
+deployment.
 
 ### Optional Modal Auth (Internal)
 

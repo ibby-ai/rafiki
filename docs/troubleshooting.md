@@ -16,8 +16,8 @@ modal secret list
 # 3. Test a simple run
 modal run -m agent_sandbox.app
 
-# 4. Check gateway health (if running)
-curl "${DEV_URL}/health"
+# 4. Check Cloudflare control plane health
+curl "https://<your-worker>.workers.dev/health"
 
 # 5. Check background sandbox info (internal only)
 curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
@@ -103,10 +103,55 @@ modal setup
    ```
 3. **Ensure the secret exists**:
    ```bash
-   modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
-   ```
+  modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+```
 
 ---
+
+### "Unauthorized" from Cloudflare Worker (401)
+
+**Symptoms:**
+- `{"ok": false, "error": "Unauthorized"}`
+- HTTP 401 on Worker endpoints (except `/health`)
+
+**Cause:** Missing or invalid session token (`Authorization: Bearer <token>` or `token=<token>` for WebSockets).
+
+**Solutions:**
+
+1. **Include the Authorization header** on all public requests.
+2. **Verify session tokens** are signed with `SESSION_SIGNING_SECRET`.
+
+---
+
+### "Too Many Requests" from Cloudflare Worker (429)
+
+**Symptoms:**
+- `{"ok": false, "error": "Rate limit exceeded"}`
+- HTTP 429 responses under load
+
+**Cause:** Edge rate limits exceeded for the user/session.
+
+**Solutions:**
+
+1. Reduce request frequency or batch calls.
+2. Confirm rate limit thresholds in Cloudflare configuration.
+3. Validate the Rate Limiting binding (`RATE_LIMITER`) is configured in `wrangler.jsonc`.
+
+---
+
+### "Session not found" when using `session_key`
+
+**Symptoms:**
+- New session created instead of resuming
+- `session_id` changes unexpectedly across requests
+
+**Cause:** KV mapping for `session_key` is missing or expired.
+
+**Solutions:**
+
+1. Persist and reuse the returned `session_id` when possible.
+2. Ensure `SESSION_CACHE` is configured and reachable.
+3. Re-send `session_key` to rebuild the mapping (default TTL 30 days).
 
 ## Sandbox Issues
 
