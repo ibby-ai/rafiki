@@ -69,6 +69,8 @@ def _build_app() -> FastAPI:
 def _reset_settings(monkeypatch, **env: str) -> None:
     for key in ["INTERNAL_AUTH_SECRET"]:
         monkeypatch.delenv(key, raising=False)
+    if "INTERNAL_AUTH_SECRET" not in env:
+        monkeypatch.setenv("INTERNAL_AUTH_SECRET", "")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
