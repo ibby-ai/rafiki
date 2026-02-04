@@ -23,20 +23,36 @@
     ]
   },
   "vars": {
-    "MODAL_API_BASE_URL": "https://api.modal.com/v1",
-    "ENVIRONMENT": "development"
+    "MODAL_API_BASE_URL": "https://your-org--app-name.modal.run",
+    "ENVIRONMENT": "development",
+    "SESSION_KEY_TTL_SECONDS": "2592000",
+    "MAX_QUEUED_PROMPTS_PER_SESSION": "10",
+    "PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS": "3600"
+  },
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": {
+          "limit": 60,
+          "period": 60
+        }
+      }
+    ]
   },
   "kv_namespaces": [
     {
       "binding": "SESSION_CACHE",
-      "id": "placeholder_will_be_generated"
+      "id": "replace-with-session-cache-id"
     }
   ],
   // Secrets to be added via wrangler secret put:
   // - MODAL_TOKEN_ID: Modal API token ID
   // - MODAL_TOKEN_SECRET: Modal API token secret
   // - INTERNAL_AUTH_SECRET: Internal signing secret for Worker <-> Modal auth
-  // - SESSION_SIGNING_SECRET: Secret for signing session tokens
+  // - SESSION_SIGNING_SECRET: Secret for signing session tokens (client auth)
   "migrations": [
     {
       "tag": "v1",

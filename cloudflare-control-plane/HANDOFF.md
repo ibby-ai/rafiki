@@ -1,9 +1,9 @@
 # Cloudflare Durable Objects Integration - Technical Handoff
 
-**Date**: February 2, 2025  
+**Date**: February 4, 2026  
 **Project**: Agent Sandbox - Cloudflare Control Plane  
-**Status**: Implementation Complete, Awaiting Senior Engineer Review  
-**Priority**: High - Production Architecture Decision
+**Status**: Phase 3 Cloudflare-first (Production)  
+**Priority**: High - Operational Readiness
 
 ---
 
@@ -82,11 +82,12 @@ We've implemented a **Cloudflare Workers + Durable Objects control plane** as an
 
 - **Purpose**: Edge API gateway and request router
 - **Responsibilities**:
-  - Authenticate requests (session tokens, API keys, JWT)
-  - Resolve session IDs (explicit, cached, or create new)
+  - Enforce client auth (session tokens only)
+  - Resolve session IDs (explicit, scoped KV session_key mapping, or create new)
   - Route to appropriate Durable Objects
   - Proxy job/artifact requests to Modal
   - CORS and security headers
+  - Edge rate limiting via the Rate Limiting binding
 - **Scalability**: Stateless, auto-scales globally at 300+ locations
 
 #### 2. **SessionAgent DO** ([`src/durable-objects/SessionAgent.ts`](src/durable-objects/SessionAgent.ts))
@@ -222,12 +223,11 @@ CREATE TABLE messages (id TEXT, role TEXT, content TEXT, created_at INT);
 CREATE TABLE prompt_queue (id TEXT, question TEXT, queued_at INT, priority INT);
 ```
 
-**Migration Plan** (4 phases, 8 weeks):
+**Migration Plan (Phase 3 Complete):**
 
-1. **Phase 1 (Week 1-2)**: Deploy Cloudflare, route 10% canary traffic
-2. **Phase 2 (Week 3-4)**: Dual-write (Modal Dict + DO), increase to 50%
-3. **Phase 3 (Week 5-6)**: Read from DO, fallback to Dict, increase to 90%
-4. **Phase 4 (Week 7-8)**: 100% DO, deprecate Modal Dict code
+1. **Phase 1-2**: Canary + dual-write
+2. **Phase 3**: Cloudflare-first, DO is source of truth
+3. **Phase 4**: Remove Modal Dict fallbacks (in progress)
 
 **Implementation**: See [`INTEGRATION.md`](INTEGRATION.md) for detailed mapping.
 
@@ -276,6 +276,17 @@ class Settings(BaseSettings):
 
 ---
 
+## Breaking Changes (Phase 3)
+
+- **Public entry point moved**: Clients must use the Cloudflare Worker URL for all public API calls.
+- **Modal gateway is internal-only**: Direct calls to Modal endpoints require `X-Internal-Auth`.
+- **Authorization required**: All Worker endpoints except `GET /health` require `Authorization: Bearer <token>`.
+- **Session resumption**: `session_key` maps to `session_id` via KV using
+  `session_key:<scope>:<session_key>` keys (default TTL 30 days). Persist
+  `session_id` client-side for stability.
+- **Prompt queue migration**: Modal prompt queue endpoints are removed; use
+  `/session/{id}/queue` on the Cloudflare Worker instead.
+
 ## Review Focus Areas
 
 ### 1. Architecture & Design Decisions
@@ -285,8 +296,8 @@ class Settings(BaseSettings):
 - ✅ Is the separation of concerns correct? (Cloudflare = state, Modal = compute)
 - ✅ Are we using Durable Objects appropriately? (1 DO per session vs per tenant)
 - ✅ Should we use Cloudflare KV more aggressively for caching?
-- ⚠️ Is the authentication scheme secure enough for production?
-- ⚠️ Should we implement rate limiting at the edge or in DOs?
+- ✅ Authentication and rate limiting are enforced at the edge.
+- ⚠️ Evaluate rate limit thresholds and token rotation cadence.
 
 **Trade-offs**:
 

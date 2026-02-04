@@ -22,6 +22,7 @@ import type {
   Message,
   ModalBackendRequest,
   ModalBackendResponse,
+  PromptQueueEntry,
   QueryCompleteMessage,
   QueryRequest,
   QueryResponse,
@@ -34,6 +35,7 @@ import type {
 export class SessionAgent extends DurableObject<Env> {
   private sessionState: SessionState | null = null;
   private webSockets: Set<WebSocket> = new Set();
+  private queueDrainInProgress = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -165,6 +167,27 @@ export class SessionAgent extends DurableObject<Env> {
     }
   }
 
+  private getQueueConfig(): { maxQueueSize: number; expirySeconds: number } {
+    const maxQueueRaw = this.env.MAX_QUEUED_PROMPTS_PER_SESSION;
+    const expiryRaw = this.env.PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS;
+
+    const maxQueueSize = Number.isFinite(Number(maxQueueRaw))
+      ? Math.max(1, Number(maxQueueRaw))
+      : 10;
+    const expirySeconds = Number.isFinite(Number(expiryRaw))
+      ? Math.max(60, Number(expiryRaw))
+      : 3600;
+
+    return { maxQueueSize, expirySeconds };
+  }
+
+  private async pruneExpiredQueueEntries(): Promise<void> {
+    const { expirySeconds } = this.getQueueConfig();
+    const cutoff = Date.now() - expirySeconds * 1000;
+    const sql = this.ctx.storage.sql;
+    sql.exec(`DELETE FROM prompt_queue WHERE queued_at < ?`, cutoff);
+  }
+
   private extractSessionInfoFromUrl(request: Request): {
     sessionId?: string;
     sessionKey?: string;
@@ -247,11 +270,23 @@ export class SessionAgent extends DurableObject<Env> {
     
     // REST API endpoints
     try {
+      if (path.startsWith("/queue/")) {
+        return this.handleQueueItem(request, path);
+      }
       switch (path) {
         case "/query":
           return this.handleQuery(request);
         case "/queue":
-          return this.handleQueuePrompt(request);
+          if (request.method === "GET") {
+            return this.handleGetQueue(request);
+          }
+          if (request.method === "DELETE") {
+            return this.handleClearQueue(request);
+          }
+          if (request.method === "POST") {
+            return this.handleQueuePrompt(request);
+          }
+          return new Response("Method not allowed", { status: 405 });
         case "/state":
           return this.handleGetState(request);
         case "/messages":
@@ -313,6 +348,17 @@ export class SessionAgent extends DurableObject<Env> {
     try {
       const data = typeof message === "string" ? message : new TextDecoder().decode(message);
       const msg = JSON.parse(data) as Record<string, unknown>;
+
+      if (msg.type === "stop") {
+        const stopped = await this.stopExecution();
+        ws.send(JSON.stringify({
+          type: "execution_state",
+          session_id: this.sessionState?.session_id || "",
+          timestamp: Date.now(),
+          data: { event: "stop", ok: stopped }
+        }));
+        return;
+      }
 
       // Handle ping/pong
       if (msg.type === "ping") {
@@ -426,7 +472,8 @@ export class SessionAgent extends DurableObject<Env> {
     await this.reconcileSessionIdentity({
       sessionId: body.session_id,
       sessionKey: body.session_key,
-      userId: body.user_id
+      userId: body.user_id,
+      tenantId: body.tenant_id ?? undefined
     });
 
     if (this.sessionState.status === "executing") {
@@ -827,29 +874,34 @@ export class SessionAgent extends DurableObject<Env> {
     await emitEvent();
   }
 
-  /**
-   * Handle query execution
-   */
-  private async handleQuery(request: Request): Promise<Response> {
-    const body = await request.json() as QueryRequest;
-
+  private async executeQuery(body: QueryRequest): Promise<QueryResponse> {
+    const startedAt = Date.now();
     await this.reconcileSessionIdentity({
       sessionId: body.session_id,
       sessionKey: body.session_key,
-      userId: body.user_id
+      userId: body.user_id,
+      tenantId: body.tenant_id ?? undefined
     });
-    
-    // Update session state
+
     if (!this.sessionState) {
       throw new Error("Session state not initialized");
     }
-    
+
+    if (this.sessionState.status === "executing") {
+      throw new Error("Session already executing");
+    }
+
     this.sessionState.status = "executing";
     this.sessionState.current_prompt = body.question;
     this.sessionState.last_active_at = Date.now();
+    if (body.user_id) {
+      this.sessionState.user_id = body.user_id;
+    }
+    if (body.tenant_id) {
+      this.sessionState.tenant_id = body.tenant_id;
+    }
     await this.saveSessionState();
-    
-    // Broadcast session update
+
     this.broadcastToWebSockets({
       type: "session_update",
       session_id: this.sessionState.session_id,
@@ -859,8 +911,35 @@ export class SessionAgent extends DurableObject<Env> {
         current_prompt: body.question
       }
     } satisfies SessionUpdateMessage);
-    
-    // Forward to Modal backend
+    this.broadcastToEventBus({
+      type: "session_update",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        status: "executing",
+        current_prompt: body.question
+      }
+    } satisfies SessionUpdateMessage);
+
+    this.broadcastToWebSockets({
+      type: "query_start",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        question: body.question,
+        agent_type: body.agent_type || "default"
+      }
+    });
+    this.broadcastToEventBus({
+      type: "query_start",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        question: body.question,
+        agent_type: body.agent_type || "default"
+      }
+    });
+
     const modalResponse = await this.callModalBackend({
       endpoint: "/query",
       method: "POST",
@@ -869,43 +948,110 @@ export class SessionAgent extends DurableObject<Env> {
         session_id: this.sessionState.session_id
       }
     });
-    
+
     if (!modalResponse.ok) {
       this.sessionState.status = "error";
+      this.sessionState.current_prompt = undefined;
+      this.sessionState.last_active_at = Date.now();
       await this.saveSessionState();
-      
-      return new Response(
-        JSON.stringify({ ok: false, error: modalResponse.error }),
-        { status: modalResponse.status, headers: { "Content-Type": "application/json" } }
-      );
+
+      this.broadcastToWebSockets({
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: modalResponse.error || "Modal error" }
+      });
+      this.broadcastToEventBus({
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: modalResponse.error || "Modal error" }
+      });
+
+      throw new Error(modalResponse.error || "Modal error");
     }
-    
+
     const result = modalResponse.data as QueryResponse;
-    
-    // Store messages
     await this.storeMessages(result.messages);
-    
-    // Update session state
+
     this.sessionState.status = "idle";
     this.sessionState.current_prompt = undefined;
     this.sessionState.last_active_at = Date.now();
     await this.saveSessionState();
-    
-    // Broadcast completion
+
+    const durationMs = Date.now() - startedAt;
     this.broadcastToWebSockets({
       type: "query_complete",
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
       data: {
         messages: result.messages,
-        duration_ms: 0 // TODO: track actual duration
+        duration_ms: durationMs
       }
     } satisfies QueryCompleteMessage);
-    
-    return new Response(
-      JSON.stringify(result),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    this.broadcastToEventBus({
+      type: "query_complete",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: {
+        messages: result.messages,
+        duration_ms: durationMs
+      }
+    } satisfies QueryCompleteMessage);
+
+    return result;
+  }
+
+  /**
+   * Handle query execution
+   */
+  private async handleQuery(request: Request): Promise<Response> {
+    const body = await request.json() as QueryRequest;
+
+    try {
+      const result = await this.executeQuery(body);
+      this.ctx.waitUntil(this.drainPromptQueue());
+      return new Response(
+        JSON.stringify(result),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    } catch (error) {
+      return new Response(
+        JSON.stringify({ ok: false, error: error instanceof Error ? error.message : "Unknown error" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+  }
+
+  private async drainPromptQueue(): Promise<void> {
+    if (this.queueDrainInProgress) return;
+    if (!this.sessionState) return;
+
+    this.queueDrainInProgress = true;
+    try {
+      await this.pruneExpiredQueueEntries();
+      while (true) {
+        const nextPrompt = await this.dequeueNextPrompt();
+        if (!nextPrompt) break;
+
+        const body: QueryRequest = {
+          question: nextPrompt.question,
+          agent_type: nextPrompt.agent_type,
+          session_id: this.sessionState.session_id,
+          user_id: nextPrompt.user_id ?? undefined,
+          tenant_id: this.sessionState.tenant_id ?? undefined
+        };
+
+        try {
+          await this.executeQuery(body);
+        } catch (error) {
+          console.error("Failed to process queued prompt", error);
+          break;
+        }
+      }
+    } finally {
+      this.queueDrainInProgress = false;
+    }
   }
 
   /**
@@ -1003,14 +1149,40 @@ export class SessionAgent extends DurableObject<Env> {
   private async handleQueuePrompt(request: Request): Promise<Response> {
     const body = await request.json() as QueryRequest;
 
+    if (!body.question) {
+      return new Response(
+        JSON.stringify({ ok: false, queued: false, error: "Missing question" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     await this.reconcileSessionIdentity({
       sessionId: body.session_id,
       sessionKey: body.session_key,
-      userId: body.user_id
+      userId: body.user_id,
+      tenantId: body.tenant_id ?? undefined
     });
-    
+    await this.pruneExpiredQueueEntries();
+    const { maxQueueSize, expirySeconds } = this.getQueueConfig();
+
+    const currentLength = await this.getQueueLength();
+    if (currentLength >= maxQueueSize) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          queued: false,
+          session_id: this.sessionState?.session_id || "",
+          error: `Queue limit reached (${maxQueueSize})`,
+          queue_size: currentLength,
+          max_queue_size: maxQueueSize
+        }),
+        { status: 429, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     const sql = this.ctx.storage.sql;
     const id = crypto.randomUUID();
+    const queuedAt = Date.now();
     
     sql.exec(
       `INSERT INTO prompt_queue (id, question, agent_type, user_id, queued_at, priority) 
@@ -1019,20 +1191,179 @@ export class SessionAgent extends DurableObject<Env> {
       body.question,
       body.agent_type || "default",
       body.user_id || null,
-      Date.now(),
+      queuedAt,
       0
     );
+
+    const queueLength = await this.getQueueLength();
+    const expiresAt = queuedAt + expirySeconds * 1000;
     
     // Broadcast queue update
-    this.broadcastToWebSockets({
+    const queueMessage: WebSocketMessage = {
       type: "prompt_queued",
       session_id: this.sessionState?.session_id || "",
       timestamp: Date.now(),
-      data: { prompt_id: id, queue_length: this.getQueueLength() }
-    });
+      data: { prompt_id: id, queue_length: queueLength }
+    };
+    this.broadcastToWebSockets(queueMessage);
+    this.broadcastToEventBus(queueMessage);
     
     return new Response(
-      JSON.stringify({ ok: true, prompt_id: id }),
+      JSON.stringify({
+        ok: true,
+        queued: true,
+        session_id: this.sessionState?.session_id || "",
+        prompt_id: id,
+        queue_size: queueLength,
+        max_queue_size: maxQueueSize,
+        expires_at: expiresAt
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  private async getQueueEntries(): Promise<PromptQueueEntry[]> {
+    await this.pruneExpiredQueueEntries();
+    const sql = this.ctx.storage.sql;
+    const rows = sql.exec(
+      `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
+       ORDER BY priority DESC, queued_at ASC`
+    ).toArray() as Array<{
+      id: string;
+      question: string;
+      agent_type: string;
+      user_id: string | null;
+      queued_at: number;
+      priority: number;
+    }>;
+
+    return rows.map(row => ({
+      id: row.id,
+      session_id: this.sessionState?.session_id || "",
+      question: row.question,
+      agent_type: row.agent_type,
+      user_id: row.user_id || undefined,
+      queued_at: row.queued_at,
+      priority: row.priority
+    }));
+  }
+
+  private async handleGetQueue(request: Request): Promise<Response> {
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { maxQueueSize, expirySeconds } = this.getQueueConfig();
+    const entries = await this.getQueueEntries();
+    const prompts = entries.map((entry, index) => ({
+      prompt_id: entry.id,
+      question: entry.question,
+      user_id: entry.user_id,
+      queued_at: entry.queued_at,
+      expires_at: entry.queued_at + expirySeconds * 1000,
+      position: index + 1
+    }));
+    const isExecuting = this.sessionState?.status === "executing";
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        session_id: this.sessionState?.session_id || "",
+        is_executing: isExecuting,
+        queue_size: prompts.length,
+        prompts,
+        max_queue_size: maxQueueSize
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  private async dequeueNextPrompt(): Promise<PromptQueueEntry | null> {
+    await this.pruneExpiredQueueEntries();
+    const sql = this.ctx.storage.sql;
+    const rows = sql.exec(
+      `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
+       ORDER BY priority DESC, queued_at ASC
+       LIMIT 1`
+    ).toArray() as Array<{
+      id: string;
+      question: string;
+      agent_type: string;
+      user_id: string | null;
+      queued_at: number;
+      priority: number;
+    }>;
+
+    if (rows.length === 0) return null;
+    const entry = rows[0];
+    sql.exec(`DELETE FROM prompt_queue WHERE id = ?`, entry.id);
+
+    return {
+      id: entry.id,
+      session_id: this.sessionState?.session_id || "",
+      question: entry.question,
+      agent_type: entry.agent_type,
+      user_id: entry.user_id || undefined,
+      queued_at: entry.queued_at,
+      priority: entry.priority
+    };
+  }
+
+  private async handleClearQueue(request: Request): Promise<Response> {
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+
+    await this.pruneExpiredQueueEntries();
+    const clearedCount = await this.getQueueLength();
+    const sql = this.ctx.storage.sql;
+    sql.exec(`DELETE FROM prompt_queue`);
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        session_id: this.sessionState?.session_id || "",
+        cleared_count: clearedCount,
+        message: clearedCount > 0 ? `Cleared ${clearedCount} queued prompt(s)` : "Queue was already empty"
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  private async handleQueueItem(request: Request, path: string): Promise<Response> {
+    if (request.method !== "DELETE") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    const promptId = path.split("/")[2];
+    if (!promptId) {
+      return new Response("Invalid queue path", { status: 400 });
+    }
+
+    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+
+    await this.pruneExpiredQueueEntries();
+    const sql = this.ctx.storage.sql;
+    const rows = sql.exec(`SELECT id FROM prompt_queue WHERE id = ?`, promptId).toArray();
+    if (rows.length === 0) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          removed: false,
+          session_id: this.sessionState?.session_id || "",
+          prompt_id: promptId,
+          error: "Prompt not found in queue"
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    sql.exec(`DELETE FROM prompt_queue WHERE id = ?`, promptId);
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        removed: true,
+        session_id: this.sessionState?.session_id || "",
+        prompt_id: promptId
+      }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   }
@@ -1040,7 +1371,8 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Get current queue length
    */
-  private getQueueLength(): number {
+  private async getQueueLength(): Promise<number> {
+    await this.pruneExpiredQueueEntries();
     const sql = this.ctx.storage.sql;
     const result = sql.exec(`SELECT COUNT(*) as count FROM prompt_queue`).toArray();
     return (result[0] as { count: number }).count;
@@ -1096,23 +1428,40 @@ export class SessionAgent extends DurableObject<Env> {
 
     const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
     await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
-    
-    // Call Modal backend to stop execution
+
+    const ok = await this.stopExecution();
+    return new Response(
+      JSON.stringify({ ok }),
+      { status: ok ? 200 : 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  private async stopExecution(): Promise<boolean> {
+    if (!this.sessionState) {
+      return false;
+    }
+
     const modalResponse = await this.callModalBackend({
       endpoint: `/session/${this.sessionState.session_id}/stop`,
       method: "POST",
       body: {}
     });
-    
-    // Update local state
+
     this.sessionState.status = "idle";
     this.sessionState.current_prompt = undefined;
+    this.sessionState.last_active_at = Date.now();
     await this.saveSessionState();
-    
-    return new Response(
-      JSON.stringify({ ok: modalResponse.ok }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+
+    const update: SessionUpdateMessage = {
+      type: "session_update",
+      session_id: this.sessionState.session_id,
+      timestamp: Date.now(),
+      data: { status: "idle" }
+    };
+    this.broadcastToWebSockets(update);
+    this.broadcastToEventBus(update);
+
+    return modalResponse.ok;
   }
 
   /**

@@ -30,6 +30,13 @@ Use this checklist to deploy the Cloudflare control plane.
 - [ ] Create KV namespace: `wrangler kv:namespace create SESSION_CACHE`
 - [ ] Copy the ID from output (looks like: `abc123...`)
 - [ ] Update `kv_namespaces[0].id` in `wrangler.jsonc` with this ID
+- [ ] Confirm KV is used for session key mapping (`session_key:<scope>:<session_key>` → `session_id`)
+- [ ] Confirm `SESSION_KEY_TTL_SECONDS` is set (defaults to 30 days)
+
+### Rate Limiting Binding
+
+- [ ] Configure Rate Limiting binding in `wrangler.jsonc` (`unsafe.bindings` with type `ratelimit`)
+- [ ] Verify binding name `RATE_LIMITER` matches the Worker env interface
 
 ### Secrets Setup
 
@@ -213,6 +220,7 @@ wscat -c "wss://your-worker.workers.dev/ws?user_id=test-user&session_ids=test-12
 - [ ] Test from different geographic locations (VPN)
 - [ ] Test with multiple concurrent clients
 - [ ] Test session resumption (same session_id, different requests)
+- [ ] Test session_key mapping (same session_key produces same session_id)
 - [ ] Test rate limiting (exceed limits)
 - [ ] Test error scenarios (invalid inputs, missing auth, etc.)
 
@@ -238,23 +246,19 @@ wscat -c "wss://your-worker.workers.dev/ws?user_id=test-user&session_ids=test-12
 - [ ] Share authentication guide
 - [ ] Create runbook for common issues
 
-## Rollout Strategy
+## Rollout Strategy (Phase 3 Cloudflare-first)
 
-### Phase 1: Internal Testing (Day 1-7)
+### Phase 1-2: Staging + Canary (Complete)
 
-- [ ] Deploy to staging environment
-- [ ] Test with internal team only
-- [ ] Collect feedback
-- [ ] Fix any issues found
+- [x] Deploy to staging environment
+- [x] Route initial traffic through Cloudflare (10% → 25%)
+- [x] Monitor metrics and fix canary issues
 
-### Phase 2: Canary (Day 8-14)
+### Phase 3: Cloudflare-first (Complete)
 
-- [ ] Route 10% of traffic to Cloudflare (by user ID hash)
-- [ ] Monitor metrics closely
-- [ ] Keep Modal gateway as fallback
-- [ ] Increase to 25% if stable
-
-### Phase 3: Gradual Rollout (Day 15-35)
+- [x] Route 100% of public traffic to Cloudflare
+- [x] Require `Authorization` on Worker endpoints
+- [x] Keep Modal gateway internal-only
 
 - [ ] Increase to 50% traffic
 - [ ] Enable WebSocket features for Cloudflare users

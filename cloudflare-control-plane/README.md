@@ -2,13 +2,15 @@
 
 This directory contains the Cloudflare Worker + Durable Objects implementation that serves as the control plane for the Agent Sandbox system.
 
+**Phase 3 status:** Cloudflare is the primary public API surface. Direct Modal gateway access is internal-only and requires `X-Internal-Auth`.
+
 ## Architecture
 
 The control plane uses Cloudflare's edge infrastructure to provide:
 
 - **Session Management**: Per-session Durable Objects with SQLite storage
 - **Real-time Updates**: WebSocket-based event fan-out via EventBus DO
-- **Edge Authentication**: Token validation and rate limiting at the edge
+- **Edge Authentication**: Enforced token validation and rate limiting at the edge
 - **Request Routing**: Intelligent routing to Modal backend sandboxes
 
 ## Project Structure
@@ -96,6 +98,11 @@ wrangler kv:namespace create SESSION_CACHE
 # Copy the ID to wrangler.jsonc
 ```
 
+#### 4. Configure Rate Limiting Binding
+
+Ensure `wrangler.jsonc` includes a `RATE_LIMITER` binding under `unsafe.bindings`
+with the desired `limit` and `period` values.
+
 ### Development
 
 ```bash
@@ -107,7 +114,7 @@ curl http://localhost:8787/health
 
 # Test WebSocket (use wscat)
 npm install -g wscat
-wscat -c ws://localhost:8787/ws?user_id=test-user
+wscat -c "ws://localhost:8787/ws?user_id=test-user&token=<session_token>"
 ```
 
 ### Deployment
@@ -147,7 +154,7 @@ curl -X POST https://your-worker.workers.dev/query \
 
 ```javascript
 const ws = new WebSocket(
-  "wss://your-worker.workers.dev/query_stream?session_id=sess_abc123"
+  "wss://your-worker.workers.dev/query_stream?session_id=sess_abc123&token=<session_token>"
 );
 
 ws.onopen = () => {
@@ -183,7 +190,7 @@ curl -X POST https://your-worker.workers.dev/submit \
 
 ```javascript
 const ws = new WebSocket(
-  "wss://your-worker.workers.dev/ws?user_id=user-123&session_ids=sess_abc,sess_def"
+  "wss://your-worker.workers.dev/ws?user_id=user-123&session_ids=sess_abc,sess_def&token=<session_token>"
 );
 
 ws.onmessage = (event) => {
@@ -197,9 +204,10 @@ See [API.md](./API.md) for complete API documentation.
 
 ## Authentication
 
-The control plane supports multiple authentication methods:
+All public endpoints require `Authorization: Bearer <token>` (or `token=<token>`
+for WebSocket connections). Phase 3 supports **session tokens only**.
 
-### Session Tokens (Recommended)
+### Session Tokens
 
 ```typescript
 const token = generateSessionToken({
@@ -213,20 +221,6 @@ const token = generateSessionToken({
 fetch("/query", {
   headers: { Authorization: `Bearer ${token}` },
 });
-```
-
-### API Keys
-
-```bash
-# Simple API key authentication
-curl -H "Authorization: Bearer sk_live_abc123..." /query
-```
-
-### JWT (External IdP)
-
-```bash
-# OAuth/JWT from Auth0, Clerk, etc.
-curl -H "Authorization: Bearer eyJhbGc..." /query
 ```
 
 See [AUTH.md](./AUTH.md) for detailed authentication design.
@@ -243,11 +237,15 @@ See [AUTH.md](./AUTH.md) for detailed authentication design.
 - `tool_result`: Tool result
 - `query_complete`: Query finished
 - `query_error`: Execution failed
+- `prompt_queued`: Prompt queued for later execution
+- `execution_state`: SSE events that don't map to explicit types
 
 ### EventBus Events
 
 - `connection_ack`: Connected to event bus
 - `presence_update`: User joined/left
+- `job_submitted`: Job was queued via `/submit`
+- `job_status`: Job status update emitted on `/jobs/{id}`
 - Broadcasts all SessionAgent events to subscribed clients
 
 See [WEBSOCKETS.md](./WEBSOCKETS.md) for complete event specifications.
@@ -306,11 +304,11 @@ DO generates HMAC-signed tokens for Modal requests:
 const token = await generateInternalAuthToken(env);
 
 fetch(modalUrl, {
-  headers: { Authorization: `Bearer ${token}` },
+  headers: { "X-Internal-Auth": token },
 });
 ```
 
-Modal validates tokens using shared secret.
+Modal validates tokens using the shared secret in `X-Internal-Auth`.
 
 ### 2. Request Proxying
 

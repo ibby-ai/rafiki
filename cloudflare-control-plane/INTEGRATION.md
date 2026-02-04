@@ -9,7 +9,7 @@ This document maps how Cloudflare Durable Objects integrate with the existing Mo
 | **HTTP Gateway**          | Modal `@modal.asgi_app()`     | Cloudflare Worker                         | Cloudflare |
 | **Session State**         | Modal Dict + in-memory        | SessionAgent DO (SQLite)                  | Cloudflare |
 | **Message History**       | In-memory during execution    | SessionAgent DO (persistent)              | Cloudflare |
-| **Prompt Queue**          | Modal Dict (`PROMPT_QUEUE`)   | SessionAgent DO (SQLite)                  | Cloudflare |
+| **Prompt Queue**          | Deprecated (Modal Dict removed) | SessionAgent DO (SQLite)                | Cloudflare |
 | **WebSocket Connections** | N/A (SSE only)                | EventBus DO + SessionAgent DO             | Cloudflare |
 | **Job Queue**             | Modal Queue (`JOB_QUEUE`)     | Modal Queue (unchanged)                   | Modal      |
 | **Job Results**           | Modal Dict (`JOB_RESULTS`)    | Modal Dict (unchanged)                    | Modal      |
@@ -17,8 +17,8 @@ This document maps how Cloudflare Durable Objects integrate with the existing Mo
 | **Volume Management**     | Modal Volume API              | Modal Volume API (unchanged)              | Modal      |
 | **Agent Execution**       | Modal Sandbox + controller.py | Modal Sandbox + controller.py (unchanged) | Modal      |
 | **Artifact Storage**      | Modal Volume                  | Modal Volume (unchanged)                  | Modal      |
-| **Authentication**        | Optional Connect tokens       | Cloudflare Worker (client auth planned, TODO) + signed tokens (internal) | Cloudflare |
-| **Rate Limiting**         | None                          | Planned (Cloudflare KV, TODO)             | Cloudflare |
+| **Authentication**        | Optional Connect tokens       | Cloudflare Worker (session tokens) + signed tokens (internal) | Cloudflare |
+| **Rate Limiting**         | None                          | Cloudflare Rate Limiting binding          | Cloudflare |
 | **Real-time Fan-out**     | N/A                           | EventBus DO                               | Cloudflare |
 
 ---
@@ -43,7 +43,7 @@ Client → CF Worker → SessionAgent DO → Modal Sandbox (controller.py) → A
 
 **Changes:**
 
-- **CF Worker**: Validates auth (planned, TODO), resolves session ID (`session_id || session_key || randomUUID`, no KV lookup yet), routes to SessionAgent DO
+- **CF Worker**: Validates client auth, resolves session ID (`session_id` → scoped KV lookup for `session_key` → `randomUUID()`), routes to SessionAgent DO
 - **SessionAgent DO**:
   - Stores session state (status, current prompt)
   - Stores message history in SQLite
@@ -109,12 +109,9 @@ Client → CF Worker → Modal Queue (JOB_QUEUE) → Worker picks up
 
 **Changes:**
 
-- **CF Worker**: Generates job ID and forwards to Modal backend (no DO involvement yet)
+- **CF Worker**: Generates job ID and forwards to Modal backend
 - **Modal Backend**: Enqueues job (unchanged) and returns job ID confirmation
-
-**Planned (TODO, Not Yet Implemented):**
-
-- SessionAgent DO association and EventBus notifications for job submissions
+- **EventBus DO**: Receives `job_submitted` event broadcast for the session/user scope
 
 ---
 
@@ -128,9 +125,9 @@ Client → CF Worker → Modal Backend → Modal Dict (JOB_RESULTS) → Response
 
 **Changes:**
 
-- **CF Worker**: Proxies directly to Modal backend (no DO involvement)
+- **CF Worker**: Proxies directly to Modal backend
 - **Modal Backend**: Returns job status (unchanged)
-- **SessionAgent DO**: Not involved (job status is read-only, no state change)
+- **EventBus DO**: Emits `job_status` events on successful status reads
 
 **Modal Changes Required:**
 
@@ -252,41 +249,22 @@ Client → CF Worker → SessionAgent DO → Response
 
 ### Session State
 
-**Before (Modal Dict):**
+**Legacy (Modal Dict - Removed in Phase 3):**
 
-```python
-# agent_sandbox/controllers/controller.py
-SESSION_STORE = modal.Dict.from_name("session-store-dict")
+Modal previously stored `session_key` → `session_id` in a Dict. This mapping is
+now handled by Cloudflare KV at the edge.
 
-# Store session_key → session_id mapping
-await SESSION_STORE.put.aio(session_key, session_id)
-```
+**Current (Phase 3):**
 
-**After (SessionAgent DO):**
-
-```sql
--- Cloudflare DO SQLite
-CREATE TABLE session_metadata (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-INSERT INTO session_metadata (key, value) VALUES ('session_id', 'sess_abc123');
-INSERT INTO session_metadata (key, value) VALUES ('session_key', 'user-123-session');
-```
-
-**Migration Strategy:**
-
-1. Phase 1: Dual-write to both Modal Dict and DO SQLite
-2. Phase 2: Read from DO, fallback to Modal Dict
-3. Phase 3: Stop writing to Modal Dict
-4. Phase 4: Remove Modal Dict entirely
+- **Session metadata** lives in SessionAgent DO SQLite.
+- **Session key mappings** are cached in `SESSION_CACHE` KV using
+  `session_key:<scope>:<session_key>` keys (scope = tenant → user → anonymous).
 
 ---
 
 ### Prompt Queue
 
-**Before (Modal Dict):**
+**Legacy (Modal Dict - Removed in Phase 3):**
 
 ```python
 # agent_sandbox/jobs.py
@@ -315,11 +293,10 @@ INSERT INTO prompt_queue (id, question, agent_type, queued_at, priority)
 VALUES ('prompt-uuid', 'Query text', 'default', 1234567890, 0);
 ```
 
-**Migration Strategy:**
+**Phase 3 Status:**
 
-1. Phase 1: New sessions use DO queue, existing sessions use Modal Dict
-2. Phase 2: Migrate active sessions to DO (background job)
-3. Phase 3: Remove Modal Dict queue code
+- Prompt queues live exclusively in SessionAgent DO SQLite.
+- Modal Dict prompt queues are removed.
 
 ---
 
@@ -612,49 +589,30 @@ class Settings(BaseSettings):
 
 **Status note:** In this repository, `/query`, `/query_stream`, `/submit`, and `/jobs/*` are already routed through the Cloudflare Worker.
 
-### Phase 0: Preparation (Week 1)
+### Phase 0-2: Preparation + Query Integration (Complete)
 
-- [ ] Deploy Cloudflare Worker infrastructure
-- [ ] Add internal auth middleware to Modal
-- [ ] Test authentication flow
-- [ ] Document API endpoints
-- [ ] Create monitoring dashboards
+- [x] Deploy Cloudflare Worker infrastructure
+- [x] Add internal auth middleware to Modal
+- [x] Route `/health`, `/jobs/{id}`, `/query` through Cloudflare
+- [x] Enable SessionAgent DO for new sessions
+- [x] Document API endpoints and monitoring dashboards
 
-### Phase 1: Read-Only Integration (Week 2)
+### Phase 3: Streaming Integration (Complete - Cloudflare-first)
 
-- [ ] Route `/health` through Cloudflare
-- [ ] Route `/jobs/{id}` reads through Cloudflare
-- [ ] Verify metrics and latency
-- [ ] Test error handling and fallback
+- [x] Route `/query_stream` through Cloudflare
+- [x] Enable WebSocket → SSE bridging
+- [x] Validate multiplayer fan-out
 
-### Phase 2: Query Integration (Week 3-4)
+### Phase 4: Job Integration (Complete)
 
-- [ ] Route `/query` through Cloudflare
-- [ ] Enable SessionAgent DO for new sessions
-- [ ] Test session resumption
-- [ ] Monitor DO performance and costs
+- [x] Route `/submit` through Cloudflare
+- [x] EventBus notifications for job lifecycle events (`job_submitted`, `job_status`)
+- [ ] Webhook delivery visibility in EventBus
 
-### Phase 3: Streaming Integration (Week 5-6)
+### Phase 5: Optimization (Ongoing)
 
-- [ ] Route `/query_stream` through Cloudflare
-- [ ] Enable WebSocket → SSE bridging
-- [ ] Test with multiple clients
-- [ ] Optimize message throughput
-
-### Phase 4: Job Integration (Week 7-8)
-
-- [ ] Route `/submit` through Cloudflare
-- [ ] Enable EventBus DO for notifications
-- [ ] Test webhook callbacks
-- [ ] Monitor job queue health
-
-### Phase 5: Full Migration (Week 9-10)
-
-- [ ] Route 100% traffic to Cloudflare
-- [ ] Remove Modal gateway code
-- [ ] Archive old configuration
-- [ ] Update documentation
-- [ ] Celebrate! 🎉
+- [ ] Tune KV caching and rate limiting
+- [ ] Optimize DO storage/hibernation costs
 
 ---
 
@@ -668,7 +626,7 @@ class Settings(BaseSettings):
 - Error rate by endpoint
 - WebSocket connection count
 - DO invocation count and duration
-- KV read/write operations (planned, TODO)
+- KV read/write operations
 
 **Modal Backend:**
 
@@ -682,7 +640,7 @@ class Settings(BaseSettings):
 - SQLite query performance
 - WebSocket message throughput
 - Storage usage per session
-- Alarm execution time (EventBus cleanup, planned, TODO)
+- Alarm execution time (EventBus cleanup)
 
 ### Logging
 

@@ -349,10 +349,26 @@ Keep-alive message to maintain connection.
 
 ---
 
-#### Planned Client Events (TODO, Not Yet Implemented)
+#### 2. Stop Execution
 
-- `stop` (request execution stop)
-- `approve_tool` (permission-gated tool approvals)
+Request a graceful stop of the current session execution.
+
+```json
+{
+  "type": "stop",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {}
+}
+```
+
+**Response:** `execution_state` event with `event: "stop"` and `ok` boolean.
+
+---
+
+#### Unsupported Client Events
+
+- `approve_tool` (reserved for future approval workflows)
 
 ---
 
@@ -361,14 +377,16 @@ Keep-alive message to maintain connection.
 ### Connection
 
 ```
-wss://worker.example.com/ws?user_id=user-123&session_ids=sess_abc,sess_def
+wss://worker.example.com/ws?user_id=user-123&session_ids=sess_abc,sess_def&token=<session_token>
 ```
 
 **Query Parameters:**
 
 - `user_id`: Filter events for this user
 - `tenant_id`: Filter events for this tenant
+- `session_id`: Single session ID to subscribe to
 - `session_ids`: Comma-separated list of sessions to subscribe to
+- `token`: Session token (alternative to `Authorization` header)
 
 ---
 
@@ -413,20 +431,51 @@ All events from SessionAgent DOs are broadcast to relevant EventBus connections.
 
 ---
 
-#### 3. Presence Update (Planned, TODO)
+#### 3. Presence Updates
 
-Sent when users join/leave sessions (not emitted yet).
-
-**Planned (TODO, Not Yet Implemented):**
+Presence updates are emitted when users connect, disconnect, or change session
+subscriptions.
 
 ```json
 {
   "type": "presence_update",
+  "session_id": "",
+  "timestamp": 1234567890000,
+  "data": {
+    "users_online": ["user-123"],
+    "connection_count": 2,
+    "session_ids": ["sess_abc"],
+    "user_joined": "user-123"
+  }
+}
+```
+
+Presence snapshots are also available via `GET /presence` on the EventBus DO.
+
+---
+
+#### 4. Job Events
+
+```json
+{
+  "type": "job_submitted",
   "session_id": "sess_abc123",
   "timestamp": 1234567890000,
   "data": {
-    "users_online": ["user-123", "user-456"],
-    "user_joined": "user-456"
+    "job_id": "job-uuid",
+    "status": "queued"
+  }
+}
+```
+
+```json
+{
+  "type": "job_status",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {
+    "job_id": "job-uuid",
+    "status": "running"
   }
 }
 ```
@@ -435,7 +484,7 @@ Sent when users join/leave sessions (not emitted yet).
 
 ### Client → Server Events
 
-#### 1. Subscribe to Session (Planned, TODO)
+#### 1. Subscribe to Session
 
 ```json
 {
@@ -452,7 +501,7 @@ Response acknowledgments are not emitted in the current implementation.
 
 ---
 
-#### 2. Unsubscribe from Session (Planned, TODO)
+#### 2. Unsubscribe from Session
 
 ```json
 {
@@ -575,7 +624,7 @@ class AgentWebSocket {
 - SessionAgent DO: ~1,000 concurrent WebSocket connections
 - EventBus DO: ~10,000 concurrent WebSocket connections
 
-**Rate Limiting (Planned, TODO):**
+**Rate Limiting:**
 
 ```typescript
 // Limit new connections per user
@@ -734,7 +783,7 @@ npm install -g wscat
 
 # Connect to SessionAgent
 wscat -c "wss://worker.example.com/query_stream" \
-  -H "Authorization: Bearer <token>"  # accepted but not enforced yet
+  -H "Authorization: Bearer <token>"
 
 # Send query
 > {"question": "What is the capital of Canada?", "session_id": "sess_abc"}

@@ -10,9 +10,10 @@ This document summarizes the Cloudflare Durable Objects integration that has bee
 
 - Main API gateway entry point
 - Request authentication and validation
+- KV-backed session key mapping
 - Routing to Durable Objects and Modal backend
 - CORS handling
-- Rate limiting setup
+- Edge rate limiting
 
 ✅ **SessionAgent Durable Object (`src/durable-objects/SessionAgent.ts`)**
 
@@ -68,7 +69,7 @@ This document summarizes the Cloudflare Durable Objects integration that has bee
 
 ✅ **Authentication Design (`AUTH.md`)**
 
-- Client → Worker authentication (session tokens, API keys, JWT)
+- Client → Worker authentication (session tokens only)
 - Worker → DO context passing
 - DO → Modal internal auth tokens
 - Authorization model
@@ -178,7 +179,8 @@ Client Response (REST or WebSocket)
 **Cloudflare:**
 
 - **DO SQLite**: Session metadata, messages, prompt queue
-- **KV**: Session key cache, rate limits
+- **KV**: Session key cache (scoped `session_key:<scope>:<session_key>`)
+- **Rate Limiting Binding**: Edge rate limiting via `RATE_LIMITER`
 
 **Modal:**
 
@@ -226,14 +228,14 @@ async def query_agent(body: QueryBody, token: dict = Depends(verify_internal_tok
 
 ### 2. Endpoint Compatibility
 
-All existing Modal endpoints remain compatible:
+All existing Modal endpoints remain compatible for internal traffic:
 
 - `POST /query` - Works as-is
 - `POST /query_stream` - SSE format unchanged
 - `POST /submit` - Job queue unchanged
 - `GET /jobs/{id}` - Status endpoint unchanged
-
-No breaking changes to Modal backend API.
+**Breaking change:** The public entry point is now the Cloudflare Worker.
+Direct Modal gateway access requires `X-Internal-Auth` and is treated as internal-only.
 
 ### 3. State Migration
 
@@ -296,33 +298,17 @@ No breaking changes to Modal backend API.
 
 ## Rollout Strategy
 
-### Phase 0: Preparation (Week 1)
+### Phase 0-2: Preparation + Canary (Complete)
 
 - Deploy Cloudflare infrastructure
 - Add Modal auth middleware
-- Test in staging environment
-- Set up monitoring dashboards
+- Route initial traffic via Cloudflare and validate metrics
 
-### Phase 1: Canary (Week 2-3)
+### Phase 3: Cloudflare-first (Complete)
 
-- Route 10% of traffic to Cloudflare
-- Monitor metrics closely
-- Keep Modal gateway as fallback
-- Fix any issues found
-
-### Phase 2: Gradual Rollout (Week 4-6)
-
-- Increase to 25%, then 50%, then 90%
-- Enable WebSocket features
-- Migrate active sessions
-- Validate multiplayer functionality
-
-### Phase 3: Full Migration (Week 7-8)
-
-- Route 100% traffic to Cloudflare
-- Deprecate Modal gateway code
-- Archive old configs
-- Update documentation
+- Route 100% public traffic to Cloudflare
+- Enforce `Authorization` on Worker endpoints
+- Restrict Modal gateway to internal use only
 
 ### Phase 4: Optimization (Ongoing)
 
@@ -389,9 +375,9 @@ For questions or issues:
 
 ---
 
-**Implementation Status**: ✅ Complete (Design & Code)  
-**Testing Status**: ⏳ Pending  
-**Deployment Status**: ⏳ Not yet deployed  
-**Production Status**: ⏳ Not yet released
+**Implementation Status**: ✅ Complete  
+**Testing Status**: ✅ Verified in staging and production  
+**Deployment Status**: ✅ Deployed  
+**Production Status**: ✅ Cloudflare-first
 
-Last Updated: 2025-02-02
+Last Updated: 2026-02-04

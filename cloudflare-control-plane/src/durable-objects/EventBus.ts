@@ -19,6 +19,7 @@ import { DurableObject } from "cloudflare:workers";
 import type {
   ConnectionInfo,
   Env,
+  PresenceUpdateMessage,
   WebSocketMessage
 } from "../types";
 
@@ -56,6 +57,53 @@ export class EventBus extends DurableObject<Env> {
       data[connId] = info;
     }
     await this.ctx.storage.put("connections", data);
+  }
+
+  private async ensureAlarmScheduled(): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null) {
+      await this.ctx.storage.setAlarm(Date.now() + 60000);
+    }
+  }
+
+  private buildPresenceSnapshot(): PresenceUpdateMessage["data"] {
+    const users = new Set<string>();
+    const sessions = new Set<string>();
+    for (const info of this.connectionInfo.values()) {
+      if (info.user_id) users.add(info.user_id);
+      for (const sessionId of info.session_ids) {
+        sessions.add(sessionId);
+      }
+    }
+    return {
+      users_online: Array.from(users.values()),
+      connection_count: this.connectionInfo.size,
+      session_ids: Array.from(sessions.values())
+    };
+  }
+
+  private broadcastPresenceUpdate(options?: { userJoined?: string; userLeft?: string }): void {
+    const message: PresenceUpdateMessage = {
+      type: "presence_update",
+      session_id: "",
+      timestamp: Date.now(),
+      data: {
+        ...this.buildPresenceSnapshot(),
+        user_joined: options?.userJoined,
+        user_left: options?.userLeft
+      }
+    };
+
+    const msgStr = JSON.stringify(message);
+    for (const [connId, ws] of this.connections) {
+      try {
+        ws.send(msgStr);
+      } catch (error) {
+        console.error("Failed to send presence update:", error);
+        this.connections.delete(connId);
+        this.connectionInfo.delete(connId);
+      }
+    }
   }
 
   /**
@@ -106,6 +154,14 @@ export class EventBus extends DurableObject<Env> {
     const userId = url.searchParams.get("user_id") || undefined;
     const tenantId = url.searchParams.get("tenant_id") || undefined;
     const sessionIds = url.searchParams.get("session_ids")?.split(",") || [];
+    const singleSession = url.searchParams.get("session_id");
+    if (singleSession && !sessionIds.includes(singleSession)) {
+      sessionIds.push(singleSession);
+    }
+    const ip =
+      request.headers.get("CF-Connecting-IP") ||
+      request.headers.get("X-Forwarded-For") ||
+      undefined;
     
     // Accept the WebSocket connection using Hibernation API
     this.ctx.acceptWebSocket(server);
@@ -117,15 +173,17 @@ export class EventBus extends DurableObject<Env> {
       tenant_id: tenantId,
       session_ids: sessionIds,
       connected_at: Date.now(),
-      last_ping_at: Date.now()
+      last_ping_at: Date.now(),
+      ip
     };
     
     this.connections.set(connectionId, server);
     this.connectionInfo.set(connectionId, info);
-    this.saveConnectionInfo();
+    this.ctx.waitUntil(this.saveConnectionInfo());
     
     // Tag the WebSocket with connection ID for later reference
     (server as any).__connectionId = connectionId;
+    (server as any).__sessionIds = [...sessionIds];
     
     // Send connection acknowledgment
     server.send(JSON.stringify({
@@ -137,6 +195,9 @@ export class EventBus extends DurableObject<Env> {
         session_ids: sessionIds
       }
     } satisfies WebSocketMessage));
+
+    this.broadcastPresenceUpdate({ userJoined: userId });
+    this.ctx.waitUntil(this.ensureAlarmScheduled());
     
     return new Response(null, {
       status: 101,
@@ -179,6 +240,7 @@ export class EventBus extends DurableObject<Env> {
           info.session_ids.push(sessionId);
           this.connectionInfo.set(connectionId, info);
           await this.saveConnectionInfo();
+          this.broadcastPresenceUpdate();
         }
       }
       
@@ -188,6 +250,7 @@ export class EventBus extends DurableObject<Env> {
           info.session_ids = info.session_ids.filter(id => id !== sessionId);
           this.connectionInfo.set(connectionId, info);
           await this.saveConnectionInfo();
+          this.broadcastPresenceUpdate();
         }
       }
     } catch (error) {
@@ -200,10 +263,21 @@ export class EventBus extends DurableObject<Env> {
    */
   async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
     const connectionId = (ws as any).__connectionId;
+    let userLeft: string | undefined;
     if (connectionId) {
+      const info = this.connectionInfo.get(connectionId);
       this.connections.delete(connectionId);
       this.connectionInfo.delete(connectionId);
       await this.saveConnectionInfo();
+      if (info?.user_id) {
+        const remaining = Array.from(this.connectionInfo.values()).filter(
+          existing => existing.user_id === info.user_id
+        );
+        if (remaining.length === 0) {
+          userLeft = info.user_id;
+        }
+      }
+      this.broadcastPresenceUpdate({ userLeft });
     }
     console.log(`WebSocket closed: ${code} ${reason} (clean: ${wasClean})`);
   }
@@ -340,6 +414,7 @@ export class EventBus extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const now = Date.now();
     const staleThreshold = 5 * 60 * 1000; // 5 minutes
+    let removed = false;
     
     for (const [connId, info] of this.connectionInfo) {
       if (now - info.last_ping_at > staleThreshold) {
@@ -353,10 +428,14 @@ export class EventBus extends DurableObject<Env> {
         }
         this.connections.delete(connId);
         this.connectionInfo.delete(connId);
+        removed = true;
       }
     }
     
     await this.saveConnectionInfo();
+    if (removed) {
+      this.broadcastPresenceUpdate();
+    }
     
     // Schedule next cleanup
     await this.ctx.storage.setAlarm(Date.now() + 60000); // 1 minute

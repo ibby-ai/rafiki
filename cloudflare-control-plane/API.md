@@ -12,8 +12,10 @@ Client → Cloudflare Worker → SessionAgent DO → Modal Backend → Sandbox
 
 ## Authentication
 
-The Worker currently **accepts** a Bearer token but does **not enforce** it yet.
-Enforcement is planned. TODO: enforce Authorization validation.
+All public endpoints (everything except `GET /health`) require an
+`Authorization: Bearer <token>` header. For WebSockets, the token may also be
+passed as a `token` query parameter. Phase 3 supports **session tokens only**,
+signed with `SESSION_SIGNING_SECRET`.
 
 ```http
 Authorization: Bearer <token>
@@ -66,14 +68,19 @@ Execute an agent query and return the complete response.
 - `question` (required): The query text
 - `agent_type` (optional): Agent type to use (default: "default")
 - `session_id` (optional): Existing session ID to resume
-- `session_key` (optional): Treated as a session_id alias (no KV lookup yet)
+- `session_key` (optional): Stable client key resolved via KV to a session_id
 - `fork_session` (optional): Fork from existing session (default: false)
 - `job_id` (optional): Associate with a job workspace
 - `user_id` (optional): User identifier for statistics
 - `warm_id` (optional): Pre-warm correlation ID
 
 **Session resolution (current behavior):**
-- `session_id` → `session_key` → `randomUUID()` (no KV lookup yet)
+
+1. Use explicit `session_id` when provided
+2. Resolve `session_key` via `SESSION_CACHE` using a scoped key:
+   `session_key:<scope>:<session_key>` (scope = `tenant_id` → `user_id` → `anonymous`)
+3. Create a new `session_id` and persist the mapping in KV (default TTL: 30 days,
+   configurable via `SESSION_KEY_TTL_SECONDS`)
 
 **Response:**
 
@@ -115,8 +122,9 @@ If the request is not a WebSocket upgrade, the Worker returns `426 Upgrade Requi
 }
 ```
 
-**Recommended:** Include `session_id` as a query string parameter for session resume:
-`/query_stream?session_id=sess_abc123`
+**Recommended:** Include `session_id` as a query string parameter for session resume
+and pass auth via `Authorization` header or `token` query param:
+`/query_stream?session_id=sess_abc123&token=<session_token>`
 
 **WebSocket Messages (Server → Client):**
 
@@ -181,6 +189,17 @@ System/result/unknown SSE events are forwarded as `execution_state` messages.
 ```json
 {
   "type": "ping",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {}
+}
+```
+
+Stop current execution:
+
+```json
+{
+  "type": "stop",
   "session_id": "sess_abc123",
   "timestamp": 1234567890000,
   "data": {}
@@ -360,6 +379,69 @@ Stop current execution.
 
 ---
 
+### Session Prompt Queue
+
+Queue follow-up prompts for sequential processing. These endpoints are served by
+the SessionAgent Durable Object (Cloudflare) — they no longer exist on the Modal
+gateway.
+
+**GET** `/session/{session_id}/queue`
+
+List queued prompts.
+
+**POST** `/session/{session_id}/queue`
+
+Queue a new prompt.
+
+**Request Body:**
+
+```json
+{
+  "question": "Follow-up question",
+  "agent_type": "default",
+  "user_id": "user-123"
+}
+```
+
+**DELETE** `/session/{session_id}/queue`
+
+Clear the entire queue.
+
+**DELETE** `/session/{session_id}/queue/{prompt_id}`
+
+Remove a specific queued prompt.
+
+**Response (GET example):**
+
+```json
+{
+  "ok": true,
+  "session_id": "sess_abc123",
+  "is_executing": false,
+  "queue_size": 1,
+  "max_queue_size": 10,
+  "prompts": [
+    {
+      "prompt_id": "prompt-uuid",
+      "question": "Follow-up question",
+      "user_id": "user-123",
+      "queued_at": 1234567890,
+      "expires_at": 1234571490,
+      "position": 1
+    }
+  ]
+}
+```
+
+**Notes:**
+
+- Queue limits and expiry are configurable via `MAX_QUEUED_PROMPTS_PER_SESSION`
+  and `PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS`.
+- After a non-streaming `/query` finishes, the SessionAgent drains queued prompts
+  sequentially.
+
+---
+
 ## WebSocket Event Bus
 
 ### Connect to Event Bus
@@ -368,16 +450,20 @@ Stop current execution.
 
 Connect to the event bus for multi-session real-time updates.
 
+Authentication is required via `Authorization: Bearer <token>` header or
+`token=<session_token>` query parameter.
+
 **Query Parameters:**
 
 - `user_id`: User identifier for filtering
 - `tenant_id`: Tenant identifier for scoping
+- `session_id`: Single session ID to subscribe to
 - `session_ids`: Comma-separated list of session IDs to subscribe to
 
 **Example:**
 
 ```
-wss://worker.example.com/ws?user_id=user-123&session_ids=sess_abc,sess_def
+wss://worker.example.com/ws?user_id=user-123&session_ids=sess_abc,sess_def&token=<session_token>
 ```
 
 **Messages (Server → Client):**
@@ -407,6 +493,54 @@ Session updates (broadcasted to all subscribed connections):
     "status": "executing",
     "current_prompt": "Query text",
     "queue_length": 2
+  }
+}
+```
+
+Presence updates:
+
+```json
+{
+  "type": "presence_update",
+  "session_id": "",
+  "timestamp": 1234567890000,
+  "data": {
+    "users_online": ["user-123", "user-456"],
+    "connection_count": 4,
+    "session_ids": ["sess_abc", "sess_def"],
+    "user_joined": "user-456"
+  }
+}
+```
+
+Job events:
+
+```json
+{
+  "type": "job_submitted",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {
+    "job_id": "job-uuid",
+    "status": "queued",
+    "user_id": "user-123",
+    "tenant_id": "tenant-456"
+  }
+}
+```
+
+```json
+{
+  "type": "job_status",
+  "session_id": "sess_abc123",
+  "timestamp": 1234567890000,
+  "data": {
+    "job_id": "job-uuid",
+    "status": "running",
+    "payload": {
+      "job_id": "job-uuid",
+      "status": "running"
+    }
   }
 }
 ```
@@ -592,13 +726,13 @@ All errors return JSON with this format:
 
 ## Rate Limiting
 
-(To be implemented)
+Edge rate limits are enforced using `SESSION_CACHE` counters:
 
-Recommended rate limits:
+- **Query endpoints**: 60 requests/minute per user
+- **WebSocket connections**: 10 connections/minute per user
+- **Job submissions**: 100 requests/hour per user
 
-- Query endpoints: 60 requests/minute per user
-- WebSocket connections: 10 connections per user
-- Job submissions: 100 requests/hour per user
+When exceeded, the Worker returns `429 Too Many Requests` with a JSON error body.
 
 ---
 
@@ -607,7 +741,7 @@ Recommended rate limits:
 ### Setup Secrets
 
 ```bash
-# Modal API credentials (planned, TODO)
+# Modal API credentials
 # wrangler secret put MODAL_TOKEN_ID
 # wrangler secret put MODAL_TOKEN_SECRET
 

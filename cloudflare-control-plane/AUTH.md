@@ -36,19 +36,16 @@ This document describes the authentication flow and routing logic between Cloudf
 
 ### Current State (Implemented)
 
-- **Internal auth only:** Worker/DO → Modal requests are signed with `X-Internal-Auth`.
-- **Client auth not enforced yet:** `Authorization` headers are accepted but not validated.
-- **KV rate limiting not implemented yet.**
-
-### Planned (TODO, Not Yet Enforced)
+- **Client auth enforced:** All public endpoints require a session token via
+  `Authorization: Bearer <token>` (or `token=<token>` for WebSockets).
+- **Session tokens only:** Tokens are HMAC-signed with `SESSION_SIGNING_SECRET`.
+- **Internal auth enforced:** Worker/DO → Modal requests are signed with `X-Internal-Auth`.
+- **Rate limiting enabled** via the Cloudflare Rate Limiting binding for
+  query, streaming, submit, and event bus endpoints.
 
 ### 1. Client → Worker Authentication
 
-**Options:**
-
-These client auth mechanisms are planned and not enforced in the current Worker. TODO: implement enforcement.
-
-#### Option A: Session Tokens (Recommended)
+#### Session Tokens (Required)
 
 Client provides a session-scoped token that contains user and session context.
 
@@ -57,6 +54,9 @@ Client provides a session-scoped token that contains user and session context.
 ```
 Bearer <base64(payload)>.<signature>
 ```
+
+For WebSocket connections, the same token may be passed as a `token` query
+parameter (for example: `wss://.../ws?token=<session_token>`).
 
 **Payload:**
 
@@ -93,60 +93,9 @@ function validateSessionToken(token: string, env: Env): SessionToken | null {
 }
 ```
 
-#### Option B: API Keys
-
-Client provides a simple API key mapped to user/tenant in KV.
-
-**Token Format:**
-
-```
-Bearer sk_live_abc123...
-```
-
-**Validation (Worker):**
-
-```typescript
-async function validateApiKey(
-  key: string,
-  env: Env
-): Promise<UserContext | null> {
-  const context = await env.SESSION_CACHE.get<UserContext>(
-    `apikey:${key}`,
-    "json"
-  );
-  if (!context) return null;
-
-  return {
-    user_id: context.user_id,
-    tenant_id: context.tenant_id,
-    permissions: context.permissions,
-  };
-}
-```
-
-#### Option C: OAuth/JWT (External IdP)
-
-Client provides JWT from external identity provider (Auth0, Clerk, etc.).
-
-**Validation (Worker):**
-
-```typescript
-import { verify } from "@cfworker/jwt";
-
-async function validateJWT(
-  token: string,
-  env: Env
-): Promise<JWTPayload | null> {
-  try {
-    const payload = await verify(token, env.JWT_PUBLIC_KEY);
-    return payload;
-  } catch (error) {
-    return null;
-  }
-}
-```
-
-**Recommended:** Start with **Option A (Session Tokens)** for simplicity and control. Add OAuth later if needed.
+**Phase 3 note:** API keys and external JWT providers are not supported in the
+public control plane. If needed later, add a dedicated auth provider in front
+of the Worker and mint session tokens for this service.
 
 ---
 
@@ -320,9 +269,12 @@ async function resolveSessionId(
     return request.session_id;
   }
 
-  // 2. Session key lookup
+  // 2. Session key lookup (KV, scoped by tenant/user)
   if (request.session_key) {
-    const cached = await env.SESSION_CACHE.get(`skey:${request.session_key}`);
+    const scope = request.tenant_id || request.user_id || "anonymous";
+    const cached = await env.SESSION_CACHE.get(
+      `session_key:${scope}:${request.session_key}`
+    );
     if (cached) {
       return cached;
     }
@@ -333,16 +285,19 @@ async function resolveSessionId(
 
   // Cache session_key → session_id mapping if provided
   if (request.session_key) {
+    const scope = request.tenant_id || request.user_id || "anonymous";
     await env.SESSION_CACHE.put(
-      `skey:${request.session_key}`,
+      `session_key:${scope}:${request.session_key}`,
       newSessionId,
-      { expirationTtl: 86400 } // 24 hours
+      { expirationTtl: 60 * 60 * 24 * 30 } // 30 days (configurable)
     );
   }
 
   return newSessionId;
 }
 ```
+
+**TTL:** Defaults to 30 days. Override with `SESSION_KEY_TTL_SECONDS` in `wrangler.jsonc`.
 
 ### DO Name Derivation
 
@@ -465,41 +420,19 @@ private getPermissions(userId: string, tenantId: string): Permissions {
 
 ### Per-User Rate Limits
 
-Use Cloudflare KV for simple rate limiting:
+Use the Cloudflare Rate Limiting binding (type `ratelimit`) configured in
+`wrangler.jsonc`:
 
 ```typescript
-async function checkRateLimit(
-  userId: string,
-  limit: number,
-  window: number,
-  env: Env
-): Promise<boolean> {
-  const key = `ratelimit:${userId}:${Math.floor(Date.now() / window)}`;
-
-  const current = await env.SESSION_CACHE.get(key);
-  const count = current ? parseInt(current) : 0;
-
-  if (count >= limit) {
-    return false; // Rate limit exceeded
-  }
-
-  await env.SESSION_CACHE.put(key, (count + 1).toString(), {
-    expirationTtl: window / 1000,
-  });
-
-  return true;
-}
-```
-
-**Usage:**
-
-```typescript
-// In Worker fetch handler
-const allowed = await checkRateLimit(userId, 60, 60000, env); // 60 req/min
-if (!allowed) {
+const result = await env.RATE_LIMITER.limit({ key: `query:${userId}` });
+if (!result.success) {
   return new Response("Rate limit exceeded", { status: 429 });
 }
 ```
+
+The binding returns `success`, `limit`, `remaining`, and `reset` values. The
+Worker uses this to gate `/query`, `/query_stream`, `/submit`, and event bus
+WebSocket connections.
 
 ---
 
@@ -531,8 +464,6 @@ wrangler secret put MODAL_TOKEN_SECRET
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
 
-# Optional: JWT validation
-wrangler secret put JWT_PUBLIC_KEY
 ```
 
 ### Secret Rotation

@@ -19,10 +19,14 @@ export interface Env {
   
   // KV namespace for caching
   SESSION_CACHE: KVNamespace;
+  RATE_LIMITER?: RateLimitBinding;
   
   // Environment variables
   MODAL_API_BASE_URL: string;
   ENVIRONMENT: "development" | "staging" | "production";
+  SESSION_KEY_TTL_SECONDS?: string;
+  MAX_QUEUED_PROMPTS_PER_SESSION?: string;
+  PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS?: string;
   
   // Secrets (set via wrangler secret put)
   MODAL_TOKEN_ID: string;
@@ -43,6 +47,7 @@ export interface QueryRequest {
   fork_session?: boolean;
   job_id?: string | null;
   user_id?: string | null;
+  tenant_id?: string | null;
   warm_id?: string | null;
 }
 
@@ -149,6 +154,12 @@ export type WebSocketMessageType =
   | "prompt_queued"
   | "execution_state"
   | "connection_ack"
+  | "presence_update"
+  | "job_submitted"
+  | "job_status"
+  | "subscribe_session"
+  | "unsubscribe_session"
+  | "stop"
   | "ping"
   | "pong";
 
@@ -236,6 +247,43 @@ export interface ConnectionInfo {
   session_ids: string[];
   connected_at: number;
   last_ping_at: number;
+  ip?: string;
+}
+
+export interface PresenceUpdateMessage extends WebSocketMessage {
+  type: "presence_update";
+  data: {
+    users_online: string[];
+    connection_count: number;
+    session_ids: string[];
+    user_joined?: string;
+    user_left?: string;
+  };
+}
+
+export interface SubscribeSessionMessage extends WebSocketMessage {
+  type: "subscribe_session";
+  data: {
+    session_id: string;
+  };
+}
+
+export interface UnsubscribeSessionMessage extends WebSocketMessage {
+  type: "unsubscribe_session";
+  data: {
+    session_id: string;
+  };
+}
+
+export interface JobEventMessage extends WebSocketMessage {
+  type: "job_submitted" | "job_status";
+  data: {
+    job_id: string;
+    status?: JobStatusResponse["status"];
+    user_id?: string;
+    tenant_id?: string;
+    payload?: unknown;
+  };
 }
 
 // =============================================================================
@@ -269,9 +317,18 @@ export interface ModalBackendResponse {
 // =============================================================================
 
 export interface SessionToken {
-  session_id: string;
+  session_ids?: string[];
+  session_id?: string;
   user_id?: string;
   tenant_id?: string;
+  issued_at: number;
+  expires_at: number;
+}
+
+export interface AuthContext {
+  user_id?: string;
+  tenant_id?: string;
+  session_ids?: string[];
   issued_at: number;
   expires_at: number;
 }
@@ -280,6 +337,17 @@ export interface InternalAuthToken {
   service: "cloudflare-worker";
   issued_at: number;
   expires_at: number;
+}
+
+export interface RateLimitResult {
+  success: boolean;
+  limit?: number;
+  remaining?: number;
+  reset?: number;
+}
+
+export interface RateLimitBinding {
+  limit: (options: { key: string }) => Promise<RateLimitResult>;
 }
 
 // =============================================================================
