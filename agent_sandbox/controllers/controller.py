@@ -53,11 +53,8 @@ from agent_sandbox.jobs import (
     acknowledge_session_cancellation,
     add_message_to_history,
     create_session_metadata,
-    dequeue_prompt,
     is_session_cancelled,
     job_workspace_root,
-    mark_session_executing,
-    mark_session_idle,
     normalize_job_id,
     record_session_end,
     record_session_start,
@@ -78,9 +75,6 @@ _logger = logging.getLogger(__name__)
 # minimum intervals between commits to avoid excessive I/O overhead.
 # See: https://modal.com/docs/guide/volumes
 _LAST_VOLUME_COMMIT_TS: float | None = None
-SESSION_STORE = modal.Dict.from_name(_settings.session_store_name, create_if_missing=True)
-SESSION_CACHE: dict[str, str] = {}
-
 # =============================================================================
 # Active Client Registry for Immediate Stop Support
 # =============================================================================
@@ -371,29 +365,8 @@ def _ensure_job_workspace(job_id: str | None) -> Path | None:
 
 
 def _resolve_session_id(body: QueryBody) -> str | None:
-    """Resolve the session ID from the request body or stored mapping."""
-    if body.session_id:
-        return body.session_id
-    if body.session_key:
-        try:
-            stored = SESSION_STORE.get(body.session_key)
-            if stored:
-                return stored
-        except Exception:
-            _logger.warning("Session store unavailable; falling back to memory cache")
-        return SESSION_CACHE.get(body.session_key)
-    return None
-
-
-def _persist_session_id(session_key: str | None, session_id: str | None) -> None:
-    """Persist session ID mapping when a session key is provided."""
-    if not session_key or not session_id:
-        return
-    try:
-        SESSION_STORE[session_key] = session_id
-    except Exception:
-        _logger.warning("Session store unavailable; persisting to memory cache only")
-        SESSION_CACHE[session_key] = session_id
+    """Resolve the session ID from the request body."""
+    return body.session_id
 
 
 def _is_tool_allowed(tool_name: str, allowed_tools: list[str]) -> bool:
@@ -773,11 +746,6 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     # Create stop_event for graceful cancellation
     stop_event = asyncio.Event()
 
-    # Mark session as executing (for prompt queue feature)
-    # We mark using resolved_session_id initially; will update after SDK returns actual ID
-    if resolved_session_id and _settings.enable_prompt_queue:
-        mark_session_executing(resolved_session_id)
-
     try:
         # Enable child-session tools for this parent context
         set_parent_context(body.job_id or resolved_session_id)
@@ -820,7 +788,6 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
 
         summary = build_final_summary(result_message, final_text)
         final_session_id = summary.get("session_id")
-        _persist_session_id(body.session_key, final_session_id)
 
         # Track message history for multiplayer sessions
         if _settings.enable_multiplayer_sessions and final_session_id:
@@ -854,86 +821,6 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
                 )
                 # Don't fail the query - metadata is optional
 
-        # =========================================================================
-        # Prompt Queue Draining
-        # =========================================================================
-        # After primary query completes, check for queued prompts and process them.
-        # This enables clients to queue follow-up prompts while the session is busy.
-        # =========================================================================
-        if _settings.enable_prompt_queue and final_session_id:
-            queued_prompts_processed = 0
-            while True:
-                next_prompt = dequeue_prompt(final_session_id)
-                if not next_prompt:
-                    break
-
-                # Check if session was cancelled while processing queue
-                if stop_event.is_set():
-                    _logger.info(
-                        "agent.queue.cancelled",
-                        extra={
-                            "session_id": final_session_id,
-                            "prompts_remaining": "unknown",
-                        },
-                    )
-                    break
-
-                _logger.info(
-                    "agent.queue.processing",
-                    extra={
-                        "session_id": final_session_id,
-                        "prompt_id": next_prompt.get("prompt_id"),
-                        "queued_prompts_processed": queued_prompts_processed,
-                    },
-                )
-
-                # Process follow-up prompt in same session
-                queue_messages, queue_result = await _execute_agent_query(
-                    question=next_prompt["question"],
-                    session_id=final_session_id,
-                    fork_session=False,
-                    job_root=job_root,
-                    stop_event=stop_event,
-                    agent_type=body.agent_type,
-                )
-
-                # Update messages and result with queue results
-                messages.extend(queue_messages)
-                if queue_result:
-                    result_message = queue_result
-                    # Track queue message in history
-                    if _settings.enable_multiplayer_sessions:
-                        try:
-                            add_message_to_history(
-                                session_id=final_session_id,
-                                role="user",
-                                content=next_prompt["question"],
-                                user_id=next_prompt.get("user_id"),
-                            )
-                            if queue_result.result:
-                                add_message_to_history(
-                                    session_id=final_session_id,
-                                    role="assistant",
-                                    content=queue_result.result,
-                                )
-                        except Exception:
-                            pass  # Non-critical
-
-                queued_prompts_processed += 1
-
-            if queued_prompts_processed > 0:
-                # Update summary with new info
-                final_result = result_message.result if result_message else None
-                summary = build_final_summary(result_message, final_result)
-                summary["queued_prompts_processed"] = queued_prompts_processed
-                _logger.info(
-                    "agent.queue.complete",
-                    extra={
-                        "session_id": final_session_id,
-                        "queued_prompts_processed": queued_prompts_processed,
-                    },
-                )
-
         _logger.info(
             "agent.query.complete",
             extra={
@@ -960,11 +847,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             status=final_status,
             duration_ms=duration_ms,
         )
-        # Mark session as idle (for prompt queue feature)
-        if _settings.enable_prompt_queue:
-            session_to_mark = final_session_id or resolved_session_id
-            if session_to_mark:
-                mark_session_idle(session_to_mark)
+        # Prompt queue execution state tracking removed in Phase 3
         _maybe_commit_volume(force=job_root is not None)
 
 
@@ -1014,10 +897,6 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
         # Create stop_event for graceful cancellation
         stop_event = asyncio.Event()
-
-        # Mark session as executing (for prompt queue feature)
-        if resolved_session_id and _settings.enable_prompt_queue:
-            mark_session_executing(resolved_session_id)
 
         try:
             # Enable child-session tools for this parent context
@@ -1130,7 +1009,6 @@ async def query_agent_stream(body: QueryBody, request: Request):
 
             summary = build_final_summary(result_message, final_text)
             final_session_id = summary.get("session_id")
-            _persist_session_id(body.session_key, final_session_id)
 
             # Track message history for multiplayer sessions
             if _settings.enable_multiplayer_sessions and final_session_id:
@@ -1185,11 +1063,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 status=final_status,
                 duration_ms=duration_ms,
             )
-            # Mark session as idle (for prompt queue feature)
-            if _settings.enable_prompt_queue:
-                session_to_mark = final_session_id or resolved_session_id
-                if session_to_mark:
-                    mark_session_idle(session_to_mark)
+            # Prompt queue execution state tracking removed in Phase 3
             _maybe_commit_volume(force=job_root is not None)
 
     return StreamingResponse(sse(), media_type="text/event-stream")

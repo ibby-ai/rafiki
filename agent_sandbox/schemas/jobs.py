@@ -183,6 +183,12 @@ class JobSubmitRequest(BaseSchema):
     """Request body for enqueueing a job."""
 
     question: str = Field(description="The user question/prompt to process")
+    agent_type: str | None = Field(default=None, description="Agent type from Cloudflare Worker")
+    session_id: str | None = Field(default=None, description="Session ID from Cloudflare Worker")
+    session_key: str | None = Field(default=None, description="Session key from Cloudflare Worker")
+    job_id: str | None = Field(
+        default=None, description="Pre-generated job ID from Cloudflare Worker"
+    )
     tenant_id: str | None = Field(default=None, description="Tenant or workspace identifier")
     user_id: str | None = Field(default=None, description="End-user identifier")
     schedule_at: int | None = Field(

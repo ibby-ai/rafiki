@@ -167,7 +167,13 @@ class Settings(BaseSettings):
     )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
-    session_store_name: str = "agent-session-store"
+    session_store_name: str = Field(
+        default="agent-session-store",
+        description=(
+            "Deprecated: Modal session_key mapping store. "
+            "Phase 3 moves session mapping to Cloudflare KV; this setting is unused."
+        ),
+    )
     stats_store_name: str = Field(
         default="agent-stats-store",
         description="Modal Dict name for storing aggregate statistics",
@@ -293,33 +299,33 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Prompt queue settings (follow-up prompts while agent is executing)
+    # Prompt queue settings (deprecated; moved to Cloudflare DO)
     prompt_queue_store_name: str = Field(
         default="agent-prompt-queue",
-        description="Modal Dict name for storing per-session prompt queues",
+        description=(
+            "Deprecated: Modal prompt queue store. "
+            "Phase 3 moves prompt queue handling to Cloudflare DO; this setting is unused."
+        ),
     )
     enable_prompt_queue: bool = Field(
         default=True,
         description=(
-            "Enable the prompt queue feature. "
-            "When enabled, prompts sent while a session is executing are queued "
-            "and processed sequentially after the current query completes."
+            "Deprecated: Prompt queue now handled by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
     max_queued_prompts_per_session: int = Field(
         default=10,
         description=(
-            "Maximum number of prompts that can be queued per session. "
-            "Additional prompts are rejected with a 429 status when limit is reached. "
-            "Default: 10 prompts."
+            "Deprecated: Prompt queue limit now enforced by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
     prompt_queue_entry_expiry_seconds: int = Field(
         default=3600,
         description=(
-            "How long (seconds) a queued prompt remains valid. "
-            "Expired prompts are skipped during processing. "
-            "Default: 1 hour."
+            "Deprecated: Prompt queue expiry now enforced by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
 
