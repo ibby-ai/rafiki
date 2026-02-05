@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     enforce_connect_token: bool = False
     # require_proxy_auth: Require Modal workspace auth for public HTTP endpoints
     require_proxy_auth: bool = False
+    # internal_auth_secret: HMAC secret for Cloudflare Worker internal auth (required)
+    internal_auth_secret: str | None = None
 
     # Timeouts
     service_timeout: int = Field(default=60, description="Health check timeout (seconds)")
@@ -165,7 +167,13 @@ class Settings(BaseSettings):
     )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
-    session_store_name: str = "agent-session-store"
+    session_store_name: str = Field(
+        default="agent-session-store",
+        description=(
+            "Deprecated: Modal session_key mapping store. "
+            "Phase 3 moves session mapping to Cloudflare KV; this setting is unused."
+        ),
+    )
     stats_store_name: str = Field(
         default="agent-stats-store",
         description="Modal Dict name for storing aggregate statistics",
@@ -291,33 +299,33 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Prompt queue settings (follow-up prompts while agent is executing)
+    # Prompt queue settings (deprecated; moved to Cloudflare DO)
     prompt_queue_store_name: str = Field(
         default="agent-prompt-queue",
-        description="Modal Dict name for storing per-session prompt queues",
+        description=(
+            "Deprecated: Modal prompt queue store. "
+            "Phase 3 moves prompt queue handling to Cloudflare DO; this setting is unused."
+        ),
     )
     enable_prompt_queue: bool = Field(
         default=True,
         description=(
-            "Enable the prompt queue feature. "
-            "When enabled, prompts sent while a session is executing are queued "
-            "and processed sequentially after the current query completes."
+            "Deprecated: Prompt queue now handled by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
     max_queued_prompts_per_session: int = Field(
         default=10,
         description=(
-            "Maximum number of prompts that can be queued per session. "
-            "Additional prompts are rejected with a 429 status when limit is reached. "
-            "Default: 10 prompts."
+            "Deprecated: Prompt queue limit now enforced by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
     prompt_queue_entry_expiry_seconds: int = Field(
         default=3600,
         description=(
-            "How long (seconds) a queued prompt remains valid. "
-            "Expired prompts are skipped during processing. "
-            "Default: 1 hour."
+            "Deprecated: Prompt queue expiry now enforced by Cloudflare DO. "
+            "This setting is unused in Phase 3."
         ),
     )
 
@@ -524,6 +532,13 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_internal_auth_secret(self) -> Self:
+        """Require internal auth secret for Cloudflare control plane access."""
+        if not (self.internal_auth_secret or "").strip():
+            raise ValueError("internal_auth_secret must be set")
+        return self
+
 
 def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
     """Get Modal secrets required for the application.
@@ -557,6 +572,13 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
                 required_keys=["LANGSMITH_API_KEY"],
             )
         )
+
+    secrets.append(
+        modal.Secret.from_name(
+            "internal-auth-secret",
+            required_keys=["INTERNAL_AUTH_SECRET"],
+        )
+    )
 
     return secrets
 

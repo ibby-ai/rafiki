@@ -9,6 +9,27 @@ This is a Modal-based agent sandbox starter that runs Claude Agent SDK in isolat
 
 > **Note (2026-01-26)**: The CLI sandbox and Ralph autonomous coding loop have been removed to simplify the architecture. The codebase now focuses exclusively on the Agent SDK approach. See "CLI Approach Removal" section below for details.
 
+## Session Update (2026-02-04) - Phase 3 Cloudflare-first Control Plane
+
+### Summary
+
+Cloudflare Workers + Durable Objects are now the **primary public API surface**. All public traffic routes through the Cloudflare control plane; the Modal gateway is internal-only and requires `X-Internal-Auth`.
+
+### Key Changes
+
+- **Authorization required** on all Worker endpoints (except `GET /health`).
+- **Rate limiting** enforced at the edge using the Rate Limiting binding.
+- **Session keys** map to `session_id` via KV using `session_key:<scope>:<session_key>`
+  keys (default TTL 30 days).
+- **WebSocket fan-out and presence** are active via EventBus DO.
+
+### Breaking Changes
+
+- Clients must use the Cloudflare Worker URL for all public requests.
+- Direct calls to Modal endpoints without `X-Internal-Auth` now return 401.
+- Clients should persist `session_id` for reliable session resumption.
+- Modal prompt queue endpoints are removed; use Cloudflare `/session/{id}/queue`.
+
 ## Session Update (2026-01-26) - CLI Approach Removal
 
 ### Summary
@@ -1041,6 +1062,11 @@ CLI sandbox cancellation is handled differently since it runs Claude Code CLI as
 
 ### Priority 7: Follow-up Prompt Queue ✅ COMPLETE
 
+**Phase 3 update:** Modal Dict prompt queue and execution state have been removed.
+Prompt queueing now lives in the Cloudflare SessionAgent Durable Object
+(`cloudflare-control-plane/src/durable-objects/SessionAgent.ts`). The details
+below describe the legacy Modal implementation for historical context.
+
 **Problem**: Can't send follow-up prompts while agent is still executing.
 
 **Solution**: Queue follow-up prompts to run after current execution.
@@ -1321,8 +1347,8 @@ Same pattern for CLI sandbox.
 - Check flag in `can_use_tool` handler
 
 #### Priority 7: Follow-up Prompt Queue
-- Add per-session prompt queue in `SESSION_STORE`
-- Queue prompts during execution, process after
+- Implemented in Cloudflare SessionAgent DO (SQLite)
+- Modal Dict queue is deprecated and removed
 
 #### Priority 6: Multiplayer Session Support
 - Add `user_id` field for attribution (DONE in QueryBody)

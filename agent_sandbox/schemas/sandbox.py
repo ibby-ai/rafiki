@@ -27,6 +27,7 @@ class QueryBody(BaseSchema):
     fork_session: bool = False
     job_id: str | None = None
     user_id: str | None = None  # For statistics tracking
+    tenant_id: str | None = None  # Tenant context from Cloudflare Worker
     warm_id: str | None = None  # Pre-warm correlation ID from POST /warm
 
     @field_validator("job_id")

@@ -17,6 +17,9 @@ modal setup
 
 # Create the required API secret
 modal secret create anthropic-secret ANTHROPIC_API_KEY=your-key-here
+
+# Cloudflare control plane (internal auth)
+modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
 ```
 
 ### Step 2: Verify It Works (5 min)
@@ -54,6 +57,8 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
   -d '{"question":"Hello, what can you do?"}'
 ```
+
+Note: `/health_check` is internal to the sandbox tunnel. Use `/health` on the gateway for public checks.
 
 ### What to Read Next
 
@@ -185,4 +190,3 @@ This pattern optimizes for low latency and resource efficiency - see [Architectu
 - [Main README](../README.md) - Quickstart and project overview
 - [Modal Documentation](https://modal.com/docs) - Official Modal platform docs
 - [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/python) - Agent SDK reference
-

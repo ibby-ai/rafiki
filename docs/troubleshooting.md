@@ -16,11 +16,11 @@ modal secret list
 # 3. Test a simple run
 modal run -m agent_sandbox.app
 
-# 4. Check gateway health (if running)
-curl "${DEV_URL}/health"
+# 4. Check Cloudflare control plane health
+curl "https://<your-worker>.workers.dev/health"
 
-# 5. Check background sandbox health (full service check)
-curl "${DEV_URL}/health_check"
+# 5. Check background sandbox info (internal only)
+curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
 ```
 
 ---
@@ -85,6 +85,73 @@ modal setup
 ```
 
 ---
+
+### "Missing internal auth token" (401)
+
+**Symptoms:**
+- `{"ok": false, "error": "Missing internal auth token"}`
+- HTTP 401 from Modal gateway endpoints (`/query`, `/query_stream`, `/submit`, `/jobs/*`)
+
+**Cause:** Modal endpoints now require `X-Internal-Auth` on all non-health requests.
+
+**Solutions:**
+
+1. **Use the Cloudflare Worker for public traffic** (recommended).
+2. **For internal calls**, include the header:
+   ```bash
+   -H "X-Internal-Auth: <internal-token>"
+   ```
+3. **Ensure the secret exists**:
+   ```bash
+  modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+```
+
+---
+
+### "Unauthorized" from Cloudflare Worker (401)
+
+**Symptoms:**
+- `{"ok": false, "error": "Unauthorized"}`
+- HTTP 401 on Worker endpoints (except `/health`)
+
+**Cause:** Missing or invalid session token (`Authorization: Bearer <token>` or `token=<token>` for WebSockets).
+
+**Solutions:**
+
+1. **Include the Authorization header** on all public requests.
+2. **Verify session tokens** are signed with `SESSION_SIGNING_SECRET`.
+
+---
+
+### "Too Many Requests" from Cloudflare Worker (429)
+
+**Symptoms:**
+- `{"ok": false, "error": "Rate limit exceeded"}`
+- HTTP 429 responses under load
+
+**Cause:** Edge rate limits exceeded for the user/session.
+
+**Solutions:**
+
+1. Reduce request frequency or batch calls.
+2. Confirm rate limit thresholds in Cloudflare configuration.
+3. Validate the Rate Limiting binding (`RATE_LIMITER`) is configured in `wrangler.jsonc`.
+
+---
+
+### "Session not found" when using `session_key`
+
+**Symptoms:**
+- New session created instead of resuming
+- `session_id` changes unexpectedly across requests
+
+**Cause:** KV mapping for `session_key` is missing or expired.
+
+**Solutions:**
+
+1. Persist and reuse the returned `session_id` when possible.
+2. Ensure `SESSION_CACHE` is configured and reachable.
+3. Re-send `session_key` to rebuild the mapping (default TTL 30 days).
 
 ## Sandbox Issues
 
@@ -172,14 +239,35 @@ sandbox_memory: int = 4096  # Increase from 2048
    modal serve -m agent_sandbox.app
    ```
 
-2. **Use a health check ping** to keep the sandbox warm:
+2. **Use a gateway ping** to keep the sandbox warm:
    ```bash
    # Run every 5 minutes via cron or external service
-   # Use /health_check (not /health) to ensure the sandbox stays active
-   curl "${DEV_URL}/health_check"
+   # /service_info triggers sandbox discovery (internal-only)
+   curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
    ```
 
 3. **Accept cold starts** if traffic is sporadic (saves costs)
+
+---
+
+### Hot-Reload Conflict (Modal serve + Wrangler)
+
+**Symptoms:**
+- `modal serve` crashes or restarts unexpectedly
+- Errors during dev when Wrangler updates its local SQLite state
+
+**Cause:** Wrangler’s dev server can modify its local SQLite state while Modal hot-reload is running, which can cause file contention.
+
+**Workaround:**
+1. Stop both dev servers.
+2. Restart `modal serve -m agent_sandbox.app`.
+3. Restart `wrangler dev` for the Cloudflare worker.
+
+If the issue persists, terminate and recreate the background sandbox:
+```bash
+modal run -m agent_sandbox.app::terminate_service_sandbox
+modal serve -m agent_sandbox.app
+```
 
 ---
 
@@ -321,7 +409,7 @@ _allowed_tools = [
    ```bash
    # Available endpoints:
    GET  /health         # Gateway health
-   GET  /health_check   # Service health (proxied)
+  GET  /health_check   # Service health (internal-only, controller)
    POST /query          # Agent query
    POST /query_stream   # Streaming query
    GET  /service_info   # Sandbox information

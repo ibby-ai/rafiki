@@ -42,13 +42,15 @@ import httpx
 import modal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
 from agent_sandbox.config.settings import Settings, get_modal_secrets
 from agent_sandbox.jobs import (
     JOB_QUEUE,
+    DuplicateJobIdError,
+    InvalidJobIdError,
     # Multiplayer session functions
     authorize_session_user,
     bump_attempts,
@@ -57,7 +59,6 @@ from agent_sandbox.jobs import (
     claim_prewarm,
     claim_warm_sandbox,
     cleanup_stale_pool_entries,
-    clear_session_queue,
     create_session_metadata,
     enqueue_job,
     generate_pool_sandbox_name,
@@ -72,13 +73,10 @@ from agent_sandbox.jobs import (
     get_multiplayer_status,
     get_prewarm,
     get_prewarm_status,
-    get_prompt_queue_status,
-    get_queue_size,
     get_session_cancellation,
     get_session_history,
     get_session_message_count,
     get_session_metadata,
-    get_session_queue,
     get_session_snapshot,
     get_session_users,
     get_stats,
@@ -87,17 +85,14 @@ from agent_sandbox.jobs import (
     # Workspace retention functions
     get_workspace_retention_status,
     is_job_due,
-    is_session_executing,
     job_workspace_root,
     list_workspaces_for_cleanup,
     mark_prewarm_failed,
     mark_workspace_deleted,
     normalize_job_id,
-    queue_prompt,
     register_prewarm,
     register_warm_sandbox,
     remove_from_pool,
-    remove_queued_prompt,
     resolve_job_artifact,
     revoke_session_user,
     set_image_version,
@@ -106,6 +101,10 @@ from agent_sandbox.jobs import (
     store_session_snapshot,
     update_job,
     update_prewarm_ready,
+)
+from agent_sandbox.middleware.cloudflare_auth import (
+    INTERNAL_AUTH_HEADER,
+    internal_auth_middleware,
 )
 from agent_sandbox.prompts.prompts import DEFAULT_QUESTION
 from agent_sandbox.schemas import (
@@ -116,13 +115,7 @@ from agent_sandbox.schemas import (
     # Multiplayer session schemas
     MessageHistoryEntry,
     MultiplayerStatusResponse,
-    PromptQueueClearResponse,
-    PromptQueueListResponse,
-    PromptQueueStatusResponse,
     QueryBody,
-    QueuedPromptEntry,
-    QueuePromptRequest,
-    QueuePromptResponse,
     SessionCancellationStatusResponse,
     SessionHistoryResponse,
     SessionMetadataResponse,
@@ -162,6 +155,7 @@ _settings = Settings()
 _logger = logging.getLogger(__name__)
 
 web_app = FastAPI()
+web_app.middleware("http")(internal_auth_middleware)
 
 web_app.add_middleware(
     CORSMiddleware,
@@ -170,6 +164,13 @@ web_app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _add_internal_auth_header(request: Request, headers: dict[str, str]) -> None:
+    internal_auth = request.headers.get(INTERNAL_AUTH_HEADER)
+    if not internal_auth:
+        raise HTTPException(status_code=401, detail="Missing internal auth token")
+    headers[INTERNAL_AUTH_HEADER] = internal_auth
 
 
 def _base_anthropic_sdk_image() -> modal.Image:
@@ -988,7 +989,7 @@ def _http_app_volumes() -> dict[str, modal.Volume]:
     custom_domains=_settings.custom_domains or [],
 )
 def http_app():
-    """ASGI app exposing HTTP endpoints for the agent service."""
+    """Internal-only ASGI app exposing HTTP endpoints for the agent service."""
     return web_app
 
 
@@ -1005,7 +1006,6 @@ async def query_proxy(request: Request, body: QueryBody):
 
     # Resolve session_id for snapshot restoration (if resuming a session)
     resolved_session_id = body.session_id
-    # Note: We could also look up session_key -> session_id here if needed
 
     # Check for pre-warmed sandbox (from POST /warm)
     prewarm_claimed = None
@@ -1048,12 +1048,14 @@ async def query_proxy(request: Request, body: QueryBody):
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
     # Optional: per-request connect token (verified in sandbox service)
-    headers = {}
+    headers: dict[str, str] = {}
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
         )
-        headers = {"Authorization": f"Bearer {creds.token}"}
+        headers["Authorization"] = f"Bearer {creds.token}"
+
+    _add_internal_auth_header(request, headers)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
         r = await client.post(
@@ -1145,12 +1147,14 @@ async def query_stream(request: Request, body: QueryBody):
     if sb is None or url is None:
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
-    headers = {}
+    headers: dict[str, str] = {}
     if settings.enforce_connect_token:
         creds = await sb.create_connect_token.aio(
             user_metadata={"ip": request.client.host or "unknown"}
         )
-        headers = {"Authorization": f"Bearer {creds.token}"}
+        headers["Authorization"] = f"Bearer {creds.token}"
+
+    _add_internal_auth_header(request, headers)
 
     # Track session_id from stream for post-completion snapshot
     captured_session_id: str | None = None
@@ -1204,14 +1208,20 @@ async def query_stream(request: Request, body: QueryBody):
 @web_app.post("/submit", response_model=JobSubmitResponse)
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
-    job_id = enqueue_job(
-        body.question,
-        tenant_id=body.tenant_id,
-        user_id=body.user_id,
-        schedule_at=body.schedule_at,
-        webhook=body.webhook,
-        metadata=body.metadata,
-    )
+    try:
+        job_id = enqueue_job(
+            body.question,
+            job_id=body.job_id,
+            tenant_id=body.tenant_id,
+            user_id=body.user_id,
+            schedule_at=body.schedule_at,
+            webhook=body.webhook,
+            metadata=body.metadata,
+        )
+    except InvalidJobIdError as exc:
+        raise HTTPException(status_code=400, detail="Invalid job_id") from exc
+    except DuplicateJobIdError as exc:
+        raise HTTPException(status_code=409, detail="Job already exists") from exc
     return JobSubmitResponse(job_id=job_id)
 
 
@@ -1691,6 +1701,7 @@ async def prewarm_status_endpoint() -> WarmStatusResponse:
 @web_app.post("/session/{session_id}/stop", response_model=SessionStopResponse)
 async def stop_session(
     session_id: str,
+    request: Request,
     body: SessionStopRequest | None = None,
 ) -> SessionStopResponse:
     """Stop an agent session mid-execution.
@@ -1748,10 +1759,13 @@ async def stop_session(
     if mode == "immediate":
         try:
             _, service_url = await get_or_start_background_sandbox_aio()
+            headers: dict[str, str] = {}
+            _add_internal_auth_header(request, headers)
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 r = await client.post(
                     f"{service_url.rstrip('/')}/session/{session_id}/stop",
                     json={"mode": "immediate", "reason": reason, "requested_by": requested_by},
+                    headers=headers or None,
                 )
                 if r.status_code == 200:
                     controller_response = r.json()
@@ -1864,275 +1878,6 @@ async def get_cancellation_status_endpoint() -> SessionCancellationStatusRespons
 
 
 # =============================================================================
-# Prompt Queue API
-# =============================================================================
-# These endpoints manage per-session follow-up prompt queues.
-# When a session is executing, prompts can be queued instead of rejected.
-# Queued prompts are stored until the session becomes idle.
-# =============================================================================
-
-
-@web_app.get("/session/{session_id}/queue", response_model=PromptQueueListResponse)
-async def get_session_queue_endpoint(session_id: str) -> PromptQueueListResponse:
-    """Get all pending prompts in a session's queue.
-
-    Returns the list of queued prompts waiting to be processed,
-    along with the session's current execution status.
-
-    Args:
-        session_id: The session ID to get queue for.
-
-    Returns:
-        PromptQueueListResponse with queue contents and status.
-
-    Example:
-        ```bash
-        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
-        ```
-    """
-    if not _settings.enable_prompt_queue:
-        return PromptQueueListResponse(
-            ok=False,
-            session_id=session_id,
-            is_executing=False,
-            queue_size=0,
-            prompts=[],
-            max_queue_size=_settings.max_queued_prompts_per_session,
-        )
-
-    prompts = get_session_queue(session_id)
-    is_exec = is_session_executing(session_id)
-
-    # Add position numbers to prompts
-    prompt_entries = [
-        QueuedPromptEntry(
-            prompt_id=p["prompt_id"],
-            question=p["question"],
-            user_id=p.get("user_id"),
-            queued_at=p["queued_at"],
-            expires_at=p["expires_at"],
-            position=i + 1,
-        )
-        for i, p in enumerate(prompts)
-    ]
-
-    return PromptQueueListResponse(
-        ok=True,
-        session_id=session_id,
-        is_executing=is_exec,
-        queue_size=len(prompts),
-        prompts=prompt_entries,
-        max_queue_size=_settings.max_queued_prompts_per_session,
-    )
-
-
-@web_app.post("/session/{session_id}/queue", response_model=QueuePromptResponse)
-async def queue_prompt_endpoint(
-    session_id: str,
-    body: QueuePromptRequest,
-) -> QueuePromptResponse:
-    """Queue a follow-up prompt for a session.
-
-    If the session is currently executing, the prompt is queued and will
-    be available for processing after the current query completes.
-    If the session is idle, the prompt is still queued (client can then
-    decide to process it immediately via the normal /query endpoint).
-
-    Args:
-        session_id: The session ID to queue the prompt for.
-        body: QueuePromptRequest containing the prompt text.
-
-    Returns:
-        QueuePromptResponse with queue status and prompt details.
-
-    Example:
-        ```bash
-        curl -X POST 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue' \\
-          -H 'Content-Type: application/json' \\
-          -d '{"question": "Follow-up question here"}'
-        ```
-    """
-    if not _settings.enable_prompt_queue:
-        return QueuePromptResponse(
-            ok=False,
-            queued=False,
-            session_id=session_id,
-            error="Prompt queue feature is disabled",
-        )
-
-    result = queue_prompt(
-        session_id=session_id,
-        question=body.question,
-        user_id=body.user_id,
-    )
-
-    if result.get("queued"):
-        is_exec = is_session_executing(session_id)
-        message = "Prompt queued"
-        if is_exec:
-            message = "Prompt queued. Session is executing, will process after current query."
-        else:
-            message = "Prompt queued. Session is idle, ready for processing."
-
-        return QueuePromptResponse(
-            ok=True,
-            queued=True,
-            session_id=session_id,
-            prompt_id=result.get("prompt_id"),
-            position=result.get("position"),
-            queue_size=result.get("queue_size", 0),
-            expires_at=result.get("expires_at"),
-            message=message,
-        )
-    else:
-        return QueuePromptResponse(
-            ok=False,
-            queued=False,
-            session_id=session_id,
-            queue_size=result.get("queue_size", 0),
-            error=result.get("error", "Failed to queue prompt"),
-        )
-
-
-@web_app.delete("/session/{session_id}/queue", response_model=PromptQueueClearResponse)
-async def clear_session_queue_endpoint(session_id: str) -> PromptQueueClearResponse:
-    """Clear all pending prompts from a session's queue.
-
-    Args:
-        session_id: The session ID to clear queue for.
-
-    Returns:
-        PromptQueueClearResponse with number of prompts cleared.
-
-    Example:
-        ```bash
-        curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue'
-        ```
-    """
-    if not _settings.enable_prompt_queue:
-        return PromptQueueClearResponse(
-            ok=False,
-            session_id=session_id,
-            cleared_count=0,
-            message="Prompt queue feature is disabled",
-        )
-
-    count = clear_session_queue(session_id)
-    return PromptQueueClearResponse(
-        ok=True,
-        session_id=session_id,
-        cleared_count=count,
-        message=f"Cleared {count} queued prompt(s)" if count > 0 else "Queue was already empty",
-    )
-
-
-@web_app.delete("/session/{session_id}/queue/{prompt_id}")
-async def remove_queued_prompt_endpoint(session_id: str, prompt_id: str) -> JSONResponse:
-    """Remove a specific prompt from the queue by its ID.
-
-    Args:
-        session_id: The session ID.
-        prompt_id: The prompt ID to remove.
-
-    Returns:
-        JSONResponse with removal status.
-
-    Example:
-        ```bash
-        curl -X DELETE 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/queue/prompt_xyz'
-        ```
-    """
-    if not _settings.enable_prompt_queue:
-        return JSONResponse(
-            {"ok": False, "removed": False, "error": "Prompt queue feature is disabled"},
-            status_code=503,
-        )
-
-    removed = remove_queued_prompt(session_id, prompt_id)
-    if removed:
-        return JSONResponse(
-            {"ok": True, "removed": True, "session_id": session_id, "prompt_id": prompt_id}
-        )
-    else:
-        return JSONResponse(
-            {
-                "ok": False,
-                "removed": False,
-                "session_id": session_id,
-                "prompt_id": prompt_id,
-                "error": "Prompt not found in queue",
-            },
-            status_code=404,
-        )
-
-
-@web_app.get("/session/{session_id}/executing")
-async def is_session_executing_endpoint(session_id: str) -> JSONResponse:
-    """Check if a session is currently executing a query.
-
-    Useful for clients to decide whether to queue a prompt or
-    submit it directly.
-
-    Args:
-        session_id: The session ID to check.
-
-    Returns:
-        JSONResponse with execution status.
-
-    Example:
-        ```bash
-        curl 'https://<org>--test-sandbox-http-app.modal.run/session/sess_abc123/executing'
-        ```
-    """
-    is_exec = is_session_executing(session_id) if _settings.enable_prompt_queue else False
-    queue_size = get_queue_size(session_id) if _settings.enable_prompt_queue else 0
-    return JSONResponse(
-        {
-            "ok": True,
-            "session_id": session_id,
-            "is_executing": is_exec,
-            "queue_size": queue_size,
-            "queue_enabled": _settings.enable_prompt_queue,
-        }
-    )
-
-
-@web_app.get("/session/queue/status", response_model=PromptQueueStatusResponse)
-async def get_prompt_queue_status_endpoint() -> PromptQueueStatusResponse:
-    """Get current status of prompt queues across all sessions.
-
-    Returns statistics about queued prompts including counts of
-    active, expired, and total queued prompts.
-
-    Example:
-        ```bash
-        curl 'https://<org>--test-sandbox-http-app.modal.run/session/queue/status'
-        ```
-    """
-    if not _settings.enable_prompt_queue:
-        return PromptQueueStatusResponse(
-            enabled=False,
-            sessions_with_queues=0,
-            total_queued_prompts=0,
-            active_prompts=0,
-            expired_prompts=0,
-            max_queue_size=_settings.max_queued_prompts_per_session,
-            entry_expiry_seconds=_settings.prompt_queue_entry_expiry_seconds,
-        )
-
-    status = get_prompt_queue_status()
-    return PromptQueueStatusResponse(
-        enabled=True,
-        sessions_with_queues=status["sessions_with_queues"],
-        total_queued_prompts=status["total_queued_prompts"],
-        active_prompts=status["active_prompts"],
-        expired_prompts=status["expired_prompts"],
-        max_queue_size=status["max_queue_size"],
-        entry_expiry_seconds=status["entry_expiry_seconds"],
-    )
-
-
-# =============================================================================
 # Multiplayer Session Endpoints
 # =============================================================================
 # These endpoints support multiplayer session collaboration where multiple users
@@ -2168,9 +1913,8 @@ async def get_session_metadata_endpoint(session_id: str) -> SessionMetadataRespo
             message="Session metadata not found",
         )
 
-    # Check for snapshot and execution state
+    # Check for snapshot presence
     snapshot = get_session_snapshot(session_id)
-    is_exec = is_session_executing(session_id)
 
     return SessionMetadataResponse(
         ok=True,
@@ -2183,7 +1927,7 @@ async def get_session_metadata_endpoint(session_id: str) -> SessionMetadataRespo
         authorized_users=metadata.get("authorized_users", []),
         message_count=len(metadata.get("messages", [])),
         is_shared=bool(metadata.get("authorized_users")),
-        is_executing=is_exec,
+        is_executing=False,
         has_snapshot=snapshot is not None,
     )
 
@@ -2492,6 +2236,11 @@ SANDBOX_NAME = _settings.sandbox_name
 SERVICE_PORT = _settings.service_port
 PERSIST_VOL_NAME = _settings.persist_vol_name
 
+# Dedicated deployed app name for sandbox management.
+# Using App.lookup() ensures the app is deployed (not ephemeral), which is
+# required for named sandboxes to work with Sandbox.from_name().
+SANDBOX_APP_NAME = "sandbox-manager-app"
+
 
 # =============================================================================
 # GLOBAL STATE MANAGEMENT
@@ -2554,7 +2303,9 @@ def cleanup_sessions():
     by attempting to fetch its tunnel URLs. Updates SESSIONS status accordingly.
     """
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        # Ensure sandbox-manager-app exists (required for from_name to work)
+        modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         _ = sb.tunnels()  # Will raise NotFoundError if sandbox is gone
         SESSIONS[SANDBOX_NAME] = {**SESSIONS.get(SANDBOX_NAME, {}), "status": "running"}
     except modal_exc.NotFoundError:
@@ -2582,6 +2333,7 @@ def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
     """
     pool_name = generate_pool_sandbox_name()
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
 
     try:
         sb = modal.Sandbox.create(
@@ -2591,7 +2343,7 @@ def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
             "0.0.0.0",
             "--port",
             str(SERVICE_PORT),
-            app=app,
+            app=sandbox_app,
             image=agent_sdk_image,
             secrets=agent_sdk_secrets,
             workdir="/root/app",
@@ -2949,9 +2701,12 @@ def get_or_start_background_sandbox(
     # Modal sandboxes can be given names. This allows multiple workers (or even
     # separate Modal function invocations) to discover and reuse the same
     # long-running sandbox. This is key to the "persistent service" pattern.
+    # Using App.lookup() ensures the app is deployed (not ephemeral), which is
+    # required for Sandbox.from_name() to work in both dev and prod modes.
     # -------------------------------------------------------------------------
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         tunnels = sb.tunnels()
         if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
             SANDBOX = sb
@@ -3065,8 +2820,11 @@ def get_or_start_background_sandbox(
     # -------------------------------------------------------------------------
     # If no existing sandbox was found, create one. This runs uvicorn inside
     # an isolated container with its own filesystem, network, and resources.
+    # Using App.lookup() ensures sandbox is associated with a deployed app,
+    # allowing Sandbox.from_name() to work in both dev and prod modes.
     # -------------------------------------------------------------------------
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
     try:
         SANDBOX = modal.Sandbox.create(
             # Command to run inside the sandbox (uvicorn starts our FastAPI app)
@@ -3077,7 +2835,7 @@ def get_or_start_background_sandbox(
             "--port",
             str(SERVICE_PORT),
             # MODAL-SPECIFIC PARAMETERS EXPLAINED:
-            app=app,  # Associates sandbox with this Modal App
+            app=sandbox_app,  # Associates sandbox with deployed sandbox-manager-app
             image=sandbox_image,  # Container image (base or snapshot for restoration)
             secrets=agent_sdk_secrets,  # Inject secrets (API keys) into environment
             workdir="/root/app",  # Working directory inside container
@@ -3097,13 +2855,8 @@ def get_or_start_background_sandbox(
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        try:
-            SANDBOX = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
+        # With a deployed app, from_name works in both dev and prod modes
+        SANDBOX = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
 
     # Optional: set tags after creation (useful for filtering in Modal dashboard)
     SANDBOX.set_tags({"role": "service", "app": "test-sandbox", "port": str(SERVICE_PORT)})
@@ -3196,9 +2949,12 @@ async def get_or_start_background_sandbox_aio(
     if SANDBOX and SERVICE_URL:
         return SANDBOX, SERVICE_URL
 
-    # Attempt global reuse by name across workers/processes
+    # Attempt global reuse by name across workers/processes.
+    # Using App.lookup() ensures the app is deployed (not ephemeral), which is
+    # required for Sandbox.from_name() to work in both dev and prod modes.
     try:
-        sb = modal.Sandbox.from_name("test-sandbox", SANDBOX_NAME)
+        sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
         # Poll tunnels until URL appears (mirrors sync behavior)
         deadline = anyio.current_time() + 30
         url = None
@@ -3302,8 +3058,11 @@ async def get_or_start_background_sandbox_aio(
                 "Error checking warm pool (async), will create new sandbox", exc_info=True
             )
 
-    # Create with persistent volume
+    # Create with persistent volume.
+    # Using App.lookup() ensures sandbox is associated with a deployed app,
+    # allowing Sandbox.from_name() to work in both dev and prod modes.
     svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
     try:
         SANDBOX = await modal.Sandbox.create.aio(
             "uvicorn",
@@ -3312,7 +3071,7 @@ async def get_or_start_background_sandbox_aio(
             "0.0.0.0",
             "--port",
             str(SERVICE_PORT),
-            app=app,
+            app=sandbox_app,  # Associates sandbox with deployed sandbox-manager-app
             image=sandbox_image,  # Use snapshot image if available
             secrets=agent_sdk_secrets,
             workdir="/root/app",
@@ -3325,13 +3084,8 @@ async def get_or_start_background_sandbox_aio(
             verbose=True,
         )
     except modal_exc.AlreadyExistsError:
-        try:
-            SANDBOX = await modal.Sandbox.from_name.aio("test-sandbox", SANDBOX_NAME)
-        except modal_exc.NotFoundError:
-            # In dev mode, from_name doesn't work since app isn't deployed.
-            raise modal_exc.AlreadyExistsError(
-                f"Sandbox '{SANDBOX_NAME}' already exists but cannot be looked up in dev mode"
-            )
+        # With a deployed app, from_name works in both dev and prod modes
+        SANDBOX = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
 
     # Optional: set tags after creation
     await SANDBOX.set_tags.aio(

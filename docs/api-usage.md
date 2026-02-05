@@ -16,57 +16,38 @@ This guide explains how end users interact with your deployed agent sandbox appl
 
 ## Deployment and Public URLs
 
-### Deploying the Application
+### Public API (Cloudflare Worker)
 
-To deploy your application to production:
+The **public** API surface is the Cloudflare Worker. Your public URL will look like:
 
-```bash
-modal deploy -m agent_sandbox.deploy
+```
+https://<your-worker>.workers.dev
 ```
 
-After deployment, Modal automatically provides a public HTTPS URL.
+If you use a custom domain, replace it with your own host (for example `https://api.example.com`).
 
-### URL Format
+### Internal API (Modal Gateway)
 
-The public URL follows this pattern:
+Modal still provides a gateway URL, but it is **internal-only** and requires
+`X-Internal-Auth` on all non-health endpoints:
 
 ```
 https://<your-org>--test-sandbox-http-app.modal.run
 ```
 
-**Components:**
-- `<your-org>`: Your Modal organization name (e.g., `acme-corp`)
-- `test-sandbox`: The app name (from `modal.App("test-sandbox")`)
-- `http-app`: The function name (from `@modal.asgi_app()`)
+Use this URL only for internal integration or debugging, not for public clients.
 
-**Example:**
-```
-https://acme-corp--test-sandbox-http-app.modal.run
+### Deploying
+
+```bash
+modal deploy -m agent_sandbox.deploy
 ```
 
-### Finding Your URL
-
-You can find your deployment URL in several ways:
-
-1. **Modal Dashboard**: After deployment, check the dashboard for your app
-2. **Terminal Output**: The URL is displayed after `modal deploy` completes
-3. **Modal CLI**: Run `modal app list` to see all deployed apps and their URLs
-
-### Development vs Production URLs
-
-**Development** (when using `modal serve`):
-```
-https://<org>--test-sandbox-http-app-dev.modal.run
-```
-
-**Production** (when using `modal deploy`):
-```
-https://<org>--test-sandbox-http-app.modal.run
-```
-
-Note the `-dev` suffix in development URLs.
+For the Cloudflare Worker, deploy via `wrangler` in `cloudflare-control-plane/`.
 
 ## Available Endpoints
+
+Endpoints below assume the **Cloudflare Worker** base URL unless explicitly marked as internal-only.
 
 ### 1. GET /health - Health Check
 
@@ -74,7 +55,7 @@ Note the `-dev` suffix in development URLs.
 
 **Request:**
 ```bash
-curl https://acme-corp--test-sandbox-http-app.modal.run/health
+curl https://your-worker.workers.dev/health
 ```
 
 **Response:**
@@ -96,13 +77,13 @@ curl https://acme-corp--test-sandbox-http-app.modal.run/health
 **Example Usage:**
 ```bash
 # Simple health check
-curl https://your-url.modal.run/health
+curl https://your-worker.workers.dev/health
 
 # With verbose output
-curl -v https://your-url.modal.run/health
+curl -v https://your-worker.workers.dev/health
 
 # Check response time
-time curl -s https://your-url.modal.run/health
+time curl -s https://your-worker.workers.dev/health
 ```
 
 ---
@@ -115,6 +96,7 @@ time curl -s https://your-url.modal.run/health
 
 **Request Headers:**
 ```
+Authorization: Bearer <session_token>
 Content-Type: application/json
 ```
 
@@ -134,12 +116,13 @@ Content-Type: application/json
 | `question` | string | (required) | The question to ask the agent |
 | `agent_type` | string | `"default"` | Agent type: `"default"`, `"marketing"`, `"research"` |
 | `session_id` | string | `null` | Resume from a specific session |
-| `session_key` | string | `null` | Server-side key for session tracking |
+| `session_key` | string | `null` | Session key mapped to `session_id` via KV (`session_key:<scope>:<session_key>`) |
 | `fork_session` | boolean | `false` | Fork session instead of continuing |
 
 **Request Example:**
 ```bash
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the capital of Canada?"}'
 ```
@@ -147,19 +130,22 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
 **Agent Type Example:**
 ```bash
 # Marketing agent for content creation
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Write a tagline for a productivity app", "agent_type": "marketing"}'
 
 # Research agent for multi-agent investigation
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Research AI agent frameworks", "agent_type": "research"}'
 ```
 
 **Session Resumption Example:**
 ```bash
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Continue the plan", "session_key": "user-123"}'
 ```
@@ -200,7 +186,7 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
 
 **Session fields:**
 - `session_id`: Resume from a specific session returned by a prior response.
-- `session_key`: Server-side key used to store or resume the last session for a user.
+- `session_key`: Cloudflare Worker resolves this via KV (`session_key:<scope>:<session_key>`) and persists the mapping (default TTL 30 days).
 - `fork_session`: When resuming, start a new branched session instead of continuing the original.
 
 **Status Codes:**
@@ -217,7 +203,8 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query \
 
 **Example with Error Handling:**
 ```bash
-curl -X POST https://your-url.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Explain Python"}' \
   -w "\nHTTP Status: %{http_code}\n"
@@ -225,14 +212,59 @@ curl -X POST https://your-url.modal.run/query \
 
 ---
 
-### 3. POST /query_stream - Execute Agent Query (Streaming)
+### 3. /query_stream - Execute Agent Query (Streaming)
 
-**Purpose:** Stream agent responses in real-time via Server-Sent Events (SSE)
+#### Cloudflare Worker (WebSocket, Public)
+
+**Endpoint:** `GET /query_stream` (WebSocket upgrade required)
+
+Authentication is required via `Authorization: Bearer <session_token>` header
+or `token=<session_token>` query parameter.
+
+**Request:** Open a WebSocket and send the query as the first message:
+
+```json
+{
+  "question": "Your question here",
+  "agent_type": "default",
+  "session_id": null,
+  "session_key": null,
+  "user_id": null,
+  "tenant_id": null
+}
+```
+
+**Example (wscat):**
+```bash
+wscat -c "wss://your-worker.workers.dev/query_stream?token=<session_token>"
+> {"question":"Explain quantum computing in detail"}
+```
+
+**Server → Client Events:**
+- `connection_ack`
+- `session_update`
+- `query_start`
+- `assistant_message` (always `partial: false`)
+- `tool_use`
+- `tool_result`
+- `execution_state` (system/result/unknown SSE events)
+- `query_complete`
+- `query_error`
+- `prompt_queued`
+
+**Status Codes:**
+- `101 Switching Protocols`: WebSocket upgrade successful
+- `426 Upgrade Required`: Missing WebSocket upgrade
+
+#### Modal Gateway (SSE, Internal Only)
 
 **Endpoint:** `POST /query_stream`
 
+**Requires:** `X-Internal-Auth` header (raw token, no `Bearer` prefix)
+
 **Request Headers:**
 ```
+Authorization: Bearer <session_token>
 Content-Type: application/json
 ```
 
@@ -247,24 +279,6 @@ Content-Type: application/json
 }
 ```
 
-See [POST /query](#2-post-query---execute-agent-query-non-streaming) for field descriptions.
-
-**Request Example:**
-```bash
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/query_stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Explain quantum computing in detail"}' \
-  --no-buffer
-```
-
-**Streaming with Agent Type:**
-```bash
-# Stream research agent response
-curl -N -X POST https://acme-corp--test-sandbox-http-app.modal.run/query_stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Research cloud computing trends", "agent_type": "research"}'
-```
-
 **Response:** Server-Sent Events (SSE) stream
 ```
 event: assistant
@@ -277,33 +291,12 @@ event: done
 data: {"text":"...","is_complete":true,"duration_ms":1234}
 ```
 
-**Response Format:**
-- Each event includes `event:` and `data:` lines
-- `data:` payloads are JSON objects (not raw strings)
-- Empty line (`\n\n`) separates events
-- Final event: `event: done` with a summary payload
-
 **Status Codes:**
 - `200 OK`: Stream started successfully
 - `400 Bad Request`: Invalid request body
 - `401 Unauthorized`: Missing or invalid authentication token
 - `500 Internal Server Error`: Agent error
 - `503 Service Unavailable`: Sandbox not ready
-
-**Characteristics:**
-- **Timeout:** None (streams until complete)
-- **Response Type:** Server-Sent Events (SSE)
-- **Content-Type:** `text/event-stream`
-- **Best For:** Long-form answers, interactive UIs, real-time feedback, better user experience
-
-**Example with Verbose Output:**
-```bash
-curl -X POST https://your-url.modal.run/query_stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Write a Python function"}' \
-  --no-buffer \
-  -v
-```
 
 ---
 
@@ -350,7 +343,8 @@ Content-Type: application/json
 
 **Request Example:**
 ```bash
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
+curl -X POST https://your-worker.workers.dev/submit \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Summarize the latest earnings report", "tenant_id": "acme", "user_id": "user-123"}'
 ```
@@ -358,7 +352,8 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
 **Background Job with Agent Type:**
 ```bash
 # Submit a marketing content job
-curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
+curl -X POST https://your-worker.workers.dev/submit \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "question": "Write a comprehensive blog post about AI productivity tools",
@@ -407,7 +402,8 @@ curl -X POST https://acme-corp--test-sandbox-http-app.modal.run/submit \
 
 **Request Example:**
 ```bash
-curl https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response (Queued):**
@@ -486,7 +482,8 @@ curl https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-
 
 **Request Example:**
 ```bash
-curl https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts
+curl https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -519,7 +516,8 @@ curl https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-
 
 **Request Example:**
 ```bash
-curl -O https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts/report.md
+curl -O https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a/artifacts/report.md \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -540,7 +538,8 @@ curl -O https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c
 
 **Request Example:**
 ```bash
-curl -X DELETE https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a
+curl -X DELETE https://your-worker.workers.dev/jobs/4f7b2a5c-9c2b-4c9d-9b3b-2a1fd2e3c12a \
+  -H "Authorization: Bearer <session_token>"
 ```
 
 **Response:**
@@ -560,15 +559,72 @@ curl -X DELETE https://acme-corp--test-sandbox-http-app.modal.run/jobs/4f7b2a5c-
 
 ---
 
-### 9. GET /service_info - Service Information
+### 9. /session/{session_id}/queue - Prompt Queue (Cloudflare)
+
+**Purpose:** Manage queued follow-up prompts for a session
+
+**Endpoints:**
+
+- `GET /session/{session_id}/queue` - List queued prompts
+- `POST /session/{session_id}/queue` - Queue a prompt
+- `DELETE /session/{session_id}/queue` - Clear the queue
+- `DELETE /session/{session_id}/queue/{prompt_id}` - Remove a single prompt
+
+**Request Headers:**
+```
+Authorization: Bearer <session_token>
+Content-Type: application/json
+```
+
+**Request Example (queue prompt):**
+```bash
+curl -X POST https://your-worker.workers.dev/session/sess_abc123/queue \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Follow-up question","user_id":"user-123"}'
+```
+
+**Response (list queue):**
+```json
+{
+  "ok": true,
+  "session_id": "sess_abc123",
+  "is_executing": false,
+  "queue_size": 1,
+  "max_queue_size": 10,
+  "prompts": [
+    {
+      "prompt_id": "prompt-uuid",
+      "question": "Follow-up question",
+      "user_id": "user-123",
+      "queued_at": 1735840100,
+      "expires_at": 1735843700,
+      "position": 1
+    }
+  ]
+}
+```
+
+**Status Codes:**
+- `200 OK`: Success
+- `401 Unauthorized`: Missing or invalid authentication token
+- `404 Not Found`: Session not found
+- `429 Too Many Requests`: Queue limit reached
+
+---
+
+### 10. GET /service_info - Service Information
 
 **Purpose:** Get information about the background sandbox service
 
 **Endpoint:** `GET /service_info`
 
+**Internal Only:** Modal gateway endpoint (requires `X-Internal-Auth`).
+
 **Request:**
 ```bash
-curl https://acme-corp--test-sandbox-http-app.modal.run/service_info
+curl https://acme-corp--test-sandbox-http-app.modal.run/service_info \
+  -H "X-Internal-Auth: <internal-token>"
 ```
 
 **Response:**
@@ -611,12 +667,13 @@ function extractText(messages) {
     .join('\n');
 }
 
-async function askAgent(question, baseUrl) {
+async function askAgent(question, baseUrl, sessionToken) {
   try {
     const response = await fetch(`${baseUrl}/query`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
       },
       body: JSON.stringify({ question })
     });
@@ -634,12 +691,49 @@ async function askAgent(question, baseUrl) {
 }
 
 // Usage
-const baseUrl = 'https://acme-corp--test-sandbox-http-app.modal.run';
-const answer = await askAgent("What is Python?");
+const baseUrl = 'https://your-worker.workers.dev';
+const sessionToken = '<session_token>';
+const answer = await askAgent("What is Python?", baseUrl, sessionToken);
 console.log(answer);
 ```
 
-### JavaScript/Fetch (Streaming)
+### JavaScript/WebSocket (Streaming, Cloudflare)
+
+```javascript
+function streamAgentWebSocket(question, baseUrl, sessionToken, onEvent) {
+  const ws = new WebSocket(
+    `${baseUrl.replace('https://', 'wss://')}/query_stream?token=${sessionToken}`
+  );
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ question }));
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    onEvent(msg);
+  };
+
+  ws.onerror = (err) => console.error('WebSocket error:', err);
+  ws.onclose = () => console.log('WebSocket closed');
+
+  return ws;
+}
+
+// Usage
+const baseUrl = 'https://your-worker.workers.dev';
+const sessionToken = '<session_token>';
+streamAgentWebSocket("Explain machine learning", baseUrl, sessionToken, (event) => {
+  if (event.type === 'assistant_message') {
+    process.stdout.write(event.data.content);
+  }
+  if (event.type === 'query_complete') {
+    console.log('\n\nDone!', event.data.summary);
+  }
+});
+```
+
+### JavaScript/Fetch (Streaming, Modal SSE internal-only)
 
 ```javascript
 async function streamAgentResponse(question, baseUrl, onChunk, onComplete, onError) {
@@ -648,6 +742,7 @@ async function streamAgentResponse(question, baseUrl, onChunk, onComplete, onErr
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'X-Internal-Auth': '<internal-token>',
       },
       body: JSON.stringify({ question })
     });
@@ -698,7 +793,7 @@ async function streamAgentResponse(question, baseUrl, onChunk, onComplete, onErr
   }
 }
 
-// Usage
+// Usage (internal Modal URL)
 const baseUrl = 'https://acme-corp--test-sandbox-http-app.modal.run';
 streamAgentResponse(
   "Explain machine learning",
@@ -722,12 +817,16 @@ streamAgentResponse(
 
 ```javascript
 // Example server action or API route usage
-const baseUrl = 'https://acme-corp--test-sandbox-http-app.modal.run';
+const baseUrl = 'https://your-worker.workers.dev';
+const sessionToken = process.env.SESSION_TOKEN ?? '<session_token>';
 
 export async function submitJob(question, userId) {
   const response = await fetch(`${baseUrl}/submit`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${sessionToken}`,
+    },
     body: JSON.stringify({
       question,
       tenant_id: 'acme',
@@ -800,7 +899,7 @@ def ask_agent(question: str, base_url: str) -> Dict:
     return response.json()
 
 # Usage
-base_url = "https://acme-corp--test-sandbox-http-app.modal.run"
+base_url = "https://your-worker.workers.dev"
 result = ask_agent("What is the weather like?", base_url)
 
 if result["ok"]:
@@ -830,7 +929,10 @@ def stream_agent_response(question: str, base_url: str):
         json={"question": question},
         stream=True,
         timeout=None,
-        headers={"Content-Type": "application/json"}
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Auth": "<internal-token>",
+        }
     )
     response.raise_for_status()
 
@@ -853,7 +955,7 @@ def stream_agent_response(question: str, base_url: str):
             elif current_event == "done":
                 break
 
-# Usage
+# Usage (internal Modal URL)
 base_url = "https://acme-corp--test-sandbox-http-app.modal.run"
 for chunk in stream_agent_response("Explain AI", base_url):
     print(chunk, end='', flush=True)
@@ -869,8 +971,14 @@ from typing import Optional
 class AgentClient:
     """Client with session management for multi-turn conversations."""
 
-    def __init__(self, base_url: str, session_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        session_token: str,
+        session_key: Optional[str] = None,
+    ):
         self.base_url = base_url
+        self.session_token = session_token
         self.session_key = session_key
         self.last_session_id = None
 
@@ -886,7 +994,7 @@ class AgentClient:
         """
         payload = {"question": question}
 
-        # Use session_key for server-side session tracking
+        # Use session_key (Cloudflare resolves via KV mapping)
         if self.session_key:
             payload["session_key"] = self.session_key
         # Or use explicit session_id from prior response
@@ -899,7 +1007,8 @@ class AgentClient:
         response = requests.post(
             f"{self.base_url}/query",
             json=payload,
-            timeout=120
+            timeout=120,
+            headers={"Authorization": f"Bearer {self.session_token}"},
         )
         response.raise_for_status()
         result = response.json()
@@ -908,9 +1017,10 @@ class AgentClient:
         self.last_session_id = result.get("session_id")
         return result
 
-# Usage with session_key (server tracks last session)
+# Usage with session_key (KV-backed mapping)
 client = AgentClient(
-    base_url="https://acme-corp--test-sandbox-http-app.modal.run",
+    base_url="https://your-worker.workers.dev",
+    session_token="session-token",
     session_key="user-123"
 )
 
@@ -931,30 +1041,31 @@ print(result["summary"]["text"])
 
 **Simple Query:**
 ```bash
-curl -X POST https://your-url.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Hello, how are you?"}'
 ```
 
 **Query with Pretty JSON Output:**
 ```bash
-curl -X POST https://your-url.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is Python?"}' \
   | jq '.'
 ```
 
-**Streaming Query:**
+**Streaming Query (WebSocket):**
 ```bash
-curl -X POST https://your-url.modal.run/query_stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Explain quantum computing"}' \
-  --no-buffer
+wscat -c "wss://your-worker.workers.dev/query_stream?token=<session_token>"
+> {"question":"Explain quantum computing"}
 ```
 
 **Save Response to File:**
 ```bash
-curl -X POST https://your-url.modal.run/query \
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Authorization: Bearer <session_token>" \
   -H "Content-Type: application/json" \
   -d '{"question": "Write a Python tutorial"}' \
   -o response.json
@@ -972,7 +1083,8 @@ function AgentQuery() {
   const [streaming, setStreaming] = useState(false);
   const [summary, setSummary] = useState(null);
 
-  const baseUrl = 'https://acme-corp--test-sandbox-http-app.modal.run';
+  const baseUrl = 'https://your-worker.workers.dev';
+  const sessionToken = '<session_token>';
 
   const extractText = (messages) =>
     messages
@@ -989,7 +1101,10 @@ function AgentQuery() {
     try {
       const res = await fetch(`${baseUrl}/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
         body: JSON.stringify({ question })
       });
 
@@ -1003,56 +1118,40 @@ function AgentQuery() {
     }
   };
 
-  const handleStream = async () => {
+  const handleStream = () => {
     setStreaming(true);
     setResponse('');
 
-    try {
-      const res = await fetch(`${baseUrl}/query_stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question })
-      });
+    const wsUrl = `${baseUrl.replace('https://', 'wss://')}/query_stream?token=${sessionToken}`;
+    const ws = new WebSocket(wsUrl);
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let currentEvent = null;
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ question }));
+    };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-            continue;
-          }
-          if (line.startsWith('data: ')) {
-            const payload = JSON.parse(line.slice(6));
-            if (currentEvent === 'assistant') {
-              const text = (payload.content || [])
-                .filter((block) => block.type === 'text')
-                .map((block) => block.text)
-                .join('');
-              if (text) {
-                setResponse((prev) => prev + text);
-              }
-            } else if (currentEvent === 'done') {
-              setSummary(payload);
-            }
-          }
-        }
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'assistant_message') {
+        setResponse((prev) => prev + msg.data.content);
       }
-    } catch (error) {
-      setResponse(`Error: ${error.message}`);
-    } finally {
+      if (msg.type === 'query_complete') {
+        setSummary(msg.data.summary || null);
+        ws.close();
+      }
+      if (msg.type === 'query_error') {
+        setResponse(`Error: ${msg.data.error}`);
+        ws.close();
+      }
+    };
+
+    ws.onerror = (error) => {
+      setResponse(`Error: ${error.message || 'WebSocket error'}`);
+      ws.close();
+    };
+
+    ws.onclose = () => {
       setStreaming(false);
-    }
+    };
   };
 
   return (
@@ -1079,13 +1178,51 @@ export default AgentQuery;
 
 ## Authentication
 
-By default, the endpoints are **publicly accessible**. You can enable authentication using one of these methods:
+### Cloudflare Worker (Public)
 
-### Option A: Modal Connect Tokens
+All public endpoints (everything except `GET /health`) require
+`Authorization: Bearer <token>`. Phase 3 supports **session tokens only**,
+signed with `SESSION_SIGNING_SECRET`. WebSocket connections may pass the token
+as a `token` query parameter.
+
+All request examples in this document should be considered to include the
+`Authorization` header, even when omitted for brevity.
+
+```bash
+curl -X POST https://your-worker.workers.dev/query \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"question": "..."}'
+```
+
+### Modal Gateway (Internal Only)
+
+All non-health Modal endpoints require **`X-Internal-Auth`** (raw token, no `Bearer` prefix).
+This header is injected by the Cloudflare control plane and by internal gateways.
+
+```bash
+curl -X POST https://<org>--test-sandbox-http-app.modal.run/query \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Auth: <internal-token>" \
+  -d '{"question": "..."}'
+```
+
+### Rate Limiting
+
+Edge rate limits are enforced via the Cloudflare Rate Limiting binding
+(`RATE_LIMITER`). Exceeding limits returns `429 Too Many Requests` with a JSON
+error body. Defaults are configured in `wrangler.jsonc` and should be tuned per
+deployment.
+
+### Optional Modal Auth (Internal)
+
+These options add **additional** checks on top of `X-Internal-Auth` for internal-only usage.
+
+#### Option A: Modal Connect Tokens (Internal)
 
 **How it works:**
 1. Your application generates a connect token for each user
-2. User includes the token in the `Authorization` header
+2. Internal gateway includes the token in the `Authorization` header
 3. Modal validates the token and injects `X-Verified-User-Data` header
 4. Controller verifies the header
 
@@ -1101,20 +1238,12 @@ By default, the endpoints are **publicly accessible**. You can enable authentica
    ENFORCE_CONNECT_TOKEN = True
    ```
 
-**User Request:**
-```bash
-curl -X POST https://your-url.modal.run/query \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <connect-token>" \
-  -d '{"question": "..."}'
-```
-
-### Option B: Modal Proxy Auth Tokens
+#### Option B: Modal Proxy Auth Tokens (Internal)
 
 **How it works:**
-1. Enable proxy auth on the public HTTP endpoint
+1. Enable proxy auth on the Modal HTTP endpoint
 2. Create a Proxy Auth Token in the Modal workspace (Dashboard > Workspace > Proxy Auth Tokens)
-3. Clients include the token ID/secret in `Modal-Key` and `Modal-Secret` headers
+3. Internal callers include the token ID/secret in `Modal-Key` and `Modal-Secret` headers
 
 **Enable in your code:**
 
@@ -1127,15 +1256,6 @@ curl -X POST https://your-url.modal.run/query \
    ```python
    @modal.asgi_app(requires_proxy_auth=True)
    ```
-
-**User Request:**
-```bash
-curl -X POST https://your-url.modal.run/query \
-  -H "Content-Type: application/json" \
-  -H "Modal-Key: <token-id>" \
-  -H "Modal-Secret: <token-secret>" \
-  -d '{"question": "..."}'
-```
 
 ## Error Handling
 

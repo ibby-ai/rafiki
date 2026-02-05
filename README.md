@@ -16,6 +16,8 @@ A Modal-based agent sandbox starter that runs the **Claude Agent SDK** in isolat
 - **MCP (Model Context Protocol)** tool integration
 - **Two execution patterns**: short-lived sandboxes (ephemeral, for batch jobs) and long-lived background service (persistent, for low-latency APIs)
 
+**Phase 3 Cloudflare-first:** Public API traffic should route through the Cloudflare control plane. Direct Modal gateway access is internal-only and requires `X-Internal-Auth`.
+
 ## Table of Contents
 
 - [Requirements](#requirements)
@@ -161,10 +163,14 @@ Once the server is running, you'll get a dev endpoint URL like:
 https://<org>--test-sandbox-http-app-dev.modal.run
 ```
 
-- **Test the HTTP endpoint with curl**
+- **Internal-only note:** this Modal URL now requires `X-Internal-Auth` on all
+  non-health endpoints. Public clients should use the Cloudflare Worker instead.
+
+- **Test the HTTP endpoint with curl (internal only)**
 
 ```bash
 curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+  -H 'X-Internal-Auth: <internal-auth-token>' \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is the capital of Canada?"}'
 ```
@@ -180,6 +186,24 @@ make curl Q="What is the capital of Canada?"
 ```bash
 modal deploy -m agent_sandbox.deploy
 ```
+
+### Cloudflare Control Plane (Phase 3, Recommended for Public APIs)
+
+Use Cloudflare Workers + Durable Objects as the public API surface. The Modal
+gateway should only be accessed internally.
+
+```bash
+cd cloudflare-control-plane
+npm install
+wrangler login
+wrangler secret put INTERNAL_AUTH_SECRET
+wrangler secret put SESSION_SIGNING_SECRET
+wrangler kv:namespace create SESSION_CACHE
+npm run deploy
+```
+
+See `CLOUDFLARE_INTEGRATION.md` and `cloudflare-control-plane/README.md` for
+full deployment steps, auth configuration, and WebSocket usage.
 
 ### Service Management
 
@@ -200,11 +224,14 @@ modal run -m agent_sandbox.app::snapshot_service
 
 ### Authentication
 
-By default, the public HTTP endpoints are accessible without authentication. To enable Modal Proxy Auth, set
-`require_proxy_auth = True` in `agent_sandbox/config/settings.py` (or via `REQUIRE_PROXY_AUTH=true`). Clients must
-include Proxy Auth Token headers (`Modal-Key` and `Modal-Secret`) on each request. The HTTP examples accept
-`MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` environment variables to send these headers. See `docs/api-usage.md` for
-end-user examples.
+Public API requests must go through the Cloudflare Worker and include a
+session token (`Authorization: Bearer <token>`). The Modal gateway is
+internal-only and requires `X-Internal-Auth` on all non-health endpoints.
+
+Optional: you can still enable Modal Proxy Auth for internal traffic by setting
+`require_proxy_auth = True` in `agent_sandbox/config/settings.py` (or via
+`REQUIRE_PROXY_AUTH=true`). When enabled, internal callers must include
+`Modal-Key` and `Modal-Secret` headers in addition to `X-Internal-Auth`.
 
 If you store Proxy Auth credentials in `.env`, run:
 
@@ -214,24 +241,25 @@ set -a; source .env; set +a
 
 before running the HTTP examples or Makefile curl commands so the headers are picked up.
 
-### Session Resumption (Hybrid)
+### Session Resumption (Cloudflare)
 
 The `/query` and `/query_stream` endpoints accept optional session fields to resume prior context:
 
 - `session_id`: resume a specific prior session returned by the API
-- `session_key`: a server-side key that maps to the last session for a user (stored in a Modal Dict)
+- `session_key`: a client-provided key mapped to the last session for a user (cached in Cloudflare KV)
 - `fork_session`: when resuming, start a new branched session instead of continuing the original
 
 Example (server remembers the last session for `user-123`):
 
 ```bash
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+curl -X POST 'https://<your-worker>.workers.dev/query' \
+  -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"question":"Continue the plan","session_key":"user-123"}'
 ```
 
-The response includes a top-level `session_id` you can store for explicit resumption later. You can
-configure the backing Modal Dict name with `SESSION_STORE_NAME` in `agent_sandbox/config/settings.py`.
+The response includes a top-level `session_id` you can store for explicit resumption later.
+Session key mappings are cached in Cloudflare KV with a configurable TTL.
 
 ### Job Queue (Async Processing)
 
@@ -239,17 +267,20 @@ For long-running tasks, use the job queue to avoid blocking:
 
 ```bash
 # Submit a job
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/submit' \
+curl -X POST 'https://<your-worker>.workers.dev/submit' \
+  -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"question":"Analyze this large dataset..."}'
 # Returns: {"ok": true, "job_id": "abc123..."}
 
 # Check job status
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123...'
+curl 'https://<your-worker>.workers.dev/jobs/abc123...' \
+  -H 'Authorization: Bearer <session_token>'
 # Returns: {"ok": true, "status": "running", ...}
 
 # Cancel a queued job
-curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/abc123...'
+curl -X DELETE 'https://<your-worker>.workers.dev/jobs/abc123...' \
+  -H 'Authorization: Bearer <session_token>'
 ```
 
 **Job lifecycle:** `queued` → `running` → `complete` | `failed` | `canceled`
@@ -300,28 +331,36 @@ curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/cancellations/s
 
 ### Multiplayer Sessions
 
-Share sessions between users for collaborative workflows:
+Share sessions between users for collaborative workflows. These management
+endpoints are **internal-only** (Modal gateway) and require `X-Internal-Auth`.
+Public clients should use the Cloudflare EventBus for real-time updates.
 
 ```bash
 # Get session metadata (owner, authorized users, message count)
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/metadata'
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/metadata' \
+  -H 'X-Internal-Auth: <internal-auth-token>'
 
 # Get session users
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/users'
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/users' \
+  -H 'X-Internal-Auth: <internal-auth-token>'
 
 # Share session with another user
 curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/share' \
+  -H 'X-Internal-Auth: <internal-auth-token>' \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"user_bob"}'
 
 # Get session history (with user attribution)
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/history'
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/history' \
+  -H 'X-Internal-Auth: <internal-auth-token>'
 
 # Check system-wide multiplayer status
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/multiplayer/status'
+curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/multiplayer/status' \
+  -H 'X-Internal-Auth: <internal-auth-token>'
 
 # Revoke access from a user
 curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/unshare' \
+  -H 'X-Internal-Auth: <internal-auth-token>' \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"user_bob"}'
 ```
@@ -332,27 +371,28 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{sessio
 - Message history includes `user_id` attribution for each message
 - Shared users can continue the session with their own queries
 
-### Prompt Queue
+### Prompt Queue (Cloudflare)
 
-Queue follow-up prompts for a session, useful when the agent is busy processing:
+Queue follow-up prompts for a session via the Cloudflare control plane:
 
 ```bash
-# Check if session is currently executing
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/executing'
-
 # Get queued prompts
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+curl 'https://<your-worker>.workers.dev/session/{session_id}/queue' \
+  -H 'Authorization: Bearer <session_token>'
 
 # Queue a follow-up prompt
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue' \
+curl -X POST 'https://<your-worker>.workers.dev/session/{session_id}/queue' \
+  -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"question":"Follow-up question here","user_id":"user_alice"}'
 
-# Check system-wide queue status
-curl 'https://<org>--test-sandbox-http-app-dev.modal.run/session/queue/status'
+# Remove a queued prompt
+curl -X DELETE 'https://<your-worker>.workers.dev/session/{session_id}/queue/{prompt_id}' \
+  -H 'Authorization: Bearer <session_token>'
 
 # Clear the queue for a session
-curl -X DELETE 'https://<org>--test-sandbox-http-app-dev.modal.run/session/{session_id}/queue'
+curl -X DELETE 'https://<your-worker>.workers.dev/session/{session_id}/queue' \
+  -H 'Authorization: Bearer <session_token>'
 ```
 
 **How it works:**
@@ -692,6 +732,25 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
 - **Modify service behavior**: edit `agent_sandbox/controllers/controller.py`
 - **Change sandbox settings**: edit `agent_sandbox/config/settings.py` (timeouts, memory, CPU, etc.)
 
+### Cloudflare Internal Auth
+
+All non-health HTTP endpoints require a valid `X-Internal-Auth` header generated by the
+Cloudflare control plane. The Modal backend will fail fast if the internal auth secret
+is missing.
+
+Token format is the raw `payload.signature` value (no `Bearer` prefix).
+
+Create the Modal secret:
+
+```bash
+modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+```
+
+### Sandbox Lookup (Named Sandboxes)
+
+Background sandboxes are resolved via a dedicated Modal app name: `sandbox-manager-app`.
+This ensures `Sandbox.from_name()` works consistently in both dev and prod.
+
 ## Troubleshooting
 
 - **Ensure the Modal secret exists**: `modal secret create anthropic-secret ANTHROPIC_API_KEY=<your-key>`
@@ -699,7 +758,7 @@ Update `DEV_URL` in the Makefile to match your dev endpoint.
 - **Check service health**: Once `modal serve` is running, verify with:
 
   ```bash
-  curl "${DEV_URL}/health_check"
+  curl "${DEV_URL}/health"
   ```
 
 - **Volume persistence**: Remember to write files to `/data`, not `/tmp` or other ephemeral locations
