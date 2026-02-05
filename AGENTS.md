@@ -23,6 +23,8 @@ This is a **uv-based project**. Always activate the virtual environment before r
 
 - `source .venv/bin/activate` — activate the virtual environment (required before other commands).
 - `uv sync` — sync dependencies from `pyproject.toml` and `uv.lock`.
+- `pip install modal` and `modal setup` — install and authenticate the Modal CLI.
+- `modal secret create anthropic-secret ANTHROPIC_API_KEY=<your-key>` — create the required Anthropic secret (use `modal secret list` to verify).
 
 ### Running
 
@@ -30,6 +32,7 @@ This is a **uv-based project**. Always activate the virtual environment before r
 - `modal run -m agent_sandbox.app::run_agent_remote --question "..."` — call the agent function for ad‑hoc questions.
 - `modal serve -m agent_sandbox.app` — run a hot-reloading dev loop against Modal.
 - `modal deploy -m agent_sandbox.deploy` — promote the current definition to production.
+- `make serve` — convenience wrapper for `modal serve -m agent_sandbox.app`.
 
 ### Testing
 
@@ -63,6 +66,17 @@ This ensures code quality and prevents commit failures from hook violations.
 - `uv run pre-commit run --all-files` — run all hooks on the entire codebase.
 
 If a commit fails due to hook violations, the hooks will auto-fix what they can. Stage the fixes and commit again.
+
+## Service Management & Debugging
+
+- `modal run -m agent_sandbox.app::terminate_service_sandbox` — force a final volume commit and stop the background sandbox.
+- `modal run -m agent_sandbox.app::snapshot_service` — snapshot the current service filesystem.
+- `modal run -m agent_sandbox.app::process_job_queue` — consume queued jobs in development.
+- `modal run -m agent_sandbox.app::tail_logs` — stream sandbox logs during troubleshooting.
+- `modal sandbox logs <sandbox-id>` — inspect logs for a specific sandbox.
+- `modal app list` / `modal app logs <app-name>` — locate deployed apps and view logs.
+- `modal container list` — inspect running Modal containers.
+- `modal volume ls <volume>` / `modal volume get <volume> <remote> <local>` / `modal volume rm <volume> <remote>` — inspect and manage persisted files.
 
 ## Testing Guidelines
 
