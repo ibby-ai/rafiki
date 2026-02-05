@@ -1,8 +1,11 @@
 """Pytest configuration and shared fixtures."""
 
+import os
 from typing import Any
 
 import pytest
+
+os.environ.setdefault("INTERNAL_AUTH_SECRET", "test-internal-auth-secret")
 
 
 @pytest.fixture
