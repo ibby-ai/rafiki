@@ -13,7 +13,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from agent_sandbox.controllers.serialization import (
+from modal_backend.api.serialization import (
     build_final_summary,
     iter_text_blocks,
     serialize_content_block,

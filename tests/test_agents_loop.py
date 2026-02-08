@@ -3,11 +3,11 @@
 import pytest
 from claude_agent_sdk import AgentDefinition
 
-from agent_sandbox.agents import build_agent_options
-from agent_sandbox.agents.base import AgentConfig
-from agent_sandbox.agents.registry import get_agent_config, list_agent_types
-from agent_sandbox.prompts.prompts import SYSTEM_PROMPT
-from agent_sandbox.tools import get_allowed_tools, get_mcp_servers
+from modal_backend.agent_runtime import build_agent_options
+from modal_backend.agent_runtime.base import AgentConfig
+from modal_backend.agent_runtime.registry import get_agent_config, list_agent_types
+from modal_backend.instructions.prompts import SYSTEM_PROMPT
+from modal_backend.mcp_tools import get_allowed_tools, get_mcp_servers
 
 
 def test_build_agent_options(mock_settings):

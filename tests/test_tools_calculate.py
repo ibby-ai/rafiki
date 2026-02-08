@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_sandbox.tools.calculate_tool import calculate
+from modal_backend.mcp_tools.calculate_tool import calculate
 
 
 @pytest.mark.asyncio

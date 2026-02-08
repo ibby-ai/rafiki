@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_sandbox.schemas.responses import (
+from modal_backend.models.responses import (
     ErrorResponse,
     QueryResponse,
     SummarySchema,

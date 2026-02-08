@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_sandbox.schemas.jobs import (
+from modal_backend.models.jobs import (
     ArtifactEntry,
     ArtifactListResponse,
     ArtifactManifest,

@@ -11,8 +11,8 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from agent_sandbox.config.settings import get_settings
-from agent_sandbox.middleware.cloudflare_auth import INTERNAL_AUTH_HEADER, internal_auth_middleware
+from modal_backend.security.cloudflare_auth import INTERNAL_AUTH_HEADER, internal_auth_middleware
+from modal_backend.settings.settings import get_settings
 
 DEFAULT_SECRET = "super-secret"
 

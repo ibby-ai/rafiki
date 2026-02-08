@@ -1,6 +1,6 @@
 """Tests for controller tool permission helpers."""
 
-from agent_sandbox.controllers.controller import _is_tool_allowed
+from modal_backend.api.controller import _is_tool_allowed
 
 
 def test_is_tool_allowed_exact_match():

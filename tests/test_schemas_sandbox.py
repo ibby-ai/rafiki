@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_sandbox.schemas import QueryBody
+from modal_backend.models import QueryBody
 
 
 def test_query_body_valid():

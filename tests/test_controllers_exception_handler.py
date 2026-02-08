@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from agent_sandbox.controllers.middleware import RequestIdMiddleware
+from modal_backend.api.middleware import RequestIdMiddleware
 
 
 def create_test_app(with_middleware: bool = True):

@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from agent_sandbox.controllers.middleware import RequestIdMiddleware
+from modal_backend.api.middleware import RequestIdMiddleware
 
 
 @pytest.fixture

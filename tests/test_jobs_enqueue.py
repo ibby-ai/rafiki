@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-import agent_sandbox.jobs as jobs
+import modal_backend.jobs as jobs
 
 
 class _FakeQueue:

@@ -1,6 +1,6 @@
 """Tests for webhook helpers."""
 
-from agent_sandbox.services.webhooks import build_headers, serialize_payload, sign_payload
+from modal_backend.platform_services.webhooks import build_headers, serialize_payload, sign_payload
 
 
 def test_build_headers_with_signing():

@@ -1,6 +1,6 @@
 """Security tests for job helpers."""
 
-from agent_sandbox.jobs import normalize_job_id, resolve_job_artifact
+from modal_backend.jobs import normalize_job_id, resolve_job_artifact
 
 
 def test_normalize_job_id_valid():
