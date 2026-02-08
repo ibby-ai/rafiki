@@ -26,7 +26,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["agent_sandbox"]
+packages = ["modal_backend"]
 
 [tool.ruff]
 line-length = 100

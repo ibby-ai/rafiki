@@ -32,7 +32,7 @@ jobs:
         run: uv sync
 
       - name: Deploy to Modal
-        run: uv run modal deploy -m agent_sandbox.deploy
+        run: uv run modal deploy -m modal_backend.deploy
 
       - name: Trigger pool invalidation
-        run: uv run modal run -m agent_sandbox.app::on_deploy_invalidate_pools
+        run: uv run modal run -m modal_backend.main::on_deploy_invalidate_pools

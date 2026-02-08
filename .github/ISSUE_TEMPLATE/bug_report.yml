@@ -23,7 +23,7 @@ body:
       label: Steps to Reproduce
       description: How can we reproduce this issue?
       placeholder: |
-        1. Run `modal run -m agent_sandbox.app`
+        1. Run `modal run -m modal_backend.main`
         2. Send query "..."
         3. See error...
     validations:
@@ -58,10 +58,10 @@ body:
       label: Component
       description: Which part of the system is affected?
       options:
-        - Agent Loop (agent_sandbox/agents/)
-        - HTTP API (agent_sandbox/controllers/)
-        - Tools (agent_sandbox/tools/)
-        - Configuration (agent_sandbox/config/)
+        - Agent Loop (modal_backend/agent_runtime/)
+        - HTTP API (modal_backend/api/)
+        - Tools (modal_backend/mcp_tools/)
+        - Configuration (modal_backend/settings/)
         - Modal/Sandbox Infrastructure
         - Other
 
