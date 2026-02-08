@@ -233,7 +233,7 @@ def get_sandbox_name():
 For your `agent-sandbox-starter` project, I recommend **Option 3** (separate deployed app for sandboxes) combined with proper error handling:
 
 ```python
-# In agent_sandbox/app.py
+# In modal_backend/main.py
 
 import modal
 from modal.exception import NotFoundError, AlreadyExistsError

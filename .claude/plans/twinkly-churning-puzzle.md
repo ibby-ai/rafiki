@@ -21,7 +21,7 @@ Key insight: `App.lookup(name, create_if_missing=True)` always creates a deploye
 
 ## Code Changes
 
-### File: `agent_sandbox/app.py`
+### File: `modal_backend/main.py`
 
 #### 1. Add constant (after line 2513)
 
@@ -160,17 +160,17 @@ app=sandbox_app,
 modal sandbox list | grep svc-runner-8001 && modal sandbox terminate svc-runner-8001
 
 # Start dev server
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 ```
 Expected: No `NotFoundError` or `AlreadyExistsError` in logs.
 
 ### 2. End-to-end with Cloudflare Worker
 ```bash
 # Terminal 1: Modal dev server
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 
 # Terminal 2: Cloudflare Worker
-cd cloudflare-control-plane && npm run dev
+cd edge-control-plane && npm run dev
 
 # Terminal 3: Test query
 curl -sS http://localhost:8787/query \
@@ -187,11 +187,11 @@ Expected: 200 response with valid JSON.
 
 ### 4. Production compatibility
 ```bash
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 # Verify endpoints work as before
 ```
 
 ## Critical Files
 
-- `agent_sandbox/app.py` - Main changes (sandbox management functions)
-- `agent_sandbox/config/settings.py` - No changes needed (sandbox_name source)
+- `modal_backend/main.py` - Main changes (sandbox management functions)
+- `modal_backend/settings/settings.py` - No changes needed (sandbox_name source)
