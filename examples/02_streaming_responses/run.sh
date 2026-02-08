@@ -9,7 +9,7 @@ DEV_URL="${DEV_URL:-https://your-org--test-sandbox-http-app-dev.modal.run}"
 echo "=== Streaming Responses Example ==="
 echo "Using endpoint: ${DEV_URL}"
 echo ""
-echo "NOTE: Ensure 'modal serve -m agent_sandbox.app' is running first!"
+echo "NOTE: Ensure 'modal serve -m modal_backend.main' is running first!"
 echo ""
 
 # Stream a response

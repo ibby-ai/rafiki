@@ -12,7 +12,7 @@ echo ""
 
 # Step 1: Ask the agent to create a file
 echo "1. Asking agent to create a Python file..."
-uv run modal run -m agent_sandbox.app::run_agent_remote \
+uv run modal run -m modal_backend.main::run_agent_remote \
     --question "Create a simple Python file at /data/hello_example.py that prints 'Hello from the sandbox!'"
 
 echo ""
@@ -23,7 +23,7 @@ if [ "${SKIP_TERMINATE}" = "true" ]; then
     sleep "${COMMIT_WAIT_SECONDS}"
 else
     echo "2. Terminating sandbox to flush writes to volume..."
-    uv run modal run -m agent_sandbox.app::terminate_service_sandbox
+    uv run modal run -m modal_backend.main::terminate_service_sandbox
 fi
 
 echo ""

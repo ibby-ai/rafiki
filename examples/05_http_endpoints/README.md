@@ -7,7 +7,7 @@ Comprehensive guide to all HTTP endpoints exposed by the agent service.
 Start the dev server:
 
 ```bash
-uv run modal serve -m agent_sandbox.app
+uv run modal serve -m modal_backend.main
 ```
 
 Set the URL:

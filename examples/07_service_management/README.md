@@ -26,7 +26,7 @@ Use when you need to:
 - Clean up resources
 
 ```bash
-uv run modal run -m agent_sandbox.app::terminate_service_sandbox
+uv run modal run -m modal_backend.main::terminate_service_sandbox
 ```
 
 ### Snapshot Service
@@ -36,7 +36,7 @@ Use when you need to:
 - Create a checkpoint before changes
 
 ```bash
-uv run modal run -m agent_sandbox.app::snapshot_service
+uv run modal run -m modal_backend.main::snapshot_service
 ```
 
 ## Sandbox Lifecycle
@@ -62,7 +62,7 @@ Note: With `volume_commit_interval` enabled (default: 60s), writes are also sync
 
 ## Configuration
 
-Timeouts are configured in `agent_sandbox/config/settings.py`:
+Timeouts are configured in `modal_backend/settings/settings.py`:
 
 - `sandbox_timeout`: Max lifetime (default: 12 hours)
 - `sandbox_idle_timeout`: Shutdown after idle (default: 10 minutes)

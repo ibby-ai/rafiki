@@ -1,7 +1,7 @@
 """Example custom tools for string manipulation.
 
 This file demonstrates the pattern for creating MCP tools that can be
-registered with the agent. Copy this file to agent_sandbox/tools/ and
+registered with the agent. Copy this file to modal_backend/mcp_tools/ and
 follow INTEGRATION.md to enable these tools.
 """
 

@@ -4,10 +4,10 @@ This document provides an overview of the Cloudflare + Modal hybrid architecture
 
 ## Quick Links
 
-- **Control Plane Code**: [`cloudflare-control-plane/`](./cloudflare-control-plane/)
+- **Control Plane Code**: [`edge-control-plane/`](./edge-control-plane/)
 - **Architecture Docs**: [`docs/cloudflare-architecture.md`](./docs/cloudflare-architecture.md)
-- **API Reference**: [`cloudflare-control-plane/API.md`](./cloudflare-control-plane/API.md)
-- **Implementation Summary**: [`cloudflare-control-plane/IMPLEMENTATION_SUMMARY.md`](./cloudflare-control-plane/IMPLEMENTATION_SUMMARY.md)
+- **API Reference**: [`edge-control-plane/API.md`](./edge-control-plane/API.md)
+- **Implementation Summary**: [`edge-control-plane/IMPLEMENTATION_SUMMARY.md`](./edge-control-plane/IMPLEMENTATION_SUMMARY.md)
 
 ## What is This?
 
@@ -67,7 +67,7 @@ This integration adds Cloudflare Workers + Durable Objects as a control plane la
 
 ### New Code
 
-- `cloudflare-control-plane/`: Complete Cloudflare Worker + DO implementation
+- `edge-control-plane/`: Complete Cloudflare Worker + DO implementation
 - `docs/cloudflare-architecture.md`: Hybrid architecture documentation
 
 ### Modal Backend Changes Required
@@ -75,15 +75,15 @@ This integration adds Cloudflare Workers + Durable Objects as a control plane la
 **Add authentication middleware** to verify requests from Cloudflare (required for all non-health endpoints):
 
 ```python
-# agent_sandbox/middleware/cloudflare_auth.py (new file)
+# modal_backend/security/cloudflare_auth.py (new file)
 # X-Internal-Auth is required on all non-health endpoints.
-# See cloudflare-control-plane/INTEGRATION.md for full implementation.
+# See edge-control-plane/INTEGRATION.md for full implementation.
 def verify_internal_token(raw_token: str) -> dict:
     """Verify HMAC-signed token from Cloudflare Worker."""
     ...
 
-# agent_sandbox/controllers/controller.py (update)
-from agent_sandbox.middleware.cloudflare_auth import internal_auth_middleware
+# modal_backend/api/controller.py (update)
+from modal_backend.security.cloudflare_auth import internal_auth_middleware
 
 app.middleware("http")(internal_auth_middleware)
 ```
@@ -178,14 +178,14 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflar
 
 Start with:
 
-- [`cloudflare-control-plane/README.md`](./cloudflare-control-plane/README.md) - Quick start
-- [`cloudflare-control-plane/API.md`](./cloudflare-control-plane/API.md) - API reference
+- [`edge-control-plane/README.md`](./edge-control-plane/README.md) - Quick start
+- [`edge-control-plane/API.md`](./edge-control-plane/API.md) - API reference
 - [`docs/cloudflare-architecture.md`](./docs/cloudflare-architecture.md) - Architecture details
 
 ### 2. Deploy Cloudflare
 
 ```bash
-cd cloudflare-control-plane
+cd edge-control-plane
 npm install
 wrangler login
 wrangler secret put MODAL_TOKEN_ID
@@ -197,7 +197,7 @@ npm run deploy
 
 ### 3. Update Modal Backend
 
-Add authentication middleware and secret (see [`cloudflare-control-plane/INTEGRATION.md`](./cloudflare-control-plane/INTEGRATION.md)).
+Add authentication middleware and secret (see [`edge-control-plane/INTEGRATION.md`](./edge-control-plane/INTEGRATION.md)).
 
 ### 4. Test Integration
 

@@ -5,16 +5,16 @@ Step-by-step guide to add the example tools to your agent.
 ## Step 1: Copy the Tool File
 
 ```bash
-cp examples/04_custom_tools/string_utils_tool.py agent_sandbox/tools/
+cp examples/04_custom_tools/string_utils_tool.py modal_backend/mcp_tools/
 ```
 
 ## Step 2: Update the Registry
 
-Edit `agent_sandbox/tools/registry.py`:
+Edit `modal_backend/mcp_tools/registry.py`:
 
 ```python
 # Add import at the top
-from agent_sandbox.tools.string_utils_tool import (
+from modal_backend.mcp_tools.string_utils_tool import (
     reverse_string,
     count_words,
     to_uppercase,
@@ -38,10 +38,10 @@ self._allowed_tools = [
 
 ## Step 3: Update the `__init__.py`
 
-Edit `agent_sandbox/tools/__init__.py`:
+Edit `modal_backend/mcp_tools/__init__.py`:
 
 ```python
-from agent_sandbox.tools.string_utils_tool import (
+from modal_backend.mcp_tools.string_utils_tool import (
     reverse_string,
     count_words,
     to_uppercase,
@@ -51,7 +51,7 @@ from agent_sandbox.tools.string_utils_tool import (
 ## Step 4: Test the Tools
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
     --question "Reverse the string 'hello world' using the reverse_string tool"
 ```
 

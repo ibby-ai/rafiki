@@ -40,22 +40,22 @@ Removed the CLI sandbox and Ralph autonomous coding loop to simplify the archite
 
 | File | Purpose |
 |------|---------|
-| `agent_sandbox/controllers/cli_controller.py` | CLI microservice endpoints |
-| `agent_sandbox/sandbox/cli_runner.py` | CLI sandbox management |
-| `agent_sandbox/utils/cli.py` | CLI utilities |
-| `agent_sandbox/ralph/` | Ralph autonomous coding loop (entire directory) |
+| `modal_backend/api/cli_controller.py` | CLI microservice endpoints |
+| `modal_backend/sandbox_runtime_runtime/cli_runner.py` | CLI sandbox management |
+| `modal_backend/shared/cli.py` | CLI utilities |
+| `modal_backend/ralph/` | Ralph autonomous coding loop (entire directory) |
 | `tests/test_ralph_*.py` | Ralph unit tests (8 files) |
 
 ### Files Modified
 
 | File | Changes |
 |------|---------|
-| `agent_sandbox/prompts/prompts.py` | Removed `RALPH_PROMPT_TEMPLATE` |
-| `agent_sandbox/schemas/stats.py` | Removed `cli` and `ralph` fields from `StatsResponse` |
-| `agent_sandbox/schemas/sandbox.py` | Removed CLI comments |
-| `agent_sandbox/schemas/session_spawn.py` | Changed `Literal["agent_sdk", "cli"]` to `Literal["agent_sdk"]` |
-| `agent_sandbox/tools/session_tools.py` | Removed CLI sandbox type support |
-| `agent_sandbox/jobs.py` | Simplified statistics to only iterate over `["agent_sdk"]` |
+| `modal_backend/instructions/prompts.py` | Removed `RALPH_PROMPT_TEMPLATE` |
+| `modal_backend/models/stats.py` | Removed `cli` and `ralph` fields from `StatsResponse` |
+| `modal_backend/models/sandbox.py` | Removed CLI comments |
+| `modal_backend/models/session_spawn.py` | Changed `Literal["agent_sdk", "cli"]` to `Literal["agent_sdk"]` |
+| `modal_backend/mcp_tools/session_tools.py` | Removed CLI sandbox type support |
+| `modal_backend/jobs.py` | Simplified statistics to only iterate over `["agent_sdk"]` |
 
 ### Breaking Changes
 
@@ -82,27 +82,27 @@ Implemented image version tracking and warm pool invalidation to ensure sandboxe
 
 | File | Changes |
 |------|---------|
-| `agent_sandbox/config/settings.py` | Added `image_version_store_name` and `enable_image_version_tracking` settings |
-| `agent_sandbox/jobs.py` | Added `IMAGE_VERSION` Modal Dict, `get_current_image_version()`, `set_image_version()`, `get_image_deployed_at()` functions |
-| `agent_sandbox/app.py` | Added version ID generation (`_DEPLOY_TIMESTAMP`, `_IMAGE_VERSION_ID`), `on_deploy_invalidate_pools()` function, `/image/version` endpoint, enhanced `maintain_warm_pool()` and `maintain_cli_warm_pool()` with deploy-based invalidation |
+| `modal_backend/settings/settings.py` | Added `image_version_store_name` and `enable_image_version_tracking` settings |
+| `modal_backend/jobs.py` | Added `IMAGE_VERSION` Modal Dict, `get_current_image_version()`, `set_image_version()`, `get_image_deployed_at()` functions |
+| `modal_backend/main.py` | Added version ID generation (`_DEPLOY_TIMESTAMP`, `_IMAGE_VERSION_ID`), `on_deploy_invalidate_pools()` function, `/image/version` endpoint, enhanced `maintain_warm_pool()` and `maintain_cli_warm_pool()` with deploy-based invalidation |
 | `.github/workflows/scheduled-deploy.yml` | New file - GitHub Actions workflow for scheduled deploys every 30 minutes |
 
 ### New Settings
 
 ```python
-# In agent_sandbox/config/settings.py
+# In modal_backend/settings/settings.py
 image_version_store_name: str = "agent-image-version"  # Modal Dict for version tracking
 enable_image_version_tracking: bool = True  # Enable version tracking and invalidation
 ```
 
 ### New Functions
 
-**In `agent_sandbox/jobs.py`:**
+**In `modal_backend/jobs.py`:**
 - `get_current_image_version()`: Get the stored image version info
 - `set_image_version(version_id, deployed_at)`: Record new version on deploy
 - `get_image_deployed_at()`: Get deploy timestamp for age comparisons
 
-**In `agent_sandbox/app.py`:**
+**In `modal_backend/main.py`:**
 - `on_deploy_invalidate_pools()`: Modal function to invalidate warm pools on deploy
 - `GET /image/version`: HTTP endpoint to check current image version
 
@@ -135,8 +135,8 @@ enable_image_version_tracking: bool = True  # Enable version tracking and invali
 
 2. **Manual pool invalidation** (after manual deploys):
    ```bash
-   modal deploy -m agent_sandbox.deploy
-   modal run -m agent_sandbox.app::on_deploy_invalidate_pools
+   modal deploy -m modal_backend.deploy
+   modal run -m modal_backend.main::on_deploy_invalidate_pools
    ```
 
 3. **Check current version**:
@@ -178,16 +178,16 @@ Added the ability for Ralph to push completed work to a remote GitHub repository
 
 | File | Changes |
 |------|---------|
-| `agent_sandbox/config/settings.py` | Added `github_token_secret_name` and `enable_github_push` settings, updated `get_modal_secrets()` |
-| `agent_sandbox/ralph/git.py` | Added `get_authenticated_url()`, `configure_remote()`, `push_to_remote()` functions |
-| `agent_sandbox/ralph/schemas.py` | Added push fields to `RalphLoopResult`, `RalphStartRequest`, `RalphExecuteRequest` |
-| `agent_sandbox/ralph/loop.py` | Added `_handle_push_on_complete()` helper, updated all completion paths to handle push |
-| `agent_sandbox/controllers/cli_controller.py` | Pass new push fields to `run_ralph_loop()` |
+| `modal_backend/settings/settings.py` | Added `github_token_secret_name` and `enable_github_push` settings, updated `get_modal_secrets()` |
+| `modal_backend/ralph/git.py` | Added `get_authenticated_url()`, `configure_remote()`, `push_to_remote()` functions |
+| `modal_backend/ralph/schemas.py` | Added push fields to `RalphLoopResult`, `RalphStartRequest`, `RalphExecuteRequest` |
+| `modal_backend/ralph/loop.py` | Added `_handle_push_on_complete()` helper, updated all completion paths to handle push |
+| `modal_backend/api/cli_controller.py` | Pass new push fields to `run_ralph_loop()` |
 
 ### New Settings
 
 ```python
-# In agent_sandbox/config/settings.py
+# In modal_backend/settings/settings.py
 github_token_secret_name: str = "github-token"  # Modal secret name for GITHUB_TOKEN
 enable_github_push: bool = True  # Enable GitHub push operations
 ```
@@ -215,7 +215,7 @@ push_error: str | None = None  # Error message if push failed
 
 ### Implementation Details
 
-1. **Git Functions**: Added three new functions in `agent_sandbox/ralph/git.py`:
+1. **Git Functions**: Added three new functions in `modal_backend/ralph/git.py`:
    - `get_authenticated_url()`: Converts HTTPS URL to use token authentication
    - `configure_remote()`: Adds or updates a git remote
    - `push_to_remote()`: Pushes commits to remote
@@ -294,7 +294,7 @@ Tested the Ralph GitHub Push feature end-to-end using the test plan. Discovered 
 
 **Symptom**: Ralph loop failed at commit step with exit code 128.
 
-**Cause**: `init_git()` in `agent_sandbox/ralph/git.py` only configured user identity when creating a new `.git` directory. For cloned repos (which already have `.git`), user identity was never set.
+**Cause**: `init_git()` in `modal_backend/ralph/git.py` only configured user identity when creating a new `.git` directory. For cloned repos (which already have `.git`), user identity was never set.
 
 **Fix**: Modified `init_git()` to always configure user identity after checking for git init:
 
@@ -314,7 +314,7 @@ def init_git(workspace: Path) -> None:
 
 **Symptom**: Ralph completed tasks but `pushed: false` with no error message.
 
-**Cause**: `/ralph/start` endpoint in `agent_sandbox/app.py` wasn't passing push parameters (`push_on_complete`, `remote_url`, `target_branch`, `force_push`, `first_iteration_timeout`) to `run_ralph_remote.spawn()`.
+**Cause**: `/ralph/start` endpoint in `modal_backend/main.py` wasn't passing push parameters (`push_on_complete`, `remote_url`, `target_branch`, `force_push`, `first_iteration_timeout`) to `run_ralph_remote.spawn()`.
 
 **Fix**: Updated `run_ralph_remote()` function signature and `/ralph/start` endpoint to include all push parameters:
 
@@ -355,16 +355,16 @@ def push_to_remote(workspace: Path, branch: str = "main", ...) -> None:
 
 | File | Changes |
 |------|---------|
-| `agent_sandbox/ralph/git.py` | Fixed `init_git()` to always configure user identity; fixed `push_to_remote()` refspec format |
-| `agent_sandbox/app.py` | Added push parameters to `run_ralph_remote()` and `/ralph/start` endpoint |
-| `agent_sandbox/deploy.py` | Added cache-busting timestamp to force image rebuild |
+| `modal_backend/ralph/git.py` | Fixed `init_git()` to always configure user identity; fixed `push_to_remote()` refspec format |
+| `modal_backend/main.py` | Added push parameters to `run_ralph_remote()` and `/ralph/start` endpoint |
+| `modal_backend/deploy.py` | Added cache-busting timestamp to force image rebuild |
 
 ### Modal Image Caching Note
 
 Modal caches container images aggressively. When testing changes that affect code inside the sandbox (like git.py), `modal serve` hot-reload may not pick up changes. Solutions:
 
 1. Add a cache-busting comment to `deploy.py` (e.g., timestamp in docstring)
-2. Use `modal deploy -m agent_sandbox.deploy` instead of `modal serve`
+2. Use `modal deploy -m modal_backend.deploy` instead of `modal serve`
 
 ### Verification Results
 
@@ -406,8 +406,8 @@ Solution:
 
 Files modified:
 
-- `agent_sandbox/jobs.py` - Added `_get_session_metadata_dict()`, updated 15+ functions
-- `agent_sandbox/controllers/controller.py` - Added try/except around Dict operations in `/query` and `/query_stream`
+- `modal_backend/jobs.py` - Added `_get_session_metadata_dict()`, updated 15+ functions
+- `modal_backend/api/controller.py` - Added try/except around Dict operations in `/query` and `/query_stream`
 
 #### Fix 2: Pre-warm Claim Status Reporting (Test 2)
 
@@ -421,8 +421,8 @@ Solution:
 
 Files modified:
 
-- `agent_sandbox/jobs.py` - Updated `claim_prewarm()` return structure
-- `agent_sandbox/app.py` - Added claim failure logging, check for `prewarm_claimed.get("claimed")`
+- `modal_backend/jobs.py` - Updated `claim_prewarm()` return structure
+- `modal_backend/main.py` - Added claim failure logging, check for `prewarm_claimed.get("claimed")`
 
 #### Fix 3: Ralph Pause/Resume State Handling (Test 7)
 
@@ -437,8 +437,8 @@ Solution:
 
 Files modified:
 
-- `agent_sandbox/jobs.py` - Added `clear_ralph_pause()`, updated `get_ralph_checkpoint()`
-- `agent_sandbox/app.py` - Updated `resume_ralph()`, fixed `_function_call_id()`
+- `modal_backend/jobs.py` - Added `clear_ralph_pause()`, updated `get_ralph_checkpoint()`
+- `modal_backend/main.py` - Updated `resume_ralph()`, fixed `_function_call_id()`
 
 #### Fix 4: Session Resume Error Recovery
 
@@ -454,7 +454,7 @@ Solution:
 
 Files modified:
 
-- `agent_sandbox/controllers/controller.py` - Added helpers, retry logic in both endpoints
+- `modal_backend/api/controller.py` - Added helpers, retry logic in both endpoints
 
 ### Verification Results
 
@@ -470,7 +470,7 @@ Files modified:
 
 ```bash
 # Start server
-uv run modal serve -m agent_sandbox.app
+uv run modal serve -m modal_backend.main
 
 # Test pre-warm
 curl -X POST '.../warm' -d '{"sandbox_type":"agent_sdk"}'
@@ -497,7 +497,7 @@ _SESSION_METADATA: modal.Dict | dict[str, Any] | None = None
 def _get_session_metadata_dict() -> modal.Dict | dict[str, Any]:
     global _SESSION_METADATA
     if _SESSION_METADATA is None:
-        from agent_sandbox.config.settings import _hydrate_modal_token_env
+        from modal_backend.settings.settings import _hydrate_modal_token_env
         _hydrate_modal_token_env()  # Ensure credentials are set
         _SESSION_METADATA = modal.Dict.from_name(...)
     return _SESSION_METADATA
@@ -531,9 +531,9 @@ Fixed Ralph SSE streaming to emit immediate "started" event - Clients now receiv
 
 Files modified:
 
-- `agent_sandbox/ralph/schemas.py` - Added `"started"` to `RalphStreamEvent.event_type` docstring
-- `agent_sandbox/ralph/loop.py` - Added immediate `"started"` yield at the beginning of `run_ralph_loop_streaming()` before any initialization work; updated docstring to document the new event
-- `agent_sandbox/controllers/cli_controller.py` - Added debug logging for SSE event streaming
+- `modal_backend/ralph/schemas.py` - Added `"started"` to `RalphStreamEvent.event_type` docstring
+- `modal_backend/ralph/loop.py` - Added immediate `"started"` yield at the beginning of `run_ralph_loop_streaming()` before any initialization work; updated docstring to document the new event
+- `modal_backend/api/cli_controller.py` - Added debug logging for SSE event streaming
 
 ### Problem Solved
 
@@ -573,9 +573,9 @@ data: {"event_type":"done","status":"complete",...}
 
 ### Changes Made
 
-- Fixed `/query` failures in the background sandbox controller by reverting to `ClaudeSDKClient` and removing the `claude_agent_sdk.query()` call path that caused `ProcessTransport is not ready for writing` errors. (`agent_sandbox/controllers/controller.py`)
-- Added HTTP proxy for Ralph streaming: new `POST /ralph/execute_stream` on the HTTP app that forwards to the CLI sandbox. (`agent_sandbox/app.py`)
-- Improved error surfacing for the background `/query` proxy and Ralph streaming proxy so HTTP errors return response details. (`agent_sandbox/app.py`)
+- Fixed `/query` failures in the background sandbox controller by reverting to `ClaudeSDKClient` and removing the `claude_agent_sdk.query()` call path that caused `ProcessTransport is not ready for writing` errors. (`modal_backend/api/controller.py`)
+- Added HTTP proxy for Ralph streaming: new `POST /ralph/execute_stream` on the HTTP app that forwards to the CLI sandbox. (`modal_backend/main.py`)
+- Improved error surfacing for the background `/query` proxy and Ralph streaming proxy so HTTP errors return response details. (`modal_backend/main.py`)
 - Ruff run: `uv run ruff check --fix .`, `uv run ruff format .`
 
 ### Validation Results (Full Matrix)
@@ -595,8 +595,8 @@ data: {"event_type":"done","status":"complete",...}
 
 ### Files Touched This Session
 
-- `agent_sandbox/controllers/controller.py`
-- `agent_sandbox/app.py`
+- `modal_backend/api/controller.py`
+- `modal_backend/main.py`
 
 ## Recent Commits (This Session)
 
@@ -652,31 +652,31 @@ We analyzed a blog post from Ramp (<https://builders.ramp.com/post/why-we-built-
 ### Priority 5: Statistics & Usage Tracking ✅ COMPLETE
 
 **Files created/modified:**
-1. `agent_sandbox/schemas/stats.py` - NEW FILE
+1. `modal_backend/models/stats.py` - NEW FILE
    - `SandboxTypeStats` schema for per-sandbox-type statistics
    - `StatsResponse` schema for the `/stats` endpoint response
    - `StatsQueryParams` for query parameters
 
-2. `agent_sandbox/config/settings.py` - MODIFIED
+2. `modal_backend/settings/settings.py` - MODIFIED
    - Added `stats_store_name` setting (default: "agent-stats-store")
 
-3. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+3. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `STATS_STORE` Modal Dict for storing aggregate statistics
    - Added `_get_time_bucket_keys()` helper function
    - Added `record_session_start()` function to track session starts
    - Added `record_session_end()` function to track session completions with duration/status
    - Added `get_stats()` function to retrieve aggregated statistics for a time period
 
-4. `agent_sandbox/app.py` - MODIFIED
+4. `modal_backend/main.py` - MODIFIED
    - Added import for `get_stats`
    - Added `GET /stats` endpoint after `/service_info`
 
-5. `agent_sandbox/controllers/controller.py` - MODIFIED
+5. `modal_backend/api/controller.py` - MODIFIED
    - Added imports for `record_session_start`, `record_session_end`
    - Added stats recording to `/query` endpoint (start tracking, duration, status)
    - Added stats recording to `/query_stream` endpoint (same pattern)
 
-6. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+6. `modal_backend/models/sandbox.py` - MODIFIED
    - Added `user_id` field to `QueryBody` for user tracking in statistics
 
 ### Priority 1: Agent SDK Sandbox Snapshots ✅ COMPLETE
@@ -687,19 +687,19 @@ We analyzed a blog post from Ramp (<https://builders.ramp.com/post/why-we-built-
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `session_snapshot_store_name` setting (default: "agent-session-snapshots")
    - Added `enable_session_snapshots` setting (default: True)
    - Added `snapshot_min_interval_seconds` setting (default: 60) for throttling
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `SESSION_SNAPSHOTS` Modal Dict for storing per-session snapshot references
    - Added `store_session_snapshot()` function to save snapshot image reference
    - Added `get_session_snapshot()` function to retrieve snapshot for a session
    - Added `should_snapshot_session()` function for throttling (min interval between snapshots)
    - Added `delete_session_snapshot()` function for cleanup
 
-3. `agent_sandbox/app.py` - MODIFIED
+3. `modal_backend/main.py` - MODIFIED
    - Added imports for `get_session_snapshot`, `should_snapshot_session`, `store_session_snapshot`
    - Added `snapshot_session_state()` Modal function to capture session filesystem state
    - Modified `get_or_start_background_sandbox()` to accept optional `session_id` parameter
@@ -744,7 +744,7 @@ if snapshot:
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `warm_pool_store_name` setting (default: "agent-warm-pool")
    - Added `enable_warm_pool` setting (default: True)
    - Added `warm_pool_size` setting (default: 2)
@@ -752,7 +752,7 @@ if snapshot:
    - Added `warm_pool_sandbox_max_age` setting (default: 3600 seconds)
    - Added `warm_pool_claim_timeout` setting (default: 5 seconds)
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `WARM_POOL` Modal Dict for storing pool metadata
    - Added `generate_pool_sandbox_name()` function to create unique pool sandbox names
    - Added `register_warm_sandbox()` function to add sandbox to pool
@@ -764,7 +764,7 @@ if snapshot:
    - Added `get_expired_pool_entries()` function to find old sandboxes
    - Added `cleanup_stale_pool_entries()` function to remove dead entries
 
-3. `agent_sandbox/app.py` - MODIFIED
+3. `modal_backend/main.py` - MODIFIED
    - Added imports for warm pool functions
    - Added `_create_warm_sandbox_sync()` helper to create pool sandboxes
    - Added `replenish_warm_pool` Modal function to add sandboxes to pool
@@ -829,7 +829,7 @@ for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `cli_warm_pool_store_name` setting (default: "cli-warm-pool")
    - Added `enable_cli_warm_pool` setting (default: True)
    - Added `cli_warm_pool_size` setting (default: 2)
@@ -837,7 +837,7 @@ for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
    - Added `cli_warm_pool_sandbox_max_age` setting (default: 3600 seconds)
    - Added `cli_warm_pool_claim_timeout` setting (default: 5 seconds)
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `CLI_WARM_POOL` Modal Dict for storing CLI pool metadata
    - Added `generate_cli_pool_sandbox_name()` function to create unique pool sandbox names
    - Added `register_cli_warm_sandbox()` function to add CLI sandbox to pool
@@ -849,7 +849,7 @@ for sb in modal.Sandbox.list(tags={"pool": "agent_sdk"}):
    - Added `get_expired_cli_pool_entries()` function to find old sandboxes
    - Added `cleanup_stale_cli_pool_entries()` function to remove dead entries
 
-3. `agent_sandbox/app.py` - MODIFIED
+3. `modal_backend/main.py` - MODIFIED
    - Added imports for CLI warm pool functions
    - Added `_create_cli_warm_sandbox_sync()` helper to create CLI pool sandboxes
    - Added `replenish_cli_warm_pool` Modal function to add CLI sandboxes to pool
@@ -917,19 +917,19 @@ for sb in modal.Sandbox.list(tags={"pool": "cli"}):
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `cli_job_snapshot_store_name` setting (default: "cli-job-snapshots")
    - Added `enable_cli_job_snapshots` setting (default: True)
    - Added `cli_snapshot_min_interval_seconds` setting (default: 60) for throttling
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `CLI_JOB_SNAPSHOTS` Modal Dict for storing per-job snapshot references
    - Added `store_cli_job_snapshot()` function to save snapshot image reference
    - Added `get_cli_job_snapshot()` function to retrieve snapshot for a job
    - Added `should_snapshot_cli_job()` function for throttling (min interval between snapshots)
    - Added `delete_cli_job_snapshot()` function for cleanup
 
-3. `agent_sandbox/app.py` - MODIFIED
+3. `modal_backend/main.py` - MODIFIED
    - Added imports for `get_cli_job_snapshot`, `should_snapshot_cli_job`, `store_cli_job_snapshot`
    - Added `snapshot_cli_job_state()` Modal function to capture CLI sandbox filesystem state
    - Modified `get_or_start_cli_sandbox()` to accept optional `job_id` parameter
@@ -972,12 +972,12 @@ if snapshot:
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `session_cancellation_store_name` setting (default: "agent-session-cancellations")
    - Added `enable_session_cancellation` setting (default: True)
    - Added `cancellation_expiry_seconds` setting (default: 3600) for cancellation flag lifetime
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `SESSION_CANCELLATIONS` Modal Dict for storing cancellation flags
    - Added `cancel_session()` function to request session cancellation
    - Added `is_session_cancelled()` function to check if session is cancelled
@@ -987,22 +987,22 @@ if snapshot:
    - Added `cleanup_expired_cancellations()` function for maintenance
    - Added `get_cancellation_status()` function for monitoring
 
-3. `agent_sandbox/controllers/controller.py` - MODIFIED
+3. `modal_backend/api/controller.py` - MODIFIED
    - Added imports for `is_session_cancelled`, `acknowledge_session_cancellation`
    - Added `_make_can_use_tool_handler()` factory function that creates a closure-based handler
    - Modified `_options()` to use the factory instead of static `allow_web_only`
    - The handler checks for cancellation before each tool call
    - When cancelled, returns `PermissionResultDeny` with a message asking agent to stop
 
-4. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+4. `modal_backend/models/sandbox.py` - MODIFIED
    - Added `SessionStopRequest` schema for stop request body
    - Added `SessionStopResponse` schema for stop response
    - Added `SessionCancellationStatusResponse` schema for status endpoint
 
-5. `agent_sandbox/schemas/__init__.py` - MODIFIED
+5. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for new session cancellation schemas
 
-6. `agent_sandbox/app.py` - MODIFIED
+6. `modal_backend/main.py` - MODIFIED
    - Added imports for `cancel_session`, `get_session_cancellation`, `get_cancellation_status`
    - Added imports for `SessionStopRequest`, `SessionStopResponse`, `SessionCancellationStatusResponse`
    - Added `POST /session/{session_id}/stop` endpoint to request session stop
@@ -1064,7 +1064,7 @@ CLI sandbox cancellation is handled differently since it runs Claude Code CLI as
 
 **Phase 3 update:** Modal Dict prompt queue and execution state have been removed.
 Prompt queueing now lives in the Cloudflare SessionAgent Durable Object
-(`cloudflare-control-plane/src/durable-objects/SessionAgent.ts`). The details
+(`edge-control-plane/src/durable-objects/SessionAgent.ts`). The details
 below describe the legacy Modal implementation for historical context.
 
 **Problem**: Can't send follow-up prompts while agent is still executing.
@@ -1073,13 +1073,13 @@ below describe the legacy Modal implementation for historical context.
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `prompt_queue_store_name` setting (default: "agent-prompt-queue")
    - Added `enable_prompt_queue` setting (default: True)
    - Added `max_queued_prompts_per_session` setting (default: 10)
    - Added `prompt_queue_entry_expiry_seconds` setting (default: 3600)
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `PROMPT_QUEUE` Modal Dict for storing per-session prompt queues
    - Added `SESSION_EXECUTION_STATE` Modal Dict for tracking session execution status
    - Added `mark_session_executing()` function to mark session as running
@@ -1095,7 +1095,7 @@ below describe the legacy Modal implementation for historical context.
    - Added `cleanup_expired_queue_entries()` function for maintenance
    - Added `get_prompt_queue_status()` function for overall statistics
 
-3. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+3. `modal_backend/models/sandbox.py` - MODIFIED
    - Added `QueuedPromptEntry` schema for queued prompt entries
    - Added `QueuePromptRequest` schema for queue request body
    - Added `QueuePromptResponse` schema for queue response
@@ -1103,15 +1103,15 @@ below describe the legacy Modal implementation for historical context.
    - Added `PromptQueueClearResponse` schema for clearing queue
    - Added `PromptQueueStatusResponse` schema for status endpoint
 
-4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+4. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for all new prompt queue schemas
 
-5. `agent_sandbox/controllers/controller.py` - MODIFIED
+5. `modal_backend/api/controller.py` - MODIFIED
    - Added imports for `mark_session_executing`, `mark_session_idle`
    - Modified `/query` endpoint to mark session executing/idle around query
    - Modified `/query_stream` endpoint similarly
 
-6. `agent_sandbox/app.py` - MODIFIED
+6. `modal_backend/main.py` - MODIFIED
    - Added imports for prompt queue functions and schemas
    - Added `GET /session/{session_id}/queue` endpoint to list queued prompts
    - Added `POST /session/{session_id}/queue` endpoint to queue a prompt
@@ -1232,12 +1232,12 @@ async function submitPrompt(sessionId, question) {
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `prewarm_store_name` setting (default: "agent-prewarm-store")
    - Added `enable_prewarm` setting (default: True)
    - Added `prewarm_timeout_seconds` setting (default: 60) for pre-warm expiry
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `PREWARM_STORE` Modal Dict for tracking pre-warm requests
    - Added `generate_warm_id()` function to create unique correlation IDs
    - Added `register_prewarm()` function to register pre-warm requests
@@ -1248,17 +1248,17 @@ async function submitPrompt(sessionId, question) {
    - Added `get_prewarm_status()` function for monitoring
    - Added `cleanup_expired_prewarms()` function for maintenance
 
-3. `agent_sandbox/schemas/sandbox.py` - MODIFIED
+3. `modal_backend/models/sandbox.py` - MODIFIED
    - Added `warm_id` field to `QueryBody` for correlation
    - Added `warm_id` field to `ClaudeCliRequest` for correlation
    - Added `WarmRequest` schema for `POST /warm` requests
    - Added `WarmResponse` schema for `POST /warm` responses
    - Added `WarmStatusResponse` schema for `/warm/status` endpoint
 
-4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+4. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for `WarmRequest`, `WarmResponse`, `WarmStatusResponse`
 
-5. `agent_sandbox/app.py` - MODIFIED
+5. `modal_backend/main.py` - MODIFIED
    - Added imports for pre-warm functions and schemas
    - Added `POST /warm` endpoint to initiate sandbox pre-warming
    - Added `GET /warm/{warm_id}` endpoint to check pre-warm status
@@ -1382,11 +1382,11 @@ Same pattern for CLI sandbox.
 
 | File | Purpose |
 |------|---------|
-| `agent_sandbox/app.py` | Modal app, sandbox lifecycle, HTTP gateway, snapshots |
-| `agent_sandbox/controllers/controller.py` | Agent SDK microservice, session management |
-| `agent_sandbox/config/settings.py` | Configuration management |
-| `agent_sandbox/jobs.py` | Job queue, async processing, stats, snapshots |
-| `agent_sandbox/tools/registry.py` | MCP tool registration |
+| `modal_backend/main.py` | Modal app, sandbox lifecycle, HTTP gateway, snapshots |
+| `modal_backend/api/controller.py` | Agent SDK microservice, session management |
+| `modal_backend/settings/settings.py` | Configuration management |
+| `modal_backend/jobs.py` | Job queue, async processing, stats, snapshots |
+| `modal_backend/mcp_tools/registry.py` | MCP tool registration |
 
 ## Modal Features in Use
 
@@ -1411,13 +1411,13 @@ uv run ruff check --fix .
 uv run ruff format .
 
 # Test imports
-uv run python -c "from agent_sandbox.jobs import get_stats, get_session_snapshot; print('OK')"
+uv run python -c "from modal_backend.jobs import get_stats, get_session_snapshot; print('OK')"
 
 # Start dev server
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 
 # Deploy
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 ```
 
 ### Priority 6: Multiplayer Session Support ✅ COMPLETE
@@ -1428,14 +1428,14 @@ modal deploy -m agent_sandbox.deploy
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `session_metadata_store_name` setting (default: "agent-session-metadata")
    - Added `enable_multiplayer_sessions` setting (default: True)
    - Added `max_message_history_per_session` setting (default: 100)
    - Added `message_content_max_length` setting (default: 1000)
    - Added `max_authorized_users_per_session` setting (default: 20)
 
-2. `agent_sandbox/schemas/sandbox.py` - MODIFIED (at end of file)
+2. `modal_backend/models/sandbox.py` - MODIFIED (at end of file)
    - Added `MessageHistoryEntry` schema for messages with user attribution
    - Added `SessionMetadata` schema for ownership and access control
    - Added `SessionShareRequest` / `SessionShareResponse` schemas
@@ -1445,10 +1445,10 @@ modal deploy -m agent_sandbox.deploy
    - Added `SessionUsersResponse` schema
    - Added `MultiplayerStatusResponse` schema
 
-3. `agent_sandbox/schemas/__init__.py` - MODIFIED
+3. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for all new multiplayer session schemas
 
-4. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+4. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `SESSION_METADATA` Modal Dict for storing session metadata
    - Added `create_session_metadata()` function to create session with owner
    - Added `get_session_metadata()` function to retrieve session info
@@ -1464,7 +1464,7 @@ modal deploy -m agent_sandbox.deploy
    - Added `delete_session_metadata()` function for cleanup
    - Added `get_multiplayer_status()` function for overall statistics
 
-5. `agent_sandbox/app.py` - MODIFIED
+5. `modal_backend/main.py` - MODIFIED
    - Added imports for multiplayer session functions and schemas
    - Added `GET /session/{session_id}/metadata` endpoint to get session info
    - Added `GET /session/{session_id}/users` endpoint to list authorized users
@@ -1473,7 +1473,7 @@ modal deploy -m agent_sandbox.deploy
    - Added `GET /session/{session_id}/history` endpoint to get message history
    - Added `GET /session/multiplayer/status` endpoint for statistics
 
-6. `agent_sandbox/controllers/controller.py` - MODIFIED
+6. `modal_backend/api/controller.py` - MODIFIED
    - Added imports for `add_message_to_history`, `create_session_metadata`
    - Modified `/query` endpoint to track message history with user attribution
    - Modified `/query_stream` endpoint similarly
@@ -1561,7 +1561,7 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `ralph_control_store_name` setting (default: "ralph-control-store")
    - Added `enable_ralph_control` setting (default: True)
    - Added `ralph_control_expiry_seconds` setting (default: 86400)
@@ -1569,7 +1569,7 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
    - Added `enable_ralph_iteration_snapshots` setting (default: True)
    - Added `ralph_max_snapshots_per_job` setting (default: 20)
 
-2. `agent_sandbox/ralph/schemas.py` - MODIFIED
+2. `modal_backend/ralph/schemas.py` - MODIFIED
    - Added `RalphLoopStatus.PAUSED` enum value
    - Added `RalphPauseRequest` / `RalphPauseResponse` schemas
    - Added `RalphResumeRequest` / `RalphResumeResponse` schemas
@@ -1580,7 +1580,7 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
    - Added `RalphStreamEvent` schema for SSE streaming
    - Added `resume_checkpoint` field to `RalphExecuteRequest`
 
-3. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+3. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `RALPH_CONTROL` Modal Dict for pause/resume state
    - Added `request_ralph_pause()` function to request loop pause
    - Added `is_ralph_paused()` function to check pause status
@@ -1597,7 +1597,7 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
    - Added `clear_ralph_iteration_snapshots()` function to clear all snapshots
    - Added `get_ralph_snapshot_status()` function for monitoring
 
-4. `agent_sandbox/ralph/loop.py` - MODIFIED
+4. `modal_backend/ralph/loop.py` - MODIFIED
    - Added `create_checkpoint()` function to create checkpoint for pausing
    - Added `run_ralph_loop_streaming()` generator function for SSE streaming
    - Added `resume_ralph_loop()` function to resume from checkpoint
@@ -1605,12 +1605,12 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/session/multiplayer/status'
    - Modified `run_ralph_loop()` to check for pause request before each iteration
    - Both functions now support pausing and resuming
 
-5. `agent_sandbox/controllers/cli_controller.py` - MODIFIED
+5. `modal_backend/api/cli_controller.py` - MODIFIED
    - Added import for `resume_ralph_loop`, `RalphCheckpoint`, `RalphStreamEvent`
    - Added `POST /ralph/execute_stream` endpoint for SSE streaming
    - Modified `POST /ralph/execute` to handle `resume_checkpoint` for resuming
 
-6. `agent_sandbox/app.py` - MODIFIED
+6. `modal_backend/main.py` - MODIFIED
    - Added imports for Ralph control functions and schemas
    - Added `POST /ralph/{job_id}/pause` endpoint to request loop pause
    - Added `POST /ralph/{job_id}/resume` endpoint to resume paused loop
@@ -1761,7 +1761,7 @@ curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `workspace_retention_store_name` setting (default: "cli-workspace-retention")
    - Added `enable_workspace_retention` setting (default: True)
    - Added `workspace_retention_days` setting (default: 7) for completed jobs
@@ -1769,17 +1769,17 @@ curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
    - Added `max_workspace_size_mb` setting (default: None) for optional size limit
    - Added `workspace_cleanup_interval_seconds` setting (default: 3600)
 
-2. `agent_sandbox/schemas/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/models/jobs.py` - MODIFIED (at end of file)
    - Added `WorkspaceMetadata` schema for tracked workspace info
    - Added `WorkspaceCleanupRequest` schema for cleanup operations
    - Added `WorkspaceCleanupResponse` schema for cleanup results
    - Added `WorkspaceRetentionStatusResponse` schema for status endpoint
    - Added `WorkspaceDeleteResponse` schema for workspace deletion
 
-3. `agent_sandbox/schemas/__init__.py` - MODIFIED
+3. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for all new workspace schemas
 
-4. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+4. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `WORKSPACE_RETENTION` Modal Dict for tracking workspace metadata
    - Added `build_artifact_manifest()` shared function for manifest building
    - Added `register_job_workspace()` function to track workspaces
@@ -1789,13 +1789,13 @@ curl -N -X POST 'https://<cli-sandbox-url>/ralph/execute_stream' \
    - Added `mark_workspace_deleted()` function to mark workspace as deleted
    - Added `get_workspace_retention_status()` function for monitoring
 
-5. `agent_sandbox/controllers/cli_controller.py` - MODIFIED
+5. `modal_backend/api/cli_controller.py` - MODIFIED
    - Added imports for workspace tracking and artifact manifest functions
    - Modified `POST /execute` to register workspace and record artifact manifest
    - Modified `POST /ralph/execute` to register workspace and record artifact manifest
    - Modified `POST /ralph/execute_stream` to register workspace and record artifact manifest
 
-6. `agent_sandbox/app.py` - MODIFIED
+6. `modal_backend/main.py` - MODIFIED
    - Added imports for workspace functions and schemas
    - Added `_delete_job_workspace()` helper function
    - Added `_cleanup_expired_workspaces()` function for batch cleanup
@@ -1876,14 +1876,14 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
 
 **Files created:**
 
-1. `agent_sandbox/schemas/session_spawn.py` - NEW FILE
+1. `modal_backend/models/session_spawn.py` - NEW FILE
    - `SpawnSessionRequest` / `SpawnSessionResponse` schemas
    - `ChildSessionStatus` schema for status checks
    - `ChildSessionResult` schema for result retrieval
    - `ChildSessionEntry` schema for list entries
    - `ChildSessionListResponse` schema for listing children
 
-2. `agent_sandbox/tools/session_tools.py` - NEW FILE
+2. `modal_backend/mcp_tools/session_tools.py` - NEW FILE
    - `spawn_session` tool to create child sessions
    - `check_session_status` tool to monitor child progress
    - `get_session_result` tool to retrieve completed results
@@ -1892,13 +1892,13 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
 
 **Files modified:**
 
-1. `agent_sandbox/config/settings.py` - MODIFIED
+1. `modal_backend/settings/settings.py` - MODIFIED
    - Added `child_session_registry_name` setting (default: "agent-child-session-registry")
    - Added `max_children_per_session` setting (default: 10)
    - Added `child_session_default_timeout` setting (default: 300 seconds)
    - Added `enable_child_sessions` setting (default: True)
 
-2. `agent_sandbox/jobs.py` - MODIFIED (at end of file)
+2. `modal_backend/jobs.py` - MODIFIED (at end of file)
    - Added `CHILD_SESSION_REGISTRY` Modal Dict for parent-child tracking
    - Added `register_child_session()` function to register children
    - Added `get_child_sessions()` function to list children for a parent
@@ -1907,12 +1907,12 @@ curl 'https://<org>--test-sandbox-http-app.modal.run/jobs/550e8400-...'
    - Added `can_spawn_child()` function to check spawn limits
    - Added `get_child_session_result()` function to retrieve results
 
-3. `agent_sandbox/tools/registry.py` - MODIFIED
+3. `modal_backend/mcp_tools/registry.py` - MODIFIED
    - Added imports for session tools
    - Created "sessions" MCP server with spawn/check/get/list tools
    - Added tools to allowed tools list
 
-4. `agent_sandbox/schemas/__init__.py` - MODIFIED
+4. `modal_backend/models/__init__.py` - MODIFIED
    - Added exports for all new session spawn schemas
 
 **How it works:**
@@ -2057,39 +2057,39 @@ This session focused on validating and fixing the Claude Agent SDK improvements,
 - Issue: `spawn_session` and related tools always failed with “No parent session context available.”
 - Fix: Added `set_parent_context()` to both Agent SDK and CLI controllers and cleared it after completion.
 - Files:  
-  - `agent_sandbox/controllers/controller.py`  
-  - `agent_sandbox/controllers/cli_controller.py`
+  - `modal_backend/api/controller.py`  
+  - `modal_backend/api/cli_controller.py`
 
 2) **CLI child sessions routed to the CLI sandbox**
 - Issue: child jobs with `sandbox_type="cli"` were still routed through `/query` (Agent SDK), ignoring sandbox type.
 - Fix: `process_job_queue()` now inspects `spawn_context.sandbox_type` and sends CLI jobs to `/execute` on the CLI sandbox (propagates `allowed_tools` and `timeout_seconds` when provided).
-- File: `agent_sandbox/app.py`
+- File: `modal_backend/main.py`
 
 3) **Snapshots now target the correct sandbox instance**
 - Issue: snapshot functions called `get_or_start_*` and could snapshot the wrong sandbox (especially with warm pools).
 - Fix: `snapshot_session_state` / `snapshot_cli_job_state` now accept `sandbox_id`, and callers pass the actual sandbox ID used for the request.
-- File: `agent_sandbox/app.py`
+- File: `modal_backend/main.py`
 
 4) **Pre-warm now actually uses the claimed sandbox**
 - Issue: `POST /warm` claims were logged but ignored; proxies always called `get_or_start_*`.
 - Fix: when a prewarm entry is ready, `query_proxy` and `query_stream` use the claimed `sandbox_id` and `sandbox_url`.
-- File: `agent_sandbox/app.py`
+- File: `modal_backend/main.py`
 
 5) **tail_logs fixed**
 - Issue: `tail_logs` used an async context on `move_on_after` and tried `sb.stdout.aio()` (not available).
 - Fix: reads stdout synchronously in a thread.
-- File: `agent_sandbox/app.py`
+- File: `modal_backend/main.py`
 
 6) **Modal auth for sandboxes (new secret wiring)**
 - Root issue: sandboxes were missing Modal auth, causing Dict/Volume access to raise `AuthError`, producing 500s.
 - Fix: created `modal-auth-secret` and added a new settings path to inject it. To avoid Modal stripping env vars that look like credentials, we switched to `SANDBOX_MODAL_TOKEN_ID`/`SANDBOX_MODAL_TOKEN_SECRET`, then map to `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` at runtime.
 - Files:
-  - `agent_sandbox/config/settings.py` (new `modal_auth_secret_name`, `enable_modal_auth_secret`, `_hydrate_modal_token_env`)
+  - `modal_backend/settings/settings.py` (new `modal_auth_secret_name`, `enable_modal_auth_secret`, `_hydrate_modal_token_env`)
 
 7) **Safe no-op guards removed after auth fixed**
 - We temporarily added safe Dict access helpers to prevent crashes when auth was missing.
 - After secrets were wired and validated, we removed all safe helpers and restored strict Dict/Volume access.
-- File: `agent_sandbox/jobs.py`
+- File: `modal_backend/jobs.py`
 
 ### Obstacles Encountered & Resolutions
 
@@ -2121,8 +2121,8 @@ This session focused on validating and fixing the Claude Agent SDK improvements,
 ### Commands Used (Not Exhaustive)
 
 - `modal secret create modal-auth-secret SANDBOX_MODAL_TOKEN_ID=... SANDBOX_MODAL_TOKEN_SECRET=...`
-- `modal run -m agent_sandbox.app::process_job_queue`
-- `modal run -m agent_sandbox.app::maintain_workspace_retention`
+- `modal run -m modal_backend.main::process_job_queue`
+- `modal run -m modal_backend.main::maintain_workspace_retention`
 - `uv run ruff check --fix .`
 - `uv run ruff format .`
 
@@ -2131,7 +2131,7 @@ This session focused on validating and fixing the Claude Agent SDK improvements,
 - Modal auth secret is **required** for Dict/Volume usage inside sandboxes; ensure `modal-auth-secret` exists with keys:
   - `SANDBOX_MODAL_TOKEN_ID`
   - `SANDBOX_MODAL_TOKEN_SECRET`
-- `_hydrate_modal_token_env()` in `agent_sandbox/config/settings.py` maps those to `MODAL_TOKEN_ID/SECRET`.
+- `_hydrate_modal_token_env()` in `modal_backend/settings/settings.py` maps those to `MODAL_TOKEN_ID/SECRET`.
 - Stats, multiplayer metadata, prompt queue, and volume commit/reload all work with auth; strict access is restored.
 
 ### Suggested Follow-ups

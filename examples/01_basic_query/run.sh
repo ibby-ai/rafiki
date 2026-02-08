@@ -9,7 +9,7 @@ echo ""
 
 # Simple factual question
 echo "1. Simple factual question:"
-uv run modal run -m agent_sandbox.app::run_agent_remote \
+uv run modal run -m modal_backend.main::run_agent_remote \
     --question "What is the capital of France?"
 
 echo ""

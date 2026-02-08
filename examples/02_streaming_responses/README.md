@@ -7,7 +7,7 @@ Demonstrates Server-Sent Events (SSE) streaming for real-time agent responses.
 Start the dev server in a separate terminal:
 
 ```bash
-uv run modal serve -m agent_sandbox.app
+uv run modal serve -m modal_backend.main
 ```
 
 Note the URL printed (e.g., `https://your-org--test-sandbox-http-app-dev.modal.run`)

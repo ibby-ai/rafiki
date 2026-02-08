@@ -14,7 +14,7 @@ modal setup
 modal secret list
 
 # 3. Test a simple run
-modal run -m agent_sandbox.app
+modal run -m modal_backend.main
 
 # 4. Check Cloudflare control plane health
 curl "https://<your-worker>.workers.dev/health"
@@ -170,7 +170,7 @@ modal setup
 
 2. **Try a simple run first**:
    ```bash
-   modal run -m agent_sandbox.app
+   modal run -m modal_backend.main
    ```
    If this works, the issue is specific to the long-lived service pattern.
 
@@ -182,15 +182,15 @@ modal setup
 
 4. **Terminate and restart**:
    ```bash
-   modal run -m agent_sandbox.app::terminate_service_sandbox
-   modal serve -m agent_sandbox.app
+   modal run -m modal_backend.main::terminate_service_sandbox
+   modal serve -m modal_backend.main
    ```
 
 5. **Check logs**:
    ```bash
    make tail-logs
    # Or
-   modal run -m agent_sandbox.app::tail_logs
+   modal run -m modal_backend.main::tail_logs
    ```
 
 ---
@@ -209,9 +209,9 @@ modal setup
 ```bash
 # Via environment variable
 export SANDBOX_MEMORY=4096
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 
-# Or edit agent_sandbox/config/settings.py
+# Or edit modal_backend/settings/settings.py
 sandbox_memory: int = 4096  # Increase from 2048
 ```
 
@@ -236,7 +236,7 @@ sandbox_memory: int = 4096  # Increase from 2048
 1. **Increase idle timeout** (keeps sandbox warm longer):
    ```bash
    export SANDBOX_IDLE_TIMEOUT=1800  # 30 minutes
-   modal serve -m agent_sandbox.app
+   modal serve -m modal_backend.main
    ```
 
 2. **Use a gateway ping** to keep the sandbox warm:
@@ -260,13 +260,13 @@ sandbox_memory: int = 4096  # Increase from 2048
 
 **Workaround:**
 1. Stop both dev servers.
-2. Restart `modal serve -m agent_sandbox.app`.
+2. Restart `modal serve -m modal_backend.main`.
 3. Restart `wrangler dev` for the Cloudflare worker.
 
 If the issue persists, terminate and recreate the background sandbox:
 ```bash
-modal run -m agent_sandbox.app::terminate_service_sandbox
-modal serve -m agent_sandbox.app
+modal run -m modal_backend.main::terminate_service_sandbox
+modal serve -m modal_backend.main
 ```
 
 ---
@@ -300,8 +300,8 @@ curl -X POST "${DEV_URL}/query" \
   -d '{"question":"Write hello to /data/test.txt"}'
 
 # Restart the sandbox
-modal run -m agent_sandbox.app::terminate_service_sandbox
-modal serve -m agent_sandbox.app
+modal run -m modal_backend.main::terminate_service_sandbox
+modal serve -m modal_backend.main
 
 # Check if file exists
 curl -X POST "${DEV_URL}/query" \
@@ -326,7 +326,7 @@ curl -X POST "${DEV_URL}/query" \
 
 2. **Verify volume name matches settings**:
    ```python
-   # In agent_sandbox/config/settings.py
+   # In modal_backend/settings/settings.py
    persist_vol_name: str = "svc-runner-8001-vol"
    ```
 
@@ -343,7 +343,7 @@ curl -X POST "${DEV_URL}/query" \
 
 **Cause**: The tool isn't in the allowed tools list or permission mode is blocking it.
 
-**Solution**: Add the tool to the allowed list in `agent_sandbox/tools/registry.py`:
+**Solution**: Add the tool to the allowed list in `modal_backend/mcp_tools/registry.py`:
 
 ```python
 # Find the _allowed_tools list
@@ -368,7 +368,7 @@ _allowed_tools = [
 
 **Possible causes**:
 
-1. **Tool implementation error**: Check the tool code in `agent_sandbox/tools/`
+1. **Tool implementation error**: Check the tool code in `modal_backend/mcp_tools/`
 
 2. **Incorrect arguments**: Verify the tool schema matches what the agent is sending
 
@@ -378,7 +378,7 @@ _allowed_tools = [
 
 1. Check the tool directly:
    ```python
-   from agent_sandbox.tools.calculate_tool import calculate
+   from modal_backend.mcp_tools.calculate_tool import calculate
    result = await calculate({"expression": "2 + 2"})
    print(result)
    ```
@@ -401,7 +401,7 @@ _allowed_tools = [
 
 1. **Verify the service is running**:
    ```bash
-   modal serve -m agent_sandbox.app
+   modal serve -m modal_backend.main
    # Note the URL in the output
    ```
 
@@ -432,8 +432,8 @@ _allowed_tools = [
 
 2. **Restart the service**:
    ```bash
-   modal run -m agent_sandbox.app::terminate_service_sandbox
-   modal serve -m agent_sandbox.app
+   modal run -m modal_backend.main::terminate_service_sandbox
+   modal serve -m modal_backend.main
    ```
 
 3. **Check for errors in logs**:
@@ -449,7 +449,7 @@ _allowed_tools = [
 
 **Cause**: The frontend domain isn't allowed by CORS configuration.
 
-**Solution**: Update CORS settings in `agent_sandbox/app.py`:
+**Solution**: Update CORS settings in `modal_backend/main.py`:
 
 ```python
 web_app.add_middleware(
@@ -531,7 +531,7 @@ If you're still stuck:
 
 3. **Review configuration**:
    ```python
-   from agent_sandbox.config.settings import Settings
+   from modal_backend.settings.settings import Settings
    settings = Settings()
    print(settings.model_dump())
    ```

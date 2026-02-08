@@ -40,10 +40,10 @@ Use this URL only for internal integration or debugging, not for public clients.
 ### Deploying
 
 ```bash
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 ```
 
-For the Cloudflare Worker, deploy via `wrangler` in `cloudflare-control-plane/`.
+For the Cloudflare Worker, deploy via `wrangler` in `edge-control-plane/`.
 
 ## Available Endpoints
 
@@ -383,7 +383,7 @@ curl -X POST https://your-worker.workers.dev/submit \
 - `X-Agent-Signature`: `t=<timestamp>,v1=<hmac>` where `hmac = HMAC_SHA256(secret, "<timestamp>.<payload>")`
 
 **Note:** Jobs are processed by the `process_job_queue` Modal function. In dev, run
-`modal run -m agent_sandbox.app::process_job_queue` to consume queued jobs, or set
+`modal run -m modal_backend.main::process_job_queue` to consume queued jobs, or set
 `job_queue_cron` to schedule automatic processing.
 
 **Status Codes:**
@@ -1228,12 +1228,12 @@ These options add **additional** checks on top of `X-Internal-Auth` for internal
 
 **Enable in your code:**
 
-1. **Settings** (`agent_sandbox/config/settings.py` or environment variable):
+1. **Settings** (`modal_backend/settings/settings.py` or environment variable):
    ```python
    enforce_connect_token = True
    ```
 
-2. **Controller** (`agent_sandbox/controllers/controller.py`):
+2. **Controller** (`modal_backend/api/controller.py`):
    ```python
    ENFORCE_CONNECT_TOKEN = True
    ```
@@ -1247,12 +1247,12 @@ These options add **additional** checks on top of `X-Internal-Auth` for internal
 
 **Enable in your code:**
 
-1. **Settings** (`agent_sandbox/config/settings.py` or environment variable):
+1. **Settings** (`modal_backend/settings/settings.py` or environment variable):
    ```python
    require_proxy_auth = True
    ```
 
-2. **App** (`agent_sandbox/app.py`):
+2. **App** (`modal_backend/main.py`):
    ```python
    @modal.asgi_app(requires_proxy_auth=True)
    ```

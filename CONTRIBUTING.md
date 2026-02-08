@@ -32,10 +32,10 @@ modal secret create anthropic-secret ANTHROPIC_API_KEY=your-key-here
 
 ```bash
 # Run agent locally
-modal run -m agent_sandbox.app
+modal run -m modal_backend.main
 
 # Start dev server with hot reload
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 
 # Run tests
 uv run pytest
@@ -88,13 +88,13 @@ Use clear, descriptive commit messages:
 
 - Add tests for new functionality in `tests/`
 - Ensure existing tests pass: `uv run pytest`
-- Test structure mirrors `agent_sandbox/` package structure
+- Test structure mirrors `modal_backend/` package structure
 
 ## Areas of Contribution
 
 ### Adding New Tools
 
-See `agent_sandbox/tools/` for examples. New tools should:
+See `modal_backend/mcp_tools/` for examples. New tools should:
 1. Be created in a separate file
 2. Be registered in `registry.py`
 3. Include tests

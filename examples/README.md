@@ -29,7 +29,7 @@ Before running these examples:
 ./examples/01_basic_query/run.sh
 
 # Or using uv directly
-uv run modal run -m agent_sandbox.app::run_agent_remote --question "Hello"
+uv run modal run -m modal_backend.main::run_agent_remote --question "Hello"
 ```
 
 ## Examples Overview
@@ -49,7 +49,7 @@ uv run modal run -m agent_sandbox.app::run_agent_remote --question "Hello"
 ### Short-lived Sandbox (Pattern 1)
 
 ```bash
-uv run modal run -m agent_sandbox.app::run_agent_remote --question "Your question"
+uv run modal run -m modal_backend.main::run_agent_remote --question "Your question"
 ```
 
 Best for: One-off queries, CI/CD, batch processing
@@ -58,7 +58,7 @@ Best for: One-off queries, CI/CD, batch processing
 
 ```bash
 # Start the service (in one terminal)
-uv run modal serve -m agent_sandbox.app
+uv run modal serve -m modal_backend.main
 
 # Query via HTTP (in another terminal)
 curl -X POST 'https://<your-url>/query' \

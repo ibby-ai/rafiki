@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The project is organized as a Python package `agent_sandbox/` following Modal's best practices for multi-file projects. Entry points live at `agent_sandbox/app.py` (Modal app declaration) and `agent_sandbox/agents/loop.py` (agent loop). Shared components are organized into subpackages:
+The project is organized as a Python package `modal_backend/` following Modal's best practices for multi-file projects. Entry points live at `modal_backend/main.py` (Modal app declaration) and `modal_backend/agent_runtime/loop.py` (agent loop). Shared components are organized into subpackages:
 
 - `config/`: Configuration management with Pydantic Settings
 - `prompts/`: System prompts and default questions
@@ -28,11 +28,11 @@ This is a **uv-based project**. Always activate the virtual environment before r
 
 ### Running
 
-- `modal run -m agent_sandbox.app` — build the sandbox image if needed and execute the agent end to end.
-- `modal run -m agent_sandbox.app::run_agent_remote --question "..."` — call the agent function for ad‑hoc questions.
-- `modal serve -m agent_sandbox.app` — run a hot-reloading dev loop against Modal.
-- `modal deploy -m agent_sandbox.deploy` — promote the current definition to production.
-- `make serve` — convenience wrapper for `modal serve -m agent_sandbox.app`.
+- `modal run -m modal_backend.main` — build the sandbox image if needed and execute the agent end to end.
+- `modal run -m modal_backend.main::run_agent_remote --question "..."` — call the agent function for ad‑hoc questions.
+- `modal serve -m modal_backend.main` — run a hot-reloading dev loop against Modal.
+- `modal deploy -m modal_backend.deploy` — promote the current definition to production.
+- `make serve` — convenience wrapper for `modal serve -m modal_backend.main`.
 - `make run` / `make deploy` — Makefile wrappers for running or deploying with Modal.
 - `make curl Q="..."` / `make stream Q="..."` — POST against the dev HTTP endpoints.
 - `make health` / `make info` — check service health or info endpoints. Set `DEV_URL` to the dev endpoint URL; use `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` when hitting proxied endpoints.
@@ -44,7 +44,7 @@ This is a **uv-based project**. Always activate the virtual environment before r
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.11+ features only when they remain compatible with Modal runtime images. Follow PEP 8 defaults: 4-space indentation, snake_case for functions and variables, UpperCamelCase for classes. Keep module-level constants uppercase. Prefer type hints on new functions, and keep environment or tool names descriptive (`calculate_tool`, not `calc`). Strings that surface in prompts should live in `agent_sandbox/prompts/prompts.py`.
+Target Python 3.11+ features only when they remain compatible with Modal runtime images. Follow PEP 8 defaults: 4-space indentation, snake_case for functions and variables, UpperCamelCase for classes. Keep module-level constants uppercase. Prefer type hints on new functions, and keep environment or tool names descriptive (`calculate_tool`, not `calc`). Strings that surface in prompts should live in `modal_backend/instructions/prompts.py`.
 
 ## Pre-commit Hooks
 
@@ -72,10 +72,10 @@ If a commit fails due to hook violations, the hooks will auto-fix what they can.
 
 ## Service Management & Debugging
 
-- `modal run -m agent_sandbox.app::terminate_service_sandbox` — force a final volume commit and stop the background sandbox.
-- `modal run -m agent_sandbox.app::snapshot_service` — snapshot the current service filesystem.
-- `modal run -m agent_sandbox.app::process_job_queue` — consume queued jobs in development.
-- `modal run -m agent_sandbox.app::tail_logs` — stream sandbox logs during troubleshooting.
+- `modal run -m modal_backend.main::terminate_service_sandbox` — force a final volume commit and stop the background sandbox.
+- `modal run -m modal_backend.main::snapshot_service` — snapshot the current service filesystem.
+- `modal run -m modal_backend.main::process_job_queue` — consume queued jobs in development.
+- `modal run -m modal_backend.main::tail_logs` — stream sandbox logs during troubleshooting.
 - `modal sandbox logs <sandbox-id>` — inspect logs for a specific sandbox.
 - `modal app list` / `modal app logs <app-name>` — locate deployed apps and view logs.
 - `modal container list` — inspect running Modal containers.
@@ -83,7 +83,7 @@ If a commit fails due to hook violations, the hooks will auto-fix what they can.
 
 ## Testing Guidelines
 
-The test suite uses `pytest` with filenames `test_*.py` mirroring the package layout. Before submitting changes, run `modal run -m agent_sandbox.app` and `modal run -m agent_sandbox.app::run_agent_remote --question "health check"` to confirm the agent boots, tools register, and streaming output works. Mark long-running Modal calls with `@pytest.mark.slow`. Capture regression coverage for new behaviors whenever practical.
+The test suite uses `pytest` with filenames `test_*.py` mirroring the package layout. Before submitting changes, run `modal run -m modal_backend.main` and `modal run -m modal_backend.main::run_agent_remote --question "health check"` to confirm the agent boots, tools register, and streaming output works. Mark long-running Modal calls with `@pytest.mark.slow`. Capture regression coverage for new behaviors whenever practical.
 
 ## Commit & Pull Request Guidelines
 
@@ -91,7 +91,7 @@ Existing commits use short, present-tense statements (`making sandbox persistent
 
 ## Security & Secrets
 
-Never hardcode API keys. All Anthropic credentials must stay in the `anthropic-secret` Modal secret with key `ANTHROPIC_API_KEY`. When adding new secrets, update `agent_sandbox/config/settings.py` and document required setup steps in `README.md`. Avoid committing generated artifacts that might expose credentials or user data.
+Never hardcode API keys. All Anthropic credentials must stay in the `anthropic-secret` Modal secret with key `ANTHROPIC_API_KEY`. When adding new secrets, update `modal_backend/settings/settings.py` and document required setup steps in `README.md`. Avoid committing generated artifacts that might expose credentials or user data.
 
 ## Browser Automation
 

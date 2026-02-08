@@ -42,4 +42,4 @@ uv run modal volume rm svc-runner-8001-vol /hello.py
 
 - Files are synced on the commit interval (default: 60s) or when the sandbox terminates
 - Use `terminate_service_sandbox` to flush writes immediately if you need a hard sync
-- Volume name is configured in `agent_sandbox/config/settings.py`
+- Volume name is configured in `modal_backend/settings/settings.py`

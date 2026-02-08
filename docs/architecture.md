@@ -67,7 +67,7 @@ When you deploy with `modal serve` or `modal deploy`, Modal:
 
 ### 2. http_app (Ingress Handler)
 
-**Location:** `agent_sandbox/app.py`
+**Location:** `modal_backend/main.py`
 
 **What it does:**
 - Acts as the entry point for all HTTP requests
@@ -131,7 +131,7 @@ def http_app():
 
 ### 5. Agent SDK Sandbox (svc-runner-8001)
 
-**Location:** `agent_sandbox/controllers/controller.py`
+**Location:** `modal_backend/api/controller.py`
 
 **What it does:**
 - Runs the Claude Agent SDK client
@@ -299,12 +299,12 @@ def http_app():
 
 **Development:**
 ```bash
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 ```
 
 **Production:**
 ```bash
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 ```
 
 Both commands:

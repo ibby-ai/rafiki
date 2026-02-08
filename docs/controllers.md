@@ -8,7 +8,7 @@ The system uses a **single controller service** running in a long-lived sandbox:
 
 | Controller | Location | Port | Purpose |
 |------------|----------|------|---------|
-| **Agent SDK Controller** | `agent_sandbox/controllers/controller.py` | 8001 | Claude Agent SDK queries |
+| **Agent SDK Controller** | `modal_backend/api/controller.py` | 8001 | Claude Agent SDK queries |
 
 The controller is a **FastAPI microservice** running inside a long-lived `modal.Sandbox` instance.
 
@@ -27,7 +27,7 @@ The Agent SDK controller is responsible for:
 
 ## Location and Structure
 
-**File:** `agent_sandbox/controllers/controller.py`
+**File:** `modal_backend/api/controller.py`
 
 **Key Components:**
 
@@ -41,10 +41,10 @@ The Agent SDK controller is responsible for:
 The controller is started inside a Modal Sandbox via uvicorn:
 
 ```python
-# From agent_sandbox/app.py
+# From modal_backend/main.py
 SANDBOX = modal.Sandbox.create(
     "uvicorn",
-    "agent_sandbox.controllers.controller:app",
+    "modal_backend.api.controller:app",
     "--host", "0.0.0.0",
     "--port", str(SERVICE_PORT),  # Default: 8001
     ...
@@ -54,7 +54,7 @@ SANDBOX = modal.Sandbox.create(
 **Process flow:**
 
 1. Modal creates a sandbox environment
-2. Runs `uvicorn agent_sandbox.controllers.controller:app --host 0.0.0.0 --port 8001`
+2. Runs `uvicorn modal_backend.api.controller:app --host 0.0.0.0 --port 8001`
 3. Uvicorn loads the FastAPI app from `controller.py`
 4. App listens on port 8001 (encrypted via Modal tunnel)
 5. `http_app` discovers the tunnel URL and proxies requests
@@ -100,8 +100,8 @@ def _options() -> ClaudeAgentOptions:
 
 **What it configures:**
 
-- System prompt (from `agent_sandbox.prompts.prompts`)
-- MCP servers (from `agent_sandbox.tools`)
+- System prompt (from `modal_backend.instructions.prompts`)
+- MCP servers (from `modal_backend.mcp_tools`)
 - Allowed tools list
 - Permission handling strategy
 
@@ -392,11 +392,11 @@ async def custom_handler(body: CustomBody):
 
 ### Modify System Prompt
 
-Edit `agent_sandbox/prompts/prompts.py` - the controller imports `SYSTEM_PROMPT` from there.
+Edit `modal_backend/instructions/prompts.py` - the controller imports `SYSTEM_PROMPT` from there.
 
 ### Change Tool Configuration
 
-Modify `agent_sandbox/tools/` to add/remove tools or MCP servers.
+Modify `modal_backend/mcp_tools/` to add/remove tools or MCP servers.
 
 ## Session Handling
 

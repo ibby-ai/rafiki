@@ -47,7 +47,7 @@ The multi-agent architecture allows you to define specialized agents with:
 `AgentConfig` is the central dataclass that defines agent behavior:
 
 ```python
-from agent_sandbox.agents.base import AgentConfig
+from modal_backend.agent_runtime.base import AgentConfig
 
 config = AgentConfig(
     name="my-agent",                    # Unique identifier
@@ -83,7 +83,7 @@ config = AgentConfig(
 The `AgentRegistry` is a singleton that manages agent configurations:
 
 ```python
-from agent_sandbox.agents.registry import (
+from modal_backend.agent_runtime.registry import (
     get_agent_config,
     get_agent_executor,
     list_agent_types,
@@ -103,7 +103,7 @@ async for msg in executor.execute("Research AI trends"):
     print(msg)
 
 # Register a custom agent type
-from agent_sandbox.agents.base import AgentConfig
+from modal_backend.agent_runtime.base import AgentConfig
 register_agent(AgentConfig(name="custom", ...))
 ```
 
@@ -112,7 +112,7 @@ register_agent(AgentConfig(name="custom", ...))
 `AgentExecutor` is an abstract base class for agent execution, with `ClaudeAgentExecutor` as the default implementation:
 
 ```python
-from agent_sandbox.agents.base import AgentExecutor, ClaudeAgentExecutor
+from modal_backend.agent_runtime.base import AgentExecutor, ClaudeAgentExecutor
 
 # Create executor from config
 executor = ClaudeAgentExecutor(config)
@@ -141,7 +141,7 @@ The executor handles:
 General-purpose agent that maintains backward compatibility:
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote --question "Explain Python decorators"
+modal run -m modal_backend.main::run_agent_remote --question "Explain Python decorators"
 ```
 
 **Capabilities:**
@@ -154,7 +154,7 @@ modal run -m agent_sandbox.app::run_agent_remote --question "Explain Python deco
 Specialized for marketing content creation:
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "Write a tagline for a productivity app" \
   --agent-type marketing
 ```
@@ -170,7 +170,7 @@ modal run -m agent_sandbox.app::run_agent_remote \
 Multi-agent research coordinator with dual orchestration:
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "Research the current state of AI agents" \
   --agent-type research
 ```
@@ -254,13 +254,13 @@ Parallel execution via isolated sandbox jobs:
 
 ### Step 1: Create Agent Configuration
 
-Create a new file in `agent_sandbox/agents/types/`:
+Create a new file in `modal_backend/agent_runtime/types/`:
 
 ```python
-# agent_sandbox/agents/types/customer_support.py
+# modal_backend/agent_runtime/types/customer_support.py
 """Customer support agent configuration."""
 
-from agent_sandbox.agents.base import AgentConfig
+from modal_backend.agent_runtime.base import AgentConfig
 
 SUPPORT_PROMPT = """You are a customer support specialist.
 
@@ -292,15 +292,15 @@ def customer_support_config() -> AgentConfig:
 
 ### Step 2: Register the Agent
 
-Add to `agent_sandbox/agents/registry.py`:
+Add to `modal_backend/agent_runtime/registry.py`:
 
 ```python
 def _initialize_defaults(self) -> None:
     """Initialize default agent types."""
-    from agent_sandbox.agents.types.default import default_agent_config
-    from agent_sandbox.agents.types.marketing import marketing_agent_config
-    from agent_sandbox.agents.types.research import research_agent_config
-    from agent_sandbox.agents.types.customer_support import customer_support_config
+    from modal_backend.agent_runtime.types.default import default_agent_config
+    from modal_backend.agent_runtime.types.marketing import marketing_agent_config
+    from modal_backend.agent_runtime.types.research import research_agent_config
+    from modal_backend.agent_runtime.types.customer_support import customer_support_config
 
     self.register(default_agent_config())
     self.register(marketing_agent_config())
@@ -312,7 +312,7 @@ def _initialize_defaults(self) -> None:
 
 ```bash
 # CLI
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "How do I reset my password?" \
   --agent-type customer-support
 
@@ -330,7 +330,7 @@ For in-process delegation, add `AgentDefinition` objects to your config:
 
 ```python
 from claude_agent_sdk import AgentDefinition
-from agent_sandbox.agents.base import AgentConfig
+from modal_backend.agent_runtime.base import AgentConfig
 
 def coordinator_config() -> AgentConfig:
     """Coordinator with multiple subagents."""
@@ -412,21 +412,21 @@ return AgentConfig(
 
 ```bash
 # Default agent
-modal run -m agent_sandbox.app::run_agent_remote --question "Your question"
+modal run -m modal_backend.main::run_agent_remote --question "Your question"
 
 # Specify agent type
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "Write a tagline" \
   --agent-type marketing
 
 # With session resumption
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "Continue the research" \
   --agent-type research \
   --session-id "sess_abc123"
 
 # Direct loop execution (for testing)
-python -m agent_sandbox.agents.loop --question "Test" --agent-type default
+python -m modal_backend.agent_runtime.loop --question "Test" --agent-type default
 ```
 
 ### HTTP API Usage

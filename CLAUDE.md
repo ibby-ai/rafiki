@@ -50,21 +50,21 @@ uv run pre-commit run --all-files
 
 ```bash
 # Run agent locally (spawns sandbox and executes agent loop)
-modal run -m agent_sandbox.app
+modal run -m modal_backend.main
 
 # Run agent as remote function
-modal run -m agent_sandbox.app::run_agent_remote --question "Your question here"
+modal run -m modal_backend.main::run_agent_remote --question "Your question here"
 
 # Start dev server with hot reload (enables HTTP endpoints)
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 
 # Deploy to production
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 ```
 
 ### Testing HTTP Endpoints
 
-When `modal serve -m agent_sandbox.app` or `modal deploy -m agent_sandbox.deploy` is running:
+When `modal serve -m modal_backend.main` or `modal deploy -m modal_backend.deploy` is running:
 
 ```bash
 # Test the query endpoint
@@ -87,7 +87,7 @@ The codebase demonstrates two distinct patterns for running agents:
 **1. Short-lived Sandbox Pattern** (`main` entrypoint)
 
 - Creates ephemeral sandbox
-- Executes `agent_sandbox.agents.loop` as a module
+- Executes `modal_backend.agent_runtime.loop` as a module
 - Captures stdout/stderr
 - Terminates sandbox after completion
 - Use for: batch jobs, scheduled tasks, one-off queries
@@ -107,7 +107,7 @@ The system uses a persistent sandbox for the Agent SDK:
 
 ### Key Components
 
-**`agent_sandbox/app.py`** - Modal app definition and entry points
+**`modal_backend/main.py`** - Modal app definition and entry points
 
 - Defines `modal.App("test-sandbox")`
 - `get_or_start_background_sandbox()`: Manages Agent SDK sandbox lifecycle
@@ -115,13 +115,13 @@ The system uses a persistent sandbox for the Agent SDK:
 - `run_agent_remote`: Short-lived function for single queries
 - `main`: Local CLI entry point for `modal run`
 
-**`agent_sandbox/agents/loop.py`** - Agent execution
+**`modal_backend/agent_runtime/loop.py`** - Agent execution
 
 - Builds `ClaudeAgentOptions` from MCP servers and prompts
 - `run_agent()`: Single query execution with streaming output
-- Used by short-lived sandboxes via `sb.exec("python", "-m", "agent_sandbox.agents.loop", ...)`
+- Used by short-lived sandboxes via `sb.exec("python", "-m", "modal_backend.agent_runtime.loop", ...)`
 
-**`agent_sandbox/controllers/controller.py`** - Agent SDK microservice (port 8001)
+**`modal_backend/api/controller.py`** - Agent SDK microservice (port 8001)
 
 - `GET /health_check`: Liveness probe
 - `POST /query`: Agent query endpoint that returns responses
@@ -129,25 +129,25 @@ The system uses a persistent sandbox for the Agent SDK:
 - Uses `permission_mode="acceptEdits"` with `can_use_tool` handler
 - Supports session resumption via `session_id`, `session_key`, `fork_session`
 
-**`agent_sandbox/app.py`** - HTTP Gateway endpoints (in addition to above)
+**`modal_backend/main.py`** - HTTP Gateway endpoints (in addition to above)
 
 - `POST /submit`: Enqueue async job to `JOB_QUEUE`
 - `GET /jobs/{job_id}`: Check job status from `JOB_RESULTS` dict
 - `DELETE /jobs/{job_id}`: Cancel a queued job
 
-**`agent_sandbox/config/settings.py`** - Configuration management
+**`modal_backend/settings/settings.py`** - Configuration management
 
 - `Settings`: Pydantic Settings class for environment variables and configuration
 - `get_modal_secrets()`: Returns Modal Secret objects
 - Centralized configuration for sandbox settings, timeouts, resources, etc.
 
-**`agent_sandbox/app.py`** - Image building
+**`modal_backend/main.py`** - Image building
 
 - `_base_anthropic_sdk_image()`: Builds container with Python 3.11, FastAPI, uvicorn, httpx, claude-agent-sdk, Node.js 20, and @anthropic-ai/claude-agent-sdk
 - Working directory: `/root/app`
 - Copies local project and installs dependencies
 
-**`agent_sandbox/tools/`** - MCP tool system
+**`modal_backend/mcp_tools/`** - MCP tool system
 
 - `registry.py`: `ToolRegistry` class managing MCP servers and allowed tools
 - `calculate_tool.py`: Example tool implementation
@@ -155,19 +155,19 @@ The system uses a persistent sandbox for the Agent SDK:
 - Tool naming: `mcp__<server>__<tool>` (e.g., `mcp__utilities__calculate`)
 - `get_mcp_servers()` and `get_allowed_tools()`: Convenience functions for accessing registry
 
-**`agent_sandbox/prompts/prompts.py`** - Agent prompts
+**`modal_backend/instructions/prompts.py`** - Agent prompts
 
 - `SYSTEM_PROMPT`: Configures agent behavior and tone
 - `DEFAULT_QUESTION`: Fallback query when none provided
 
-**`agent_sandbox/agents/base.py`** - Core multi-agent abstractions
+**`modal_backend/agent_runtime/base.py`** - Core multi-agent abstractions
 
 - `AgentConfig`: Dataclass defining agent behavior (prompts, tools, subagents)
 - `AgentExecutor`: Abstract base class for agent execution
 - `ClaudeAgentExecutor`: Default implementation using Claude Agent SDK
 - `build_agent_options()`: Central function for building ClaudeAgentOptions
 
-**`agent_sandbox/agents/registry.py`** - Agent type management
+**`modal_backend/agent_runtime/registry.py`** - Agent type management
 
 - `AgentRegistry`: Singleton managing agent configurations
 - `get_agent_config(name)`: Get configuration by agent type name
@@ -175,19 +175,19 @@ The system uses a persistent sandbox for the Agent SDK:
 - `list_agent_types()`: List all registered agent types
 - `register_agent(config)`: Register custom agent types
 
-**`agent_sandbox/agents/types/`** - Built-in agent definitions
+**`modal_backend/agent_runtime/types/`** - Built-in agent definitions
 
 - `default.py`: General-purpose agent (backward compatible)
 - `marketing.py`: Marketing specialist with web search
 - `research.py`: Research coordinator with SDK native subagents
 
-**`agent_sandbox/prompts/`** - Agent-specific prompts
+**`modal_backend/instructions/`** - Agent-specific prompts
 
 - `marketing.py`: Marketing agent system prompt
 - `research.py`: Research agent system prompt
 - `subagents/`: Prompts for SDK native subagents (researcher, data-analyst, report-writer)
 
-**`agent_sandbox/jobs.py`** - Async job processing
+**`modal_backend/jobs.py`** - Async job processing
 
 - `enqueue_job()`: Submit job to Modal Queue
 - `get_job_status()`: Check job status from Modal Dict
@@ -210,8 +210,8 @@ The sandbox persists across multiple requests within the same Modal worker, avoi
 
 ### Permission Modes
 
-- `agent_sandbox/agents/loop.py`: Uses default permission mode (requires user approval for tools)
-- `agent_sandbox/controllers/controller.py`: Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
+- `modal_backend/agent_runtime/loop.py`: Uses default permission mode (requires user approval for tools)
+- `modal_backend/api/controller.py`: Uses `permission_mode="acceptEdits"` with `can_use_tool` handler for controlled tool access
 
 When adding new endpoints or execution patterns, choose permission mode based on trust level and use case.
 
@@ -219,7 +219,7 @@ When adding new endpoints or execution patterns, choose permission mode based on
 
 ### Adding New Tools
 
-1. Create a new file in `agent_sandbox/tools/` (e.g., `my_tool.py`):
+1. Create a new file in `modal_backend/mcp_tools/` (e.g., `my_tool.py`):
 
 ```python
 from claude_agent_sdk import tool
@@ -231,10 +231,10 @@ async def my_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": "result"}]}
 ```
 
-2. Register in `agent_sandbox/tools/registry.py`:
+2. Register in `modal_backend/mcp_tools/registry.py`:
 
 ```python
-from agent_sandbox.tools.my_tool import my_tool
+from modal_backend.mcp_tools.my_tool import my_tool
 
 # In ToolRegistry._initialize_defaults():
 multi_tool_server = create_sdk_mcp_server(
@@ -249,14 +249,14 @@ self._allowed_tools.append("mcp__utilities__my_tool_name")
 
 ### Modifying Agent Behavior
 
-Edit `agent_sandbox/prompts/prompts.py` to change `SYSTEM_PROMPT`.
+Edit `modal_backend/instructions/prompts.py` to change `SYSTEM_PROMPT`.
 
 ### Adding New Agent Types
 
-1. Create config in `agent_sandbox/agents/types/my_agent.py`:
+1. Create config in `modal_backend/agent_runtime/types/my_agent.py`:
 
 ```python
-from agent_sandbox.agents.base import AgentConfig
+from modal_backend.agent_runtime.base import AgentConfig
 
 def my_agent_config() -> AgentConfig:
     return AgentConfig(
@@ -270,10 +270,10 @@ def my_agent_config() -> AgentConfig:
     )
 ```
 
-2. Register in `agent_sandbox/agents/registry.py`:
+2. Register in `modal_backend/agent_runtime/registry.py`:
 
 ```python
-from agent_sandbox.agents.types.my_agent import my_agent_config
+from modal_backend.agent_runtime.types.my_agent import my_agent_config
 
 # In AgentRegistry._initialize_defaults():
 self.register(my_agent_config())
@@ -304,12 +304,12 @@ See `docs/multi-agent.md` for comprehensive documentation on the multi-agent arc
 
 ### Adjusting Runtime Configuration
 
-Edit `agent_sandbox/config/settings.py`:
+Edit `modal_backend/settings/settings.py`:
 
 - Modify `Settings` class attributes for configuration values
 - Update `get_modal_secrets()` to add new secrets
 
-Edit `agent_sandbox/app.py`:
+Edit `modal_backend/main.py`:
 
 - Modify `_base_anthropic_sdk_image()` to add pip packages (`.pip_install()`)
 - Add apt packages (`.apt_install()`)
@@ -317,7 +317,7 @@ Edit `agent_sandbox/app.py`:
 
 ### Adding HTTP Endpoints
 
-Add new endpoints to `agent_sandbox/app.py`:
+Add new endpoints to `modal_backend/main.py`:
 
 ```python
 @web_app.post("/your_endpoint")
@@ -326,7 +326,7 @@ async def your_endpoint(request: Request, body: QueryBody):
     pass
 ```
 
-Or add to the background service in `agent_sandbox/controllers/controller.py`:
+Or add to the background service in `modal_backend/api/controller.py`:
 
 ```python
 @app.post("/your_endpoint")
@@ -337,13 +337,13 @@ async def your_endpoint(body: QueryBody, request: Request):
 
 ## Important Notes
 
-- **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (agent_sandbox/tools/calculate_tool.py)
-- **Sandbox Timeouts**: Background sandbox runs for max 24 hours or 10 minutes idle (configurable in `agent_sandbox/config/settings.py`)
+- **Security**: `calculate` tool uses `eval()` - replace with safe parser for production (modal_backend/mcp_tools/calculate_tool.py)
+- **Sandbox Timeouts**: Background sandbox runs for max 24 hours or 10 minutes idle (configurable in `modal_backend/settings/settings.py`)
 - **Autoscaling**: `min_containers=1` keeps containers warm by default; adjust `max_containers`, `scaledown_window` for cost/latency tradeoffs
-- **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (agent_sandbox/tools/registry.py)
-- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (agent_sandbox/app.py)
-- **Python Version**: Image uses Python 3.11 (agent_sandbox/app.py)
-- **Module Mode**: All commands use `-m agent_sandbox.*` for proper package discovery
+- **Tool Wildcards**: `ALLOWED_TOOLS` supports wildcards like `"WebSearch(*)"` (modal_backend/mcp_tools/registry.py)
+- **Node.js Dependency**: Agent SDK requires `@anthropic-ai/claude-agent-sdk` npm package (modal_backend/main.py)
+- **Python Version**: Image uses Python 3.11 (modal_backend/main.py)
+- **Module Mode**: All commands use `-m modal_backend.*` for proper package discovery
 - **Agent Turn Limits**: Set `agent_max_turns` to limit conversation turns and prevent runaway loops
 
 ### Volume Persistence Behavior

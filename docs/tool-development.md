@@ -26,10 +26,10 @@ User Question → Agent Reasoning → Tool Call → Tool Execution → Response 
 
 ### Step 1: Create the Tool File
 
-Create a new file in `agent_sandbox/tools/`:
+Create a new file in `modal_backend/mcp_tools/`:
 
 ```python
-# agent_sandbox/tools/my_tool.py
+# modal_backend/mcp_tools/my_tool.py
 """My custom tool for doing something useful."""
 
 from claude_agent_sdk import tool
@@ -57,11 +57,11 @@ async def my_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 ### Step 2: Register the Tool
 
-Edit `agent_sandbox/tools/registry.py`:
+Edit `modal_backend/mcp_tools/registry.py`:
 
 ```python
 # Add import at the top
-from agent_sandbox.tools.my_tool import my_tool
+from modal_backend.mcp_tools.my_tool import my_tool
 
 # In _initialize_defaults(), add to the tools list:
 multi_tool_server = create_sdk_mcp_server(
@@ -81,7 +81,7 @@ self._allowed_tools = [
 
 ```bash
 # Run the agent and ask it to use your tool
-modal run -m agent_sandbox.app::run_agent_remote --question "Use my_tool with param1='hello' and param2=42"
+modal run -m modal_backend.main::run_agent_remote --question "Use my_tool with param1='hello' and param2=42"
 ```
 
 ---
@@ -173,7 +173,7 @@ Here's a more realistic example of a tool that fetches weather data:
 ### 1. Create the Tool
 
 ```python
-# agent_sandbox/tools/weather_tool.py
+# modal_backend/mcp_tools/weather_tool.py
 """Weather lookup tool using a weather API."""
 
 from claude_agent_sdk import tool
@@ -233,8 +233,8 @@ async def get_weather(args: dict[str, Any]) -> dict[str, Any]:
 ### 2. Register It
 
 ```python
-# agent_sandbox/tools/registry.py
-from agent_sandbox.tools.weather_tool import get_weather
+# modal_backend/mcp_tools/registry.py
+from modal_backend.mcp_tools.weather_tool import get_weather
 
 # In _initialize_defaults():
 multi_tool_server = create_sdk_mcp_server(
@@ -252,7 +252,7 @@ self._allowed_tools = [
 ### 3. Test It
 
 ```bash
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "What's the weather like in Tokyo?"
 ```
 
@@ -274,7 +274,7 @@ dependencies = [
 
 ### 2. Update the Modal Image
 
-The image is rebuilt automatically when dependencies change. If you need system packages, edit `agent_sandbox/app.py`:
+The image is rebuilt automatically when dependencies change. If you need system packages, edit `modal_backend/main.py`:
 
 ```python
 def _base_anthropic_sdk_image() -> modal.Image:
@@ -295,7 +295,7 @@ Tools must be explicitly allowed to be used. This is a security feature.
 
 ### Adding to Allowed Tools
 
-Edit `agent_sandbox/tools/registry.py`:
+Edit `modal_backend/mcp_tools/registry.py`:
 
 ```python
 self._allowed_tools = [
@@ -328,7 +328,7 @@ self._allowed_tools = [
 You can group related tools in a single MCP server:
 
 ```python
-# agent_sandbox/tools/math_tools.py
+# modal_backend/mcp_tools/math_tools.py
 from claude_agent_sdk import tool
 from typing import Any
 
@@ -355,7 +355,7 @@ Register all of them:
 
 ```python
 # registry.py
-from agent_sandbox.tools.math_tools import add, multiply, power
+from modal_backend.mcp_tools.math_tools import add, multiply, power
 
 multi_tool_server = create_sdk_mcp_server(
     name="math",
@@ -460,7 +460,7 @@ async def fetch_url(args: dict[str, Any]) -> dict[str, Any]:
 ```python
 # tests/test_tools.py
 import pytest
-from agent_sandbox.tools.calculate_tool import calculate
+from modal_backend.mcp_tools.calculate_tool import calculate
 
 
 @pytest.mark.asyncio
@@ -479,7 +479,7 @@ async def test_calculate_complex():
 
 ```bash
 # Test via the agent
-modal run -m agent_sandbox.app::run_agent_remote \
+modal run -m modal_backend.main::run_agent_remote \
   --question "Calculate 15 * 7 + 3"
 ```
 

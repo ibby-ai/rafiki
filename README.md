@@ -36,14 +36,14 @@ uv run pre-commit install
 ### Development (one-off)
 
 ```bash
-modal run -m agent_sandbox.app
-modal run -m agent_sandbox.app::run_agent_remote --question "Explain REST vs gRPC"
+modal run -m modal_backend.main
+modal run -m modal_backend.main::run_agent_remote --question "Explain REST vs gRPC"
 ```
 
 ### Service mode (hot-reload)
 
 ```bash
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 # or
 make serve
 ```
@@ -51,13 +51,13 @@ make serve
 ### Production
 
 ```bash
-modal deploy -m agent_sandbox.deploy
+modal deploy -m modal_backend.deploy
 ```
 
 ## Cloudflare Control Plane (Recommended for Public APIs)
 
 ```bash
-cd cloudflare-control-plane
+cd edge-control-plane
 npm install
 wrangler login
 wrangler secret put INTERNAL_AUTH_SECRET
@@ -66,12 +66,12 @@ wrangler kv:namespace create SESSION_CACHE
 npm run deploy
 ```
 
-See `CLOUDFLARE_INTEGRATION.md` and `cloudflare-control-plane/README.md`.
+See `CLOUDFLARE_INTEGRATION.md` and `edge-control-plane/README.md`.
 
 ## Project Structure
 
 ```
-agent_sandbox/
+modal_backend/
   app.py                 # Modal app + HTTP gateway
   agents/                # Agent execution logic
   controllers/           # FastAPI background service
@@ -85,10 +85,10 @@ agent_sandbox/
 
 ```bash
 # Terminate background sandbox
-modal run -m agent_sandbox.app::terminate_service_sandbox
+modal run -m modal_backend.main::terminate_service_sandbox
 
 # Snapshot service filesystem
-modal run -m agent_sandbox.app::snapshot_service
+modal run -m modal_backend.main::snapshot_service
 
 # Run tests
 uv run pytest

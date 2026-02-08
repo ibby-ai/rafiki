@@ -26,7 +26,7 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflar
 
 ```bash
 # Run the agent locally (short-lived sandbox)
-modal run -m agent_sandbox.app
+modal run -m modal_backend.main
 ```
 
 You should see the agent respond in your terminal. If you get errors, check:
@@ -47,7 +47,7 @@ Read these sections from [Architecture Overview](./architecture.md):
 
 ```bash
 # Start dev server with hot-reload
-modal serve -m agent_sandbox.app
+modal serve -m modal_backend.main
 ```
 
 You'll get a URL like `https://<org>--test-sandbox-http-app-dev.modal.run`. Test it:

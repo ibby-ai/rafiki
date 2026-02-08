@@ -16,12 +16,12 @@ echo ""
 
 # Terminate service sandbox
 echo "2. Terminating service sandbox (flushes writes to volume):"
-uv run modal run -m agent_sandbox.app::terminate_service_sandbox
+uv run modal run -m modal_backend.main::terminate_service_sandbox
 echo ""
 
 # Create snapshot
 echo "3. Creating filesystem snapshot:"
-uv run modal run -m agent_sandbox.app::snapshot_service
+uv run modal run -m modal_backend.main::snapshot_service
 echo ""
 
 # Show volume state again

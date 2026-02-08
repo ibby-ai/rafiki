@@ -15,7 +15,7 @@ modal setup
 modal secret create anthropic-secret ANTHROPIC_API_KEY=your-api-key-here
 
 # 3. Run the agent
-modal run -m agent_sandbox.app
+modal run -m modal_backend.main
 ```
 
 That's it! The defaults work well for development. Read on for customization options.
@@ -73,7 +73,7 @@ modal secret list
 
 ## Configuration Options Reference
 
-All configuration options are defined in `agent_sandbox/config/settings.py`. This repo ships a `.env` with
+All configuration options are defined in `modal_backend/settings/settings.py`. This repo ships a `.env` with
 recommended defaults for autoscaling, concurrency, and volume commits; the defaults below reflect that file.
 Override or remove `.env` values to return to Modal defaults.
 
@@ -268,7 +268,7 @@ For one-off executions where cold start doesn't matter:
 
 ```bash
 # Use the short-lived pattern instead of the service pattern
-modal run -m agent_sandbox.app::run_agent_remote --question "Process this data"
+modal run -m modal_backend.main::run_agent_remote --question "Process this data"
 ```
 
 No configuration needed - the sandbox terminates after each run.
@@ -295,7 +295,7 @@ export PERSIST_VOL_NAME="agent-sandbox-prod-vol"
 
 ## Image Configuration
 
-The Modal container image is built in `agent_sandbox/app.py` via `_base_anthropic_sdk_image()`. The default image includes:
+The Modal container image is built in `modal_backend/main.py` via `_base_anthropic_sdk_image()`. The default image includes:
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
@@ -308,7 +308,7 @@ The Modal container image is built in `agent_sandbox/app.py` via `_base_anthropi
 
 ### Adding Dependencies
 
-To add Python packages, modify `_base_anthropic_sdk_image()` in `agent_sandbox/app.py`:
+To add Python packages, modify `_base_anthropic_sdk_image()` in `modal_backend/main.py`:
 
 ```python
 def _base_anthropic_sdk_image() -> modal.Image:
@@ -347,7 +347,7 @@ modal secret list
 
 ### Using Additional Secrets
 
-To add more secrets to the application, modify `get_modal_secrets()` in `agent_sandbox/config/settings.py`:
+To add more secrets to the application, modify `get_modal_secrets()` in `modal_backend/settings/settings.py`:
 
 ```python
 def get_modal_secrets() -> List[modal.Secret]:
@@ -408,7 +408,7 @@ Symptoms: First request after idle takes 10-30 seconds.
 
 **Verify current configuration**:
 ```python
-from agent_sandbox.config.settings import Settings
+from modal_backend.settings.settings import Settings
 settings = Settings()
 print(f"CPU: {settings.sandbox_cpu}")
 print(f"Memory: {settings.sandbox_memory}")
