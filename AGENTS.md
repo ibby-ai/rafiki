@@ -33,6 +33,9 @@ This is a **uv-based project**. Always activate the virtual environment before r
 - `modal serve -m agent_sandbox.app` — run a hot-reloading dev loop against Modal.
 - `modal deploy -m agent_sandbox.deploy` — promote the current definition to production.
 - `make serve` — convenience wrapper for `modal serve -m agent_sandbox.app`.
+- `make run` / `make deploy` — Makefile wrappers for running or deploying with Modal.
+- `make curl Q="..."` / `make stream Q="..."` — POST against the dev HTTP endpoints.
+- `make health` / `make info` — check service health or info endpoints. Set `DEV_URL` to the dev endpoint URL; use `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` when hitting proxied endpoints.
 
 ### Testing
 
