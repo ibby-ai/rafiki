@@ -68,6 +68,12 @@ npm run deploy
 
 See `CLOUDFLARE_INTEGRATION.md` and `edge-control-plane/README.md`.
 
+## Query Execution Flow
+
+The diagram below shows how a query moves from the public API entrypoint through the Modal gateway and backend runtime:
+
+![Query execution flow](docs/images/sandbox-starter-diagram.png)
+
 ## Project Structure
 
 ```
