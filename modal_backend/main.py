@@ -35,6 +35,7 @@ import time as _time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 import anyio
@@ -111,6 +112,11 @@ from modal_backend.models import (
     MessageHistoryEntry,
     MultiplayerStatusResponse,
     QueryBody,
+    ScheduleCreateRequest,
+    ScheduleDeleteResponse,
+    ScheduleListResponse,
+    ScheduleResponse,
+    ScheduleUpdateRequest,
     SessionCancellationStatusResponse,
     SessionHistoryResponse,
     SessionMetadataResponse,
@@ -135,6 +141,18 @@ from modal_backend.platform_services.webhooks import (
     build_headers,
     build_webhook_payload,
     serialize_payload,
+)
+from modal_backend.schedules import (
+    InvalidScheduleIdError,
+    ScheduleError,
+    ScheduleNotFoundError,
+    create_schedule,
+    delete_schedule,
+    dispatch_due_schedules,
+    get_schedule,
+    list_schedules,
+    normalize_schedule_id,
+    update_schedule,
 )
 from modal_backend.security.cloudflare_auth import (
     INTERNAL_AUTH_HEADER,
@@ -212,12 +230,8 @@ def _base_anthropic_sdk_image() -> modal.Image:
             }
         )
         .workdir("/root/app")
-        .add_local_dir(
-            ".",
-            remote_path="/root/app",
-            copy=True,
-            ignore=[".git", ".venv", "__pycache__", "*.pyc", ".DS_Store", "Makefile"],
-        )
+        .add_local_file("pyproject.toml", remote_path="/root/app/pyproject.toml", copy=True)
+        .add_local_dir("modal_backend", remote_path="/root/app/modal_backend", copy=True)
         .run_commands("cd /root/app && uv pip install -e . --system --no-cache")
     )
 
@@ -391,6 +405,10 @@ def _job_queue_schedule() -> modal.Cron | None:
     return modal.Cron(cron)
 
 
+def _schedule_dispatcher_schedule() -> modal.Cron:
+    return modal.Cron(_settings.schedule_cron)
+
+
 def _get_persist_volume() -> modal.Volume:
     """Return the configured persistent volume handle."""
     kwargs: dict[str, object] = {"create_if_missing": True}
@@ -532,6 +550,20 @@ def _normalize_job_id_or_400(job_id: str) -> str:
     if not normalized:
         raise HTTPException(status_code=400, detail="Invalid job_id")
     return normalized
+
+
+def _normalize_schedule_id_or_400(schedule_id: str) -> str:
+    normalized = normalize_schedule_id(schedule_id)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invalid schedule_id")
+    return normalized
+
+
+def _request_actor_context(request: Request) -> tuple[str | None, str | None]:
+    """Extract user/tenant scope from Cloudflare headers."""
+    user_id = request.headers.get("X-User-Id") or None
+    tenant_id = request.headers.get("X-Tenant-Id") or None
+    return user_id, tenant_id
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -1286,6 +1318,82 @@ async def cancel_job_request(job_id: str) -> JobStatusResponse:
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+@web_app.post("/schedules", response_model=ScheduleResponse)
+async def create_schedule_request(
+    body: ScheduleCreateRequest, request: Request
+) -> ScheduleResponse:
+    """Create a new one-off or recurring schedule."""
+    user_id, tenant_id = _request_actor_context(request)
+    try:
+        schedule = create_schedule(body, user_id=user_id, tenant_id=tenant_id)
+    except ScheduleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ScheduleResponse(**schedule)
+
+
+@web_app.get("/schedules", response_model=ScheduleListResponse)
+async def list_schedules_request(
+    request: Request,
+    enabled: bool | None = None,
+    schedule_type: Literal["one_off", "cron"] | None = None,
+) -> ScheduleListResponse:
+    """List schedules for the authenticated actor scope."""
+    user_id, tenant_id = _request_actor_context(request)
+    schedules = list_schedules(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        enabled=enabled,
+        schedule_type=schedule_type,
+    )
+    return ScheduleListResponse(schedules=[ScheduleResponse(**item) for item in schedules])
+
+
+@web_app.post("/schedules/dispatch")
+async def dispatch_schedules_request() -> dict[str, int]:
+    """Dispatch due schedules on demand (safe for dev E2E while using modal serve)."""
+    result = dispatch_due_schedules()
+    _logger.info("schedule.dispatch.manual", extra=result)
+    return result
+
+
+@web_app.get("/schedules/{schedule_id}", response_model=ScheduleResponse)
+async def get_schedule_request(schedule_id: str, request: Request) -> ScheduleResponse:
+    """Fetch a single schedule."""
+    schedule_id = _normalize_schedule_id_or_400(schedule_id)
+    user_id, tenant_id = _request_actor_context(request)
+    schedule = get_schedule(schedule_id, user_id=user_id, tenant_id=tenant_id)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return ScheduleResponse(**schedule)
+
+
+@web_app.patch("/schedules/{schedule_id}", response_model=ScheduleResponse)
+async def update_schedule_request(
+    schedule_id: str, body: ScheduleUpdateRequest, request: Request
+) -> ScheduleResponse:
+    """Update an existing schedule."""
+    schedule_id = _normalize_schedule_id_or_400(schedule_id)
+    user_id, tenant_id = _request_actor_context(request)
+    try:
+        schedule = update_schedule(schedule_id, body, user_id=user_id, tenant_id=tenant_id)
+    except ScheduleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Schedule not found") from exc
+    except (InvalidScheduleIdError, ScheduleError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ScheduleResponse(**schedule)
+
+
+@web_app.delete("/schedules/{schedule_id}", response_model=ScheduleDeleteResponse)
+async def delete_schedule_request(schedule_id: str, request: Request) -> ScheduleDeleteResponse:
+    """Delete an existing schedule."""
+    schedule_id = _normalize_schedule_id_or_400(schedule_id)
+    user_id, tenant_id = _request_actor_context(request)
+    deleted = delete_schedule(schedule_id, user_id=user_id, tenant_id=tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return ScheduleDeleteResponse(schedule_id=schedule_id, deleted=True)
 
 
 # =============================================================================
@@ -3219,6 +3327,19 @@ class AgentRunner:
                     print(msg)
 
         anyio.run(_run)
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=agent_sdk_secrets,
+    schedule=_schedule_dispatcher_schedule(),
+    timeout=120,
+)
+def schedule_dispatcher() -> dict[str, int]:
+    """Dispatch due schedules into the job queue."""
+    result = dispatch_due_schedules()
+    _logger.info("schedule.dispatch", extra=result)
+    return result
 
 
 @app.function(
