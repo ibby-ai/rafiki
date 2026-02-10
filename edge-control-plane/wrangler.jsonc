@@ -23,7 +23,7 @@
     ]
   },
   "vars": {
-    "MODAL_API_BASE_URL": "https://your-org--app-name.modal.run",
+    "MODAL_API_BASE_URL": "https://saidiibrahim--modal-backend-http-app-dev.modal.run",
     "ENVIRONMENT": "development",
     "SESSION_KEY_TTL_SECONDS": "2592000",
     "MAX_QUEUED_PROMPTS_PER_SESSION": "10",
@@ -45,7 +45,7 @@
   "kv_namespaces": [
     {
       "binding": "SESSION_CACHE",
-      "id": "replace-with-session-cache-id"
+      "id": "a202e8cacbd04ddc94bfb7df5f1f73bc"
     }
   ],
   // Secrets to be added via wrangler secret put:
