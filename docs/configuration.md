@@ -188,10 +188,14 @@ Request arrives → Cold start again
 |---------|---------|-------------|
 | `job_queue_name` | `"agent-job-queue"` | Modal Queue name for async jobs |
 | `job_results_dict` | `"agent-job-results"` | Modal Dict name for job results |
+| `schedule_store_name` | `"agent-schedules"` | Modal Dict name for schedule definitions |
 | `job_queue_cron` | `null` | Optional cron schedule for `process_job_queue` |
+| `schedule_cron` | `"*/1 * * * *"` | Cron schedule for `schedule_dispatcher` |
 | `session_store_name` | `"agent-session-store"` | Modal Dict name for session resumption mapping |
 
-**When to enable**: Set `job_queue_cron` when you want the queue worker to run automatically on a schedule (for example, `*/1 * * * *` for every minute). Leave unset to run the worker manually.
+**When to enable**: Set `job_queue_cron` when you want the queue worker to run automatically on a schedule (for example, `*/1 * * * *` for every minute). `schedule_cron` controls how often schedule definitions are scanned and dispatched (default: every minute).
+
+**Dev E2E note**: If `modal serve -m modal_backend.main` is running, prefer `POST /schedules/dispatch` for manual dispatch validation. Running `modal run -m modal_backend.main::schedule_dispatcher` in parallel can steal the served app label.
 
 ### Persistence (Optional)
 

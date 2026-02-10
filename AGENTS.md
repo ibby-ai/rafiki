@@ -31,6 +31,8 @@ This is a **uv-based project**. Always activate the virtual environment before r
 - `modal run -m modal_backend.main` — build the sandbox image if needed and execute the agent end to end.
 - `modal run -m modal_backend.main::run_agent_remote --question "..."` — call the agent function for ad‑hoc questions.
 - `modal serve -m modal_backend.main` — run a hot-reloading dev loop against Modal.
+- During `modal serve` E2E sessions, avoid concurrent `modal run -m modal_backend.main*` against the same dev label: a concurrent run can steal `*-http-app-dev.modal.run`. Use a separate deployed app/label for parallel work when needed.
+- For parallel local edge work (`wrangler dev`), keep `modal serve` running. The image context is intentionally scoped in `modal_backend/main.py` (mounts `pyproject.toml` + `modal_backend/`) to avoid reload churn from unrelated repo paths.
 - `modal deploy -m modal_backend.deploy` — promote the current definition to production.
 - `make serve` — convenience wrapper for `modal serve -m modal_backend.main`.
 - `make run` / `make deploy` — Makefile wrappers for running or deploying with Modal.
@@ -80,10 +82,24 @@ If a commit fails due to hook violations, the hooks will auto-fix what they can.
 - `modal app list` / `modal app logs <app-name>` — locate deployed apps and view logs.
 - `modal container list` — inspect running Modal containers.
 - `modal volume ls <volume>` / `modal volume get <volume> <remote> <local>` / `modal volume rm <volume> <remote>` — inspect and manage persisted files.
+- Cloudflare Worker control plane checks:
+  - Auth must be active first: `cd edge-control-plane && wrangler whoami` (if not logged in, run `wrangler login`).
+  - If worker does not exist yet, first-time setup is: create KV namespace, set `kv_namespaces[].id` in `edge-control-plane/wrangler.jsonc`, set required secrets (`INTERNAL_AUTH_SECRET`, `SESSION_SIGNING_SECRET`), then deploy.
+  - Deploy command: `cd edge-control-plane && wrangler deploy`.
+  - Validate deployed health: `curl -i https://<worker>.workers.dev/health` expecting `200` and `{"ok":true,"service":"edge-control-plane"}`.
 
 ## Testing Guidelines
 
 The test suite uses `pytest` with filenames `test_*.py` mirroring the package layout. Before submitting changes, run `modal run -m modal_backend.main` and `modal run -m modal_backend.main::run_agent_remote --question "health check"` to confirm the agent boots, tools register, and streaming output works. Mark long-running Modal calls with `@pytest.mark.slow`. Capture regression coverage for new behaviors whenever practical.
+
+For schedule edge E2E via deployed Worker:
+- Use Bearer session tokens signed with `SESSION_SIGNING_SECRET`.
+- Verify route chain through Worker (not just direct Modal):
+  - `POST /schedules?session_id=...` -> `200`
+  - `GET /schedules?session_id=...` -> `200`
+  - `GET /schedules/{id}?session_id=...` -> `200`
+  - `POST /schedules/dispatch?session_id=...` -> `200`
+- Verify auth scoping passthrough by listing with a different tenant token and confirming foreign schedules are not returned.
 
 ## Commit & Pull Request Guidelines
 

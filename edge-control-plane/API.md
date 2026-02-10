@@ -311,6 +311,201 @@ Cancel a queued or running job.
 
 ---
 
+### Schedules API
+
+Schedule CRUD + manual dispatch are available through the public Cloudflare Worker API.
+Authentication uses the same `Authorization: Bearer <session_token>` flow as other endpoints.
+The Worker derives `user_id` and `tenant_id` from the token and forwards them to Modal for scope isolation.
+
+#### Create Schedule
+
+**POST** `/schedules`
+
+Create a one-off or cron schedule.
+
+**Request Body (one-off):**
+
+```json
+{
+  "name": "daily summary once",
+  "question": "send me yesterday's summary",
+  "schedule_type": "one_off",
+  "run_at": 1770729600,
+  "timezone": "UTC",
+  "enabled": true
+}
+```
+
+**Request Body (cron):**
+
+```json
+{
+  "name": "hourly heartbeat",
+  "question": "status check",
+  "schedule_type": "cron",
+  "cron": "0 * * * *",
+  "timezone": "America/New_York",
+  "enabled": true
+}
+```
+
+**Response:**
+
+```json
+{
+  "schedule_id": "567d797d-4e9c-4b5d-a04f-10962ac16cf7",
+  "name": "hourly heartbeat",
+  "question": "status check",
+  "agent_type": null,
+  "schedule_type": "cron",
+  "run_at": null,
+  "cron": "0 * * * *",
+  "timezone": "America/New_York",
+  "enabled": true,
+  "webhook": null,
+  "metadata": null,
+  "user_id": "user-123",
+  "tenant_id": "tenant-456",
+  "created_at": 1770726169,
+  "updated_at": 1770726169,
+  "last_run_at": null,
+  "next_run_at": 1770729600,
+  "last_job_id": null,
+  "last_error": null
+}
+```
+
+Validation errors return `400` with details, for example:
+
+```json
+{ "detail": "run_at is required for one_off schedules" }
+```
+
+```json
+{ "detail": "cron is required for cron schedules" }
+```
+
+#### List Schedules
+
+**GET** `/schedules`
+
+Optional query parameters:
+- `enabled=true|false`
+- `schedule_type=one_off|cron`
+
+Example:
+
+```http
+GET /schedules?enabled=true&schedule_type=cron
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "schedules": [
+    {
+      "schedule_id": "567d797d-4e9c-4b5d-a04f-10962ac16cf7",
+      "name": "hourly heartbeat",
+      "question": "status check",
+      "schedule_type": "cron",
+      "cron": "0 * * * *",
+      "timezone": "America/New_York",
+      "enabled": true,
+      "user_id": "user-123",
+      "tenant_id": "tenant-456",
+      "next_run_at": 1770729600
+    }
+  ]
+}
+```
+
+#### Get Schedule
+
+**GET** `/schedules/{schedule_id}`
+
+**Response:**
+
+```json
+{
+  "schedule_id": "567d797d-4e9c-4b5d-a04f-10962ac16cf7",
+  "name": "hourly heartbeat",
+  "question": "status check",
+  "schedule_type": "cron",
+  "cron": "0 * * * *",
+  "timezone": "America/New_York",
+  "enabled": true,
+  "next_run_at": 1770729600
+}
+```
+
+Errors:
+- `400` for malformed IDs (`{"detail":"Invalid schedule_id"}`)
+- `404` for unknown/inaccessible schedules (`{"detail":"Schedule not found"}`)
+
+#### Update Schedule
+
+**PATCH** `/schedules/{schedule_id}`
+
+Partial update example:
+
+```json
+{
+  "enabled": false
+}
+```
+
+**Response:**
+
+```json
+{
+  "schedule_id": "567d797d-4e9c-4b5d-a04f-10962ac16cf7",
+  "enabled": false,
+  "next_run_at": null,
+  "updated_at": 1770727000
+}
+```
+
+Re-enabling a schedule recomputes `next_run_at`.
+
+#### Delete Schedule
+
+**DELETE** `/schedules/{schedule_id}`
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "schedule_id": "567d797d-4e9c-4b5d-a04f-10962ac16cf7",
+  "deleted": true
+}
+```
+
+#### Manual Dispatch
+
+**POST** `/schedules/dispatch`
+
+Immediately scans and dispatches due schedules.
+
+**Response:**
+
+```json
+{
+  "scanned": 14,
+  "dispatched": 1,
+  "failed": 0
+}
+```
+
+For dispatched schedules, resulting jobs include metadata keys:
+- `schedule_id`
+- `schedule_name`
+- `triggered_at`
+
+---
+
 ### Session State
 
 **GET** `/session/{session_id}/state`

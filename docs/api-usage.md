@@ -9,6 +9,7 @@ This guide explains how end users interact with your deployed agent sandbox appl
   - [Health & Info](#1-get-health---health-check)
   - [Agent SDK](#2-post-query---execute-agent-query-non-streaming)
   - [Jobs](#4-post-submit---enqueue-agent-job)
+  - [Schedules](#10-schedules-crud)
 - [Real-World Usage Examples](#real-world-usage-examples)
 - [Authentication](#authentication)
 - [Error Handling](#error-handling)
@@ -610,6 +611,60 @@ curl -X POST https://your-worker.workers.dev/session/sess_abc123/queue \
 - `401 Unauthorized`: Missing or invalid authentication token
 - `404 Not Found`: Session not found
 - `429 Too Many Requests`: Queue limit reached
+
+### 10. Schedules CRUD
+
+**Purpose:** Manage one-off and recurring cron schedules that dispatch into the job queue.
+
+**Endpoints:**
+- `POST /schedules` - Create a schedule
+- `POST /schedules/dispatch` - Trigger dispatch of due schedules (manual/dev validation)
+- `GET /schedules` - List schedules
+- `GET /schedules/{schedule_id}` - Get schedule details
+- `PATCH /schedules/{schedule_id}` - Update schedule fields
+- `DELETE /schedules/{schedule_id}` - Delete schedule
+
+**Create one-off example:**
+```bash
+curl -X POST https://your-worker.workers.dev/schedules?session_id=sess_abc123 \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "run-tonight",
+    "question": "Generate nightly report",
+    "schedule_type": "one_off",
+    "run_at": 1760000000
+  }'
+```
+
+**Create recurring cron example:**
+```bash
+curl -X POST https://your-worker.workers.dev/schedules?session_id=sess_abc123 \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "daily-report",
+    "question": "Generate daily report",
+    "schedule_type": "cron",
+    "cron": "0 6 * * *",
+    "timezone": "Australia/Adelaide"
+  }'
+```
+
+**Notes:**
+- Cron schedules support timezone-aware execution via IANA names (for example `America/New_York`).
+- One-off schedules disable automatically after dispatch.
+- Validation contract for create:
+  - `schedule_type=one_off` without `run_at` returns `400 Bad Request`.
+  - `schedule_type=cron` without `cron` returns `400 Bad Request`.
+
+**Manual dispatch for dev/E2E (safe with `modal serve`):**
+```bash
+curl -X POST https://your-worker.workers.dev/schedules/dispatch?session_id=sess_abc123 \
+  -H "Authorization: Bearer <token>"
+```
+
+Avoid running `modal run -m modal_backend.main::schedule_dispatcher` while `modal serve -m modal_backend.main` is active, because `modal run` can acquire a newer app label and disrupt the served dev URL.
 
 ---
 

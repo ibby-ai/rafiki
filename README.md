@@ -9,19 +9,7 @@
 
 ![Agent Sandbox Starter](docs/images/readme-image.png)
 
-Modal-based sandboxed runtime for the **Claude Agent SDK** with MCP tool integration.
-Supports two execution patterns:
-
-- Short-lived sandboxes (one-off jobs)
-- Long-lived background service (low-latency API)
-
-**Cloudflare-first:** Public API traffic route through the Cloudflare control plane.
-Direct Modal gateway access is internal-only and requires `X-Internal-Auth`.
-
-## Requirements
-
-- Modal CLI: `pip install modal` and `modal setup`
-- Anthropic API key in Modal Secret `anthropic-secret` with key `ANTHROPIC_API_KEY`
+A multiplayer open-source background agent inspired by [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent), powered by Modal, Cloudflare and Claude Agent SDK
 
 ## Setup
 
