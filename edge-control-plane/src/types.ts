@@ -124,6 +124,60 @@ export interface JobStatusResponse {
   artifacts?: ArtifactManifest | null;
 }
 
+export type ScheduleType = "one_off" | "cron";
+
+export interface ScheduleCreateRequest {
+  name: string;
+  question: string;
+  agent_type?: string | null;
+  schedule_type: ScheduleType;
+  run_at?: number | null;
+  cron?: string | null;
+  timezone?: string | null;
+  enabled?: boolean;
+  webhook?: WebhookConfig | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface ScheduleUpdateRequest {
+  name?: string | null;
+  question?: string | null;
+  agent_type?: string | null;
+  run_at?: number | null;
+  cron?: string | null;
+  timezone?: string | null;
+  enabled?: boolean | null;
+  webhook?: WebhookConfig | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface ScheduleResponse {
+  schedule_id: string;
+  name: string;
+  question: string;
+  agent_type?: string | null;
+  schedule_type: ScheduleType;
+  run_at?: number | null;
+  cron?: string | null;
+  timezone: string;
+  enabled: boolean;
+  webhook?: WebhookConfig | null;
+  metadata?: Record<string, unknown> | null;
+  user_id?: string | null;
+  tenant_id?: string | null;
+  created_at: number;
+  updated_at: number;
+  last_run_at?: number | null;
+  next_run_at?: number | null;
+  last_job_id?: string | null;
+  last_error?: string | null;
+}
+
+export interface ScheduleListResponse {
+  ok: boolean;
+  schedules: ScheduleResponse[];
+}
+
 export interface ArtifactManifest {
   job_id: string;
   workspace_path: string;

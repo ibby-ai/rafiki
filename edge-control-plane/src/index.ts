@@ -23,7 +23,11 @@ import type {
     JobSubmitRequest,
     JobSubmitResponse,
     JobStatusResponse,
-    QueryRequest
+    QueryRequest,
+    ScheduleCreateRequest,
+    ScheduleListResponse,
+    ScheduleResponse,
+    ScheduleUpdateRequest
 } from "./types";
 
 // Export Durable Objects
@@ -67,6 +71,8 @@ export default {
         response = await handleJobSubmit(request, env, ctx);
       } else if (path.startsWith("/jobs/")) {
         response = await handleJobsEndpoint(request, env, ctx, path);
+      } else if (path === "/schedules" || path.startsWith("/schedules/")) {
+        response = await handleSchedulesEndpoint(request, env, path);
       } else if (path.startsWith("/session/")) {
         response = await handleSessionEndpoint(request, env, path);
       } else if (path === "/ws" || path === "/events") {
@@ -427,6 +433,68 @@ async function handleSessionEndpoint(request: Request, env: Env, path: string): 
     })
   );
   
+  return response;
+}
+
+/**
+ * Handle schedule CRUD endpoints by forwarding to Modal backend.
+ */
+async function handleSchedulesEndpoint(
+  request: Request,
+  env: Env,
+  path: string
+): Promise<Response> {
+  let body: ScheduleCreateRequest | ScheduleUpdateRequest | undefined;
+  if (request.method === "PATCH" || (request.method === "POST" && path === "/schedules")) {
+    body = await request.json() as ScheduleCreateRequest | ScheduleUpdateRequest;
+  }
+
+  const url = new URL(request.url);
+  const auth = await authenticateClientRequest({
+    request,
+    env,
+    sessionId: url.searchParams.get("session_id"),
+    sessionKey: url.searchParams.get("session_key"),
+    userId: url.searchParams.get("user_id"),
+    tenantId: url.searchParams.get("tenant_id")
+  });
+
+  const modalUrl = new URL(`${env.MODAL_API_BASE_URL}${path}`);
+  for (const [key, value] of url.searchParams.entries()) {
+    if (key === "token") continue;
+    modalUrl.searchParams.set(key, value);
+  }
+
+  const authToken = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
+  const response = await fetch(modalUrl.toString(), {
+    method: request.method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Internal-Auth": authToken,
+      "X-Session-Id": auth.session_id,
+      "X-Session-Key": auth.session_key || "",
+      "X-User-Id": auth.user_id || "",
+      "X-Tenant-Id": auth.tenant_id || ""
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  // Narrow response shapes for TS and keep passthrough payload unchanged.
+  if (response.ok && request.method === "GET" && path === "/schedules") {
+    const payload = await response.clone().json() as ScheduleListResponse;
+    return new Response(JSON.stringify(payload), {
+      status: response.status,
+      headers: response.headers
+    });
+  }
+  if (response.ok && request.method === "GET" && path.startsWith("/schedules/")) {
+    const payload = await response.clone().json() as ScheduleResponse;
+    return new Response(JSON.stringify(payload), {
+      status: response.status,
+      headers: response.headers
+    });
+  }
+
   return response;
 }
 
