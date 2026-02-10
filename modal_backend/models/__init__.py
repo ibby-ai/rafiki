@@ -41,6 +41,13 @@ from modal_backend.models.sandbox import (
     WarmResponse,
     WarmStatusResponse,
 )
+from modal_backend.models.schedules import (
+    ScheduleCreateRequest,
+    ScheduleDeleteResponse,
+    ScheduleListResponse,
+    ScheduleResponse,
+    ScheduleUpdateRequest,
+)
 from modal_backend.models.session_spawn import (
     ChildSessionEntry,
     ChildSessionListResponse,
@@ -55,6 +62,11 @@ __all__ = [
     "QueryResponse",
     "ErrorResponse",
     "SummarySchema",
+    "ScheduleCreateRequest",
+    "ScheduleUpdateRequest",
+    "ScheduleResponse",
+    "ScheduleListResponse",
+    "ScheduleDeleteResponse",
     "JobSubmitRequest",
     "JobSubmitResponse",
     "JobStatusResponse",

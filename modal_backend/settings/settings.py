@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     )
     job_queue_name: str = "agent-job-queue"
     job_results_dict: str = "agent-job-results"
+    schedule_store_name: str = Field(
+        default="agent-schedules",
+        description="Modal Dict name for storing schedule definitions",
+    )
     session_store_name: str = Field(
         default="agent-session-store",
         description=(
@@ -445,6 +449,10 @@ class Settings(BaseSettings):
 
     job_queue_cron: str | None = Field(
         default=None, description="Cron expression for queue processing (e.g., '*/5 * * * *')"
+    )
+    schedule_cron: str = Field(
+        default="*/1 * * * *",
+        description="Cron expression for schedule dispatcher cadence",
     )
     max_jobs_per_run: int | None = Field(
         default=None, description="Max jobs per scheduled queue processing run"
