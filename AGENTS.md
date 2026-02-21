@@ -4,16 +4,18 @@ Repository knowledge is the system of record. Agents should route work through t
 
 ## Read Order
 1. `AGENTS.md`
-2. `ARCHITECTURE.md`
-3. `docs/product-specs` (index)
-4. `docs/design-docs/index.md`
-5. `docs/references/index.md`
-6. `docs/exec-plans/index.md`
-7. `docs/QUALITY_SCORE.md`, `docs/RELIABILITY.md`, `docs/SECURITY.md`
+2. `docs/AGENT_COLLABORATION_PROCESS.md`
+3. `ARCHITECTURE.md`
+4. `docs/product-specs` (index)
+5. `docs/design-docs/index.md`
+6. `docs/references/index.md`
+7. `docs/exec-plans/index.md`
+8. `docs/QUALITY_SCORE.md`, `docs/RELIABILITY.md`, `docs/SECURITY.md`
 
 ## Canonical Path Map
 - Product intent and requirements: `docs/product-specs`
 - Architecture and system design: `docs/design-docs/`
+- Mandatory sub-agent planning/review/finalization workflow: `docs/AGENT_COLLABORATION_PROCESS.md`
 - Operational references and runbooks: `docs/references/`
 - Execution planning and tracking:
   - `docs/exec-plans/PLAN_TEMPLATE.md`
@@ -37,6 +39,9 @@ Repository knowledge is the system of record. Agents should route work through t
 - Reliability/security hardening:
   - Record scoring and action items in `docs/QUALITY_SCORE.md`
   - Update `docs/RELIABILITY.md` and/or `docs/SECURITY.md`
+
+## Required Engineering Guardrails
+- The sub-agent collaboration process in `docs/AGENT_COLLABORATION_PROCESS.md` is mandatory.
 
 ## Deprecated Paths
 - `specs` is deprecated. Use `docs/product-specs`.
