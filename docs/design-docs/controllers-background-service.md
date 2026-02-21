@@ -67,6 +67,19 @@ Returns active/stop-requested status for an active in-memory run.
 
 Configured by `openai_session_db_path` in `modal_backend/settings/settings.py`.
 
+### Memory Trimming and Compaction
+
+Session memory growth is bounded by settings in `modal_backend/settings/settings.py`:
+
+- `openai_session_max_items`
+- `openai_session_compaction_keep_items`
+
+Compaction is deterministic and runs when a session is acquired:
+
+- if history size exceeds `openai_session_max_items`, retain newest `openai_session_compaction_keep_items` (or max-items when keep-items is unset)
+- applied for resumed sessions and fork targets
+- fork source history is not mutated during copy
+
 ## Streaming Adapter
 
 The controller maps OpenAI stream items into existing wire shapes:
@@ -78,6 +91,22 @@ The controller maps OpenAI stream items into existing wire shapes:
 
 Serialization lives in `modal_backend/api/serialization.py`.
 
+### Correlation Metadata
+
+The controller resolves a stable `trace_id` per request and propagates it through:
+
+- controller logs
+- streamed assistant/result payloads
+- SSE terminal events (`error`, `done`)
+
+When available from OpenAI run metadata, `openai_trace_id` is propagated through:
+
+- result payload metadata
+- `/query` summary
+- SSE `done` summary
+
+This allows deterministic correlation between logs, traces, and client-visible events for a single run.
+
 ## Cancellation Semantics
 
 The controller keeps `ACTIVE_CLIENTS` as:
@@ -85,6 +114,7 @@ The controller keeps `ACTIVE_CLIENTS` as:
 - `session_id -> (RunResultStreaming, stop_event)`
 
 A watcher task polls cancellation signals and applies `cancel(mode="after_turn")` for graceful stop requests.
+Cancellation terminal payloads retain `trace_id` correlation, and successful terminal summaries can include `openai_trace_id` when present.
 
 ## Security
 

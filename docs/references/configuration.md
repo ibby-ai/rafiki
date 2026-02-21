@@ -45,7 +45,47 @@ Defined in `modal_backend/settings/settings.py`:
 - `openai_model_default` (default: `gpt-4.1`)
 - `openai_model_subagent` (default: `gpt-4.1-mini`)
 - `openai_session_db_path` (default: `/data/openai_agents_sessions.sqlite3`)
+- `openai_session_max_items` (default: `400`, set `None` to disable item-based compaction)
+- `openai_session_compaction_keep_items` (default: `300`, set `None` to keep exactly `openai_session_max_items`)
 - `agent_max_turns`
+
+### Session Memory Compaction Controls
+
+The OpenAI session store uses deterministic item-count compaction at session load time:
+
+- Trigger: current item count is greater than `openai_session_max_items`.
+- Action: retain newest `openai_session_compaction_keep_items` items (or `openai_session_max_items` when keep-items is `None`).
+- Scope: applied for resume and fork targets; fork does not mutate source history.
+
+Validation constraints:
+
+- `openai_session_max_items` must be greater than `0` when set.
+- `openai_session_compaction_keep_items` must be greater than `0` when set.
+- `openai_session_compaction_keep_items` cannot exceed `openai_session_max_items`.
+
+## Request Guardrails
+
+`QueryBody` validation in `modal_backend/models/sandbox.py` now enforces:
+
+- non-empty `question`
+- max `question` length of 20,000 characters
+- optional `trace_id` format: `[A-Za-z0-9._:-]{1,128}`
+
+If `trace_id` is omitted, the controller generates one from request context.
+
+## Trace Correlation
+
+`modal_backend/api/controller.py` now propagates a stable `trace_id` through:
+
+- runtime logs (`agent.query.start`, `agent.query_stream.start`)
+- serialized assistant/result messages
+- SSE `error` and `done` events
+
+When available from OpenAI run metadata, `openai_trace_id` is also surfaced in:
+
+- result payload metadata
+- `/query` summary payload
+- SSE `done` payload
 
 ## Runtime and Resource Settings
 
@@ -79,7 +119,8 @@ Optional tracing is controlled by:
 - `enable_langsmith_tracing`
 - `langsmith_secret_name`
 
-When enabled, tracing is configured via `modal_backend/tracing.py` using LangSmith's OpenAI Agents tracing processor.
+When enabled, tracing is configured via `modal_backend/tracing.py` using LangSmith's `OpenAIAgentsTracingProcessor`.
+Runs are wrapped with `langsmith_run_context(...)` so per-run metadata (for example `trace_id`, `session_id`, `request_id`) is attached to emitted traces.
 
 ## Troubleshooting
 
@@ -102,3 +143,22 @@ Likely a cold start. Increase `sandbox_idle_timeout` or keep warm pool enabled.
 ### Session memory not persisted
 
 Verify `openai_session_db_path` points to mounted persistent storage (default `/data/...`).
+
+### Memory growth and compaction
+
+- Confirm compaction settings are valid and enabled (`openai_session_max_items` not `None`).
+- Check logs for `openai.session.compacted` events to verify trimming activity during resume/fork session acquisition.
+- Inspect `items_before`, `items_after`, `max_items`, and `keep_items` fields on that log event when tuning thresholds.
+- If compaction is too aggressive, increase `openai_session_compaction_keep_items` while keeping it at or below `openai_session_max_items`.
+- If run context is insufficient after compaction, fork a session before risky long runs to preserve a separate lineage.
+
+### Missing LangSmith/OpenAI trace correlation
+
+- Verify `enable_langsmith_tracing=true` and `LANGSMITH_API_KEY` is present in runtime env.
+- Confirm request/summary contains `trace_id`; this is required baseline correlation even when `openai_trace_id` is absent.
+- Treat missing `openai_trace_id` as expected when provider metadata does not expose it for a run.
+
+### Tool policy denials
+
+- `Bash` and `WebFetch` policy denials return explicit error text and keep the run alive.
+- Confirm the tool name is in the agent allowlist and input adheres to policy limits in `modal_backend/mcp_tools/registry.py`.

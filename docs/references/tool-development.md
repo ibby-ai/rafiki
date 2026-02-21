@@ -48,6 +48,19 @@ result = await my_tool.on_invoke_tool(None, json.dumps({"param1": "hello", "coun
 assert result == "Processed hello x2"
 ```
 
+### Eval-Style Runtime Coverage
+
+Tool and multi-agent changes should include regression-style expectations in runtime tests:
+
+- handoff correctness (agent model updates and handoff tool routing)
+- tool-call sequence fidelity (`tool_use` then `tool_result`, with stable `tool_use_id`)
+- cancellation-adjacent behavior with trace metadata present (`trace_id`, optional `openai_trace_id`)
+
+Primary test files:
+
+- `tests/test_agents_loop.py`
+- `tests/test_controller_runtime_openai.py`
+
 ## Best Practices
 
 - Keep tools single-purpose.
@@ -55,6 +68,23 @@ assert result == "Processed hello x2"
 - Validate inputs and return helpful error strings.
 - Avoid side effects outside `/data` unless required.
 - Keep canonical tool names stable once published.
+
+## Runtime Policy Guardrails
+
+Current built-in policy checks in `modal_backend/mcp_tools/registry.py`:
+
+- `Bash` rejects blocked destructive patterns and overlong commands.
+- `WebFetch` only allows `http/https` and blocks private/loopback hosts.
+- Timeout and output-size parameters are clamped to safe ranges.
+
+When adding new tools, follow the same pattern: validate inputs before side effects, and fail closed with explicit error messages.
+
+For denied calls, return deterministic, user-visible error text that can be asserted in controller runtime tests.
+
+## Trace Correlation Expectations
+
+Controller summaries and SSE terminal payloads always include `trace_id` and may include `openai_trace_id` when available from provider metadata.
+Tool authors should preserve call IDs and explicit error text so correlation across logs, SSE payloads, and LangSmith traces remains actionable.
 
 ## Runtime Image Dependencies
 
