@@ -17,9 +17,9 @@ Before running these examples:
    modal setup
    ```
 
-3. Create the Anthropic secret:
+3. Create the OpenAI secret:
    ```bash
-   modal secret create anthropic-secret ANTHROPIC_API_KEY=<your-key>
+   modal secret create openai-secret OPENAI_API_KEY=<your-key>
    ```
 
 ## Quick Start

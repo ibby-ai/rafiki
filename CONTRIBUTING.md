@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 1. **Python 3.11+** with [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
 2. **Modal account** configured (`modal setup`)
-3. **Anthropic API key** stored in Modal secrets
+3. **OpenAI API key** stored in Modal secrets
 
 ### Development Setup
 
@@ -25,7 +25,7 @@ source .venv/bin/activate
 uv sync
 
 # Set up Modal secret (one-time)
-modal secret create anthropic-secret ANTHROPIC_API_KEY=your-key-here
+modal secret create openai-secret OPENAI_API_KEY=your-key-here
 ```
 
 ### Running the Project
@@ -104,7 +104,7 @@ See `modal_backend/mcp_tools/` for examples. New tools should:
 Documentation lives in:
 - `docs/` - Detailed guides
 - `README.md` - Quick start
-- `CLAUDE.md` - AI agent instructions
+- `AGENTS.md` - AI agent instructions
 
 ### Observability & Tracing
 

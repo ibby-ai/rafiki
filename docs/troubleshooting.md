@@ -30,20 +30,20 @@ curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
 ### "Secret not found" Error
 
 ```
-modal.exception.NotFoundError: Secret 'anthropic-secret' not found
+modal.exception.NotFoundError: Secret 'openai-secret' not found
 ```
 
 **Cause**: The required Modal secret hasn't been created.
 
 **Solution**:
 ```bash
-modal secret create anthropic-secret ANTHROPIC_API_KEY=your-key-here
+modal secret create openai-secret OPENAI_API_KEY=your-key-here
 ```
 
 **Verify**:
 ```bash
 modal secret list
-# Should show: anthropic-secret
+# Should show: openai-secret
 ```
 
 ---
@@ -51,19 +51,19 @@ modal secret list
 ### "Invalid API key" or Authentication Errors
 
 ```
-anthropic.AuthenticationError: Invalid API key
+openai.AuthenticationError: Invalid API key
 ```
 
 **Cause**: The API key is incorrect or expired.
 
 **Solutions**:
 
-1. Verify your API key is valid at [console.anthropic.com](https://console.anthropic.com)
+1. Verify your API key is valid at [platform.openai.com](https://platform.openai.com)
 
 2. Recreate the secret with the correct key:
    ```bash
-   modal secret delete anthropic-secret
-   modal secret create anthropic-secret ANTHROPIC_API_KEY=sk-ant-...
+   modal secret delete openai-secret
+   modal secret create openai-secret OPENAI_API_KEY=sk-...
    ```
 
 3. Ensure there are no extra spaces or quotes in the key value

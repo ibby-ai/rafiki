@@ -14,16 +14,12 @@ Tools extend the agent's capabilities by providing callable functions. This exam
 ## Tool Anatomy
 
 ```python
-from claude_agent_sdk import tool
+from agents import function_tool
 
-@tool(
-    "tool_name",                    # Unique identifier
-    "Description of what it does",  # Shown to agent
-    {"param": str}                  # Parameter schema
-)
-async def my_tool(args: dict[str, Any]) -> dict[str, Any]:
-    result = process(args["param"])
-    return {"content": [{"type": "text", "text": result}]}
+@function_tool(name_override="mcp__utilities__tool_name")
+def my_tool(param: str) -> str:
+    result = process(param)
+    return result
 ```
 
 ## Key Concepts
@@ -36,15 +32,7 @@ Tools are referenced as `mcp__<server>__<tool>`:
 
 ### Return Format
 
-Tools must return a dict with a `content` list:
-
-```python
-return {
-    "content": [
-        {"type": "text", "text": "Result text"}
-    ]
-}
-```
+Function tools return regular Python values (usually strings or dicts).
 
 ### Allowed Tools
 

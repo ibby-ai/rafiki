@@ -5,62 +5,45 @@ registered with the agent. Copy this file to modal_backend/mcp_tools/ and
 follow INTEGRATION.md to enable these tools.
 """
 
-from typing import Any
-
-from claude_agent_sdk import tool
+from agents import function_tool
 
 
-@tool(
-    "reverse_string",
-    "Reverse a string. Useful for palindrome checks or text manipulation.",
-    {"text": str},
-)
-async def reverse_string(args: dict[str, Any]) -> dict[str, Any]:
+@function_tool(name_override="mcp__utilities__reverse_string")
+def reverse_string(text: str) -> str:
     """Reverse the input string.
 
     Args:
-        args: Dict with 'text' key containing the string to reverse.
+        text: The string to reverse.
 
     Returns:
-        Content dict with the reversed string.
+        Reversed string payload.
     """
-    text = args.get("text", "")
     reversed_text = text[::-1]
-    return {"content": [{"type": "text", "text": f"Reversed: {reversed_text}"}]}
+    return f"Reversed: {reversed_text}"
 
 
-@tool(
-    "count_words",
-    "Count the number of words in a text string.",
-    {"text": str},
-)
-async def count_words(args: dict[str, Any]) -> dict[str, Any]:
+@function_tool(name_override="mcp__utilities__count_words")
+def count_words(text: str) -> str:
     """Count words in the input text.
 
     Args:
-        args: Dict with 'text' key containing the text to analyze.
+        text: The text to analyze.
 
     Returns:
-        Content dict with the word count.
+        Word count payload.
     """
-    text = args.get("text", "")
     word_count = len(text.split())
-    return {"content": [{"type": "text", "text": f"Word count: {word_count}"}]}
+    return f"Word count: {word_count}"
 
 
-@tool(
-    "to_uppercase",
-    "Convert a string to uppercase.",
-    {"text": str},
-)
-async def to_uppercase(args: dict[str, Any]) -> dict[str, Any]:
+@function_tool(name_override="mcp__utilities__to_uppercase")
+def to_uppercase(text: str) -> str:
     """Convert text to uppercase.
 
     Args:
-        args: Dict with 'text' key containing the text to convert.
+        text: The text to convert.
 
     Returns:
-        Content dict with the uppercase text.
+        Uppercase string.
     """
-    text = args.get("text", "")
-    return {"content": [{"type": "text", "text": text.upper()}]}
+    return text.upper()

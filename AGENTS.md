@@ -24,7 +24,7 @@ This is a **uv-based project**. Always activate the virtual environment before r
 - `source .venv/bin/activate` — activate the virtual environment (required before other commands).
 - `uv sync` — sync dependencies from `pyproject.toml` and `uv.lock`.
 - `pip install modal` and `modal setup` — install and authenticate the Modal CLI.
-- `modal secret create anthropic-secret ANTHROPIC_API_KEY=<your-key>` — create the required Anthropic secret (use `modal secret list` to verify).
+- `modal secret create openai-secret OPENAI_API_KEY=<your-key>` — create the required OpenAI secret (use `modal secret list` to verify).
 
 ### Running
 
@@ -107,7 +107,7 @@ Existing commits use short, present-tense statements (`making sandbox persistent
 
 ## Security & Secrets
 
-Never hardcode API keys. All Anthropic credentials must stay in the `anthropic-secret` Modal secret with key `ANTHROPIC_API_KEY`. When adding new secrets, update `modal_backend/settings/settings.py` and document required setup steps in `README.md`. Avoid committing generated artifacts that might expose credentials or user data.
+Never hardcode API keys. All OpenAI credentials must stay in the `openai-secret` Modal secret with key `OPENAI_API_KEY`. When adding new secrets, update `modal_backend/settings/settings.py` and document required setup steps in `README.md`. Avoid committing generated artifacts that might expose credentials or user data.
 
 ## Browser Automation
 

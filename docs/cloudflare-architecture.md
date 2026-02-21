@@ -31,7 +31,7 @@ flowchart TB
 
         subgraph Sandbox["Modal Sandbox"]
             Controller["Controller<br/>(FastAPI)"]
-            AgentSDK["Claude Agent SDK"]
+            AgentSDK["OpenAI Agents SDK"]
             Tools["MCP Tools"]
         end
 
@@ -41,7 +41,7 @@ flowchart TB
     end
 
     subgraph External["External Services"]
-        Anthropic["Anthropic API"]
+        OpenAI["OpenAI API"]
         GitHub["GitHub API"]
         Other["Other APIs"]
     end
@@ -67,7 +67,7 @@ flowchart TB
     Sandbox --> Dict
 
     AgentSDK --> Tools
-    AgentSDK --> Anthropic
+    AgentSDK --> OpenAI
     Tools --> GitHub
     Tools --> Other
 ```
@@ -248,7 +248,7 @@ execution_state (key, value, updated_at)
 **Components:**
 
 - **Controller (FastAPI)**: HTTP service on port 8001
-- **Claude Agent SDK**: Agent runtime and MCP client
+- **OpenAI Agents SDK**: Agent runtime and MCP client
 - **MCP Tools**: Read, Write, WebSearch, etc.
 
 **Endpoints (controller.py):**

@@ -35,8 +35,8 @@ The application uses a **single-sandbox architecture pattern** optimized for low
 │            │  Volume: svc-runner-8001-vol                  │               │
 │            │  Mount:  /data                                │               │
 │            │                                               │               │
-│            │  Image: _base_anthropic_sdk_image             │               │
-│            │  (Claude Agent SDK)                           │               │
+│            │  Image: _base_openai_agents_image             │               │
+│            │  (OpenAI Agents SDK)                           │               │
 │            └───────────────────────────────────────────────┘               │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -101,8 +101,8 @@ def http_app():
 | Info | `GET /service_info` | Sandbox info |
 
 **Why it's lightweight:**
-- Doesn't run the Claude Agent SDK directly
-- Doesn't maintain long-lived connections to Anthropic
+- Doesn't run the OpenAI Agents SDK directly
+- Doesn't maintain long-lived connections to model provider APIs
 - Simply forwards requests and returns responses
 - Can scale independently from the background service
 
@@ -134,7 +134,7 @@ def http_app():
 **Location:** `modal_backend/api/controller.py`
 
 **What it does:**
-- Runs the Claude Agent SDK client
+- Runs the OpenAI Agents SDK client
 - Executes agent queries and tool calls via MCP servers
 - Maintains warm state (avoids cold-start latency)
 - Handles MCP server connections
@@ -143,7 +143,7 @@ def http_app():
 **Key characteristics:**
 - Long-lived process (runs for hours, not seconds)
 - Runs inside a `modal.Sandbox` on port 8001
-- Uses `_base_anthropic_sdk_image` with Claude Agent SDK
+- Uses `_base_openai_agents_image` with OpenAI Agents SDK
 - Volume: `svc-runner-8001-vol` mounted at `/data`
 - Timeout: 24h max, 10min idle
 
@@ -177,9 +177,9 @@ def http_app():
 
 4. **Background Service (Controller):**
    - Receives request at `/query` endpoint
-   - Creates `ClaudeSDKClient` with configured options
-   - Executes `client.query(body.question)`
-   - Streams response messages
+   - Builds an OpenAI `Agent` from configured options
+   - Executes a run via `Runner.run_streamed(...)`
+   - Maps stream items into compatibility message events
    - Returns JSON response with messages
 
 5. **Response Path:**
