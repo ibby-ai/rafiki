@@ -416,6 +416,6 @@ async def health():
 
 ## Related Documentation
 
-- [Architecture Overview](./architecture.md) - How ingress fits into overall architecture
-- [Controllers](./controllers.md) - How requests reach the background service
+- [Architecture Overview](./architecture-overview.md) - How ingress fits into overall architecture
+- [Controllers](./controllers-background-service.md) - How requests reach the background service
 - [Modal Documentation](https://modal.com/docs/guide/container-lifecycle) - Official Modal docs

@@ -5,7 +5,7 @@ This document provides an overview of the Cloudflare + Modal hybrid architecture
 ## Quick Links
 
 - **Control Plane Code**: [`edge-control-plane/`](./edge-control-plane/)
-- **Architecture Docs**: [`docs/cloudflare-architecture.md`](./docs/cloudflare-architecture.md)
+- **Architecture Docs**: [`docs/design-docs/cloudflare-hybrid-architecture.md`](./docs/design-docs/cloudflare-hybrid-architecture.md)
 - **API Reference**: [`edge-control-plane/API.md`](./edge-control-plane/API.md)
 - **Implementation Summary**: [`edge-control-plane/IMPLEMENTATION_SUMMARY.md`](./edge-control-plane/IMPLEMENTATION_SUMMARY.md)
 
@@ -68,7 +68,7 @@ This integration adds Cloudflare Workers + Durable Objects as a control plane la
 ### New Code
 
 - `edge-control-plane/`: Complete Cloudflare Worker + DO implementation
-- `docs/cloudflare-architecture.md`: Hybrid architecture documentation
+- `docs/design-docs/cloudflare-hybrid-architecture.md`: Hybrid architecture documentation
 
 ### Modal Backend Changes Required
 
@@ -180,7 +180,7 @@ Start with:
 
 - [`edge-control-plane/README.md`](./edge-control-plane/README.md) - Quick start
 - [`edge-control-plane/API.md`](./edge-control-plane/API.md) - API reference
-- [`docs/cloudflare-architecture.md`](./docs/cloudflare-architecture.md) - Architecture details
+- [`docs/design-docs/cloudflare-hybrid-architecture.md`](./docs/design-docs/cloudflare-hybrid-architecture.md) - Architecture details
 
 ### 2. Deploy Cloudflare
 

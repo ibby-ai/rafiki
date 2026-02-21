@@ -547,5 +547,5 @@ If you're still stuck:
 ## Related Documentation
 
 - [Configuration Guide](./configuration.md) - All settings and their effects
-- [Architecture Overview](./architecture.md) - Understanding how components interact
-- [Controllers](./controllers.md) - Deep dive into the background service
+- [Architecture Overview](../design-docs/architecture-overview.md) - Understanding how components interact
+- [Controllers](../design-docs/controllers-background-service.md) - Deep dive into the background service

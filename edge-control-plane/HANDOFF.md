@@ -631,7 +631,7 @@ describe('SessionAgent', () => {
 4. ✅ [`WEBSOCKETS.md`](WEBSOCKETS.md) - WebSocket events & Hibernation API (20KB)
 5. ✅ [`README.md`](README.md) - Quick start & troubleshooting (12KB)
 6. ✅ [`DEPLOYMENT_CHECKLIST.md`](DEPLOYMENT_CHECKLIST.md) - Step-by-step deployment (9KB)
-7. ✅ [`../docs/cloudflare-architecture.md`](../docs/cloudflare-architecture.md) - Full architecture (27KB)
+7. ✅ [`../docs/design-docs/cloudflare-hybrid-architecture.md`](../docs/design-docs/cloudflare-hybrid-architecture.md) - Full architecture (27KB)
 
 **Questions**:
 
@@ -758,7 +758,7 @@ describe('SessionAgent', () => {
 
 1. Start with this HANDOFF.md (you're here!)
 2. Read [`README.md`](README.md) for quick overview
-3. Skim [`../docs/cloudflare-architecture.md`](../docs/cloudflare-architecture.md) for full architecture
+3. Skim [`../docs/design-docs/cloudflare-hybrid-architecture.md`](../docs/design-docs/cloudflare-hybrid-architecture.md) for full architecture
 
 ### Step 2: Review Core Code (2-3 hours)
 

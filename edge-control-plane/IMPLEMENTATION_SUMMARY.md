@@ -94,7 +94,7 @@ This document summarizes the Cloudflare Durable Objects integration that has bee
 - Connection management and reconnection
 - Performance optimization tips
 
-✅ **Architecture Documentation (`docs/cloudflare-architecture.md`)**
+✅ **Architecture Documentation (`docs/design-docs/cloudflare-hybrid-architecture.md`)**
 
 - High-level architecture diagram (Mermaid)
 - Component responsibilities
@@ -363,7 +363,7 @@ Direct Modal gateway access requires `X-Internal-Auth` and is treated as interna
 - **Auth Design**: [AUTH.md](./AUTH.md)
 - **Integration Guide**: [INTEGRATION.md](./INTEGRATION.md)
 - **WebSocket Spec**: [WEBSOCKETS.md](./WEBSOCKETS.md)
-- **Architecture**: [../docs/cloudflare-architecture.md](../docs/cloudflare-architecture.md)
+- **Architecture**: [../docs/design-docs/cloudflare-hybrid-architecture.md](../docs/design-docs/cloudflare-hybrid-architecture.md)
 
 ## Contact
 

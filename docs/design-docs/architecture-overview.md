@@ -328,7 +328,7 @@ Both commands:
 
 ## Related Documentation
 
-- [Controllers Deep Dive](./controllers.md) - Detailed explanation of the controller service
+- [Controllers Deep Dive](./controllers-background-service.md) - Detailed explanation of the controller service
 - [Modal Ingress](./modal-ingress.md) - How Modal handles HTTP ingress
-- [Configuration](./configuration.md) - Configuration options and settings
-- [API Usage](./api-usage.md) - Complete API reference
+- [Configuration](../references/configuration.md) - Configuration options and settings
+- [API Usage](../references/api-usage.md) - Complete API reference

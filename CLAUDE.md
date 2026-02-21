@@ -300,7 +300,7 @@ return AgentConfig(
 )
 ```
 
-See `docs/multi-agent.md` for comprehensive documentation on the multi-agent architecture.
+See `docs/design-docs/multi-agent-architecture.md` for comprehensive documentation on the multi-agent architecture.
 
 ### Adjusting Runtime Configuration
 

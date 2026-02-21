@@ -80,14 +80,14 @@ uv run pytest
 
 ## Docs
 
-- `docs/architecture.md` - architecture overview
-- `docs/multi-agent.md` - agent types + orchestration
-- `docs/controllers.md` - background service
-- `docs/api-usage.md` - endpoints and auth
-- `docs/configuration.md` - settings
-- `docs/tool-development.md` - tool development
-- `docs/troubleshooting.md` - common issues
-- `docs/README.md` - doc index
+- `docs/design-docs/architecture-overview.md` - architecture overview
+- `docs/design-docs/multi-agent-architecture.md` - agent types + orchestration
+- `docs/design-docs/controllers-background-service.md` - background service
+- `docs/references/api-usage.md` - endpoints and auth
+- `docs/references/configuration.md` - settings
+- `docs/references/tool-development.md` - tool development
+- `docs/references/troubleshooting.md` - common issues
+- `docs/references/runtime-docs-overview.md` - doc index
 
 ## Links
 

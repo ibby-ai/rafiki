@@ -78,6 +78,6 @@ export DEV_URL="https://your-org--test-sandbox-http-app-dev.modal.run"
 
 ## Related Documentation
 
-- [API Usage Guide](../docs/api-usage.md)
-- [Tool Development Guide](../docs/tool-development.md)
-- [Configuration Guide](../docs/configuration.md)
+- [API Usage Guide](../docs/references/api-usage.md)
+- [Tool Development Guide](../docs/references/tool-development.md)
+- [Configuration Guide](../docs/references/configuration.md)

@@ -154,6 +154,6 @@ Model list examples now use OpenAI IDs such as `gpt-4.1`.
 
 ## References
 
-- [Controllers](./controllers.md)
+- [Controllers](../design-docs/controllers-background-service.md)
 - [Configuration](./configuration.md)
 - [OpenAI Agents Sessions Docs](https://openai.github.io/openai-agents-python/sessions/)

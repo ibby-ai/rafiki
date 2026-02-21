@@ -26,16 +26,16 @@ If startup fails, verify:
 
 ## Start Here
 
-1. [Architecture Overview](./architecture.md)
-2. [Controllers](./controllers.md)
+1. [Architecture Overview](../design-docs/architecture-overview.md)
+2. [Controllers](../design-docs/controllers-background-service.md)
 3. [Configuration](./configuration.md)
 4. [API Usage](./api-usage.md)
 
 ## Core Docs
 
-- [Architecture Overview](./architecture.md)
-- [Controllers: Background Service](./controllers.md)
-- [Multi-Agent Architecture](./multi-agent.md)
+- [Architecture Overview](../design-docs/architecture-overview.md)
+- [Controllers: Background Service](../design-docs/controllers-background-service.md)
+- [Multi-Agent Architecture](../design-docs/multi-agent-architecture.md)
 - [Configuration Guide](./configuration.md)
 - [API Usage Guide](./api-usage.md)
 - [Tool Development Guide](./tool-development.md)
@@ -51,6 +51,6 @@ If startup fails, verify:
 
 ## Related Resources
 
-- [Main README](../README.md)
+- [Main README](../../README.md)
 - [Modal Documentation](https://modal.com/docs)
 - [OpenAI Agents Python Documentation](https://openai.github.io/openai-agents-python/)
