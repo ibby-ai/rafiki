@@ -164,6 +164,7 @@ def test_make_result_message_omits_non_json_structured_output() -> None:
     run = SimpleNamespace(raw_responses=[], current_turn=1)
     message = controller._make_result_message(
         session_id="sess-json-safe",
+        trace_id="trace-123",
         duration_ms=42,
         final_output=_NonSerializable(),
         run=run,
@@ -173,6 +174,17 @@ def test_make_result_message_omits_non_json_structured_output() -> None:
 
     assert message["result"] is not None
     assert message["structured_output"] is None
+    assert message["trace_id"] == "trace-123"
+
+
+def test_extract_openai_trace_id_from_raw_responses() -> None:
+    run = SimpleNamespace(
+        raw_responses=[
+            SimpleNamespace(openai_trace_id="oa-trace-1"),
+            SimpleNamespace(openai_trace_id="oa-trace-2"),
+        ]
+    )
+    assert controller._extract_openai_trace_id(run) == "oa-trace-1"
 
 
 def test_messages_from_run_event_maps_tool_events() -> None:
@@ -188,7 +200,13 @@ def test_messages_from_run_event_maps_tool_events() -> None:
             ),
         ),
     )
-    tool_messages = controller._messages_from_run_event(tool_called_event, "gpt-4.1")
+    tool_messages = controller._messages_from_run_event(
+        tool_called_event,
+        "gpt-4.1",
+        allowed_tools=["mcp__utilities__calculate"],
+        session_id="sess-1",
+        trace_id="trace-1",
+    )
     assert tool_messages == [
         {
             "type": "assistant",
@@ -203,6 +221,8 @@ def test_messages_from_run_event_maps_tool_events() -> None:
             "model": "gpt-4.1",
             "parent_tool_use_id": None,
             "error": None,
+            "session_id": "sess-1",
+            "trace_id": "trace-1",
         }
     ]
 
@@ -215,7 +235,13 @@ def test_messages_from_run_event_maps_tool_events() -> None:
             raw_item=SimpleNamespace(call_id="call_123"),
         ),
     )
-    output_messages = controller._messages_from_run_event(tool_output_event, "gpt-4.1")
+    output_messages = controller._messages_from_run_event(
+        tool_output_event,
+        "gpt-4.1",
+        allowed_tools=["mcp__utilities__calculate"],
+        session_id="sess-1",
+        trace_id="trace-1",
+    )
     assert output_messages == [
         {
             "type": "assistant",
@@ -230,6 +256,8 @@ def test_messages_from_run_event_maps_tool_events() -> None:
             "model": "gpt-4.1",
             "parent_tool_use_id": "call_123",
             "error": None,
+            "session_id": "sess-1",
+            "trace_id": "trace-1",
         }
     ]
 
@@ -242,7 +270,13 @@ def test_messages_from_run_event_maps_assistant_text(monkeypatch: pytest.MonkeyP
         name="message_output_created",
         item=SimpleNamespace(type="message_output_item"),
     )
-    messages = controller._messages_from_run_event(event, "gpt-4.1-mini")
+    messages = controller._messages_from_run_event(
+        event,
+        "gpt-4.1-mini",
+        allowed_tools=[],
+        session_id="sess-1",
+        trace_id="trace-1",
+    )
     assert messages == [
         {
             "type": "assistant",
@@ -250,6 +284,48 @@ def test_messages_from_run_event_maps_assistant_text(monkeypatch: pytest.MonkeyP
             "model": "gpt-4.1-mini",
             "parent_tool_use_id": None,
             "error": None,
+            "session_id": "sess-1",
+            "trace_id": "trace-1",
+        }
+    ]
+
+
+def test_messages_from_run_event_blocks_unallowed_tool() -> None:
+    event = SimpleNamespace(
+        type="run_item_stream_event",
+        name="tool_called",
+        item=SimpleNamespace(
+            type="tool_call_item",
+            raw_item=SimpleNamespace(
+                arguments='{"path":"/tmp/x"}',
+                call_id="call_block",
+                name="Write",
+            ),
+        ),
+    )
+    messages = controller._messages_from_run_event(
+        event,
+        "gpt-4.1",
+        allowed_tools=["Read"],
+        session_id="sess-2",
+        trace_id="trace-2",
+    )
+    assert messages == [
+        {
+            "type": "assistant",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_block",
+                    "content": "Blocked tool call: Write",
+                    "is_error": True,
+                }
+            ],
+            "model": "gpt-4.1",
+            "parent_tool_use_id": "call_block",
+            "error": "tool_not_allowed",
+            "session_id": "sess-2",
+            "trace_id": "trace-2",
         }
     ]
 
@@ -292,12 +368,146 @@ async def test_execute_agent_query_suppresses_watcher_cancelled_error(
         session_id="sess-watcher-cancel",
         fork_session=False,
         job_root=None,
+        trace_id="trace-watcher",
     )
 
     assert session_id == "sess-watcher-cancel"
     assert result_message["is_error"] is False
+    assert result_message["trace_id"] == "trace-watcher"
     assert messages[-1]["type"] == "result"
     assert session_id not in controller.ACTIVE_CLIENTS
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_query_preserves_tool_sequence_and_handoff_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStreamingRun:
+        def __init__(self) -> None:
+            self.is_complete = False
+            self.final_output = "final output"
+            self.current_turn = 2
+            self.raw_responses = [SimpleNamespace(openai_trace_id="oa-trace-seq")]
+
+        def cancel(self, mode: str) -> None:
+            self.is_complete = True
+
+        async def stream_events(self):
+            yield SimpleNamespace(
+                type="agent_updated_stream_event",
+                new_agent=SimpleNamespace(model="gpt-4.1-mini"),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                name="tool_called",
+                item=SimpleNamespace(
+                    type="tool_call_item",
+                    raw_item=SimpleNamespace(
+                        arguments='{"query":"status"}',
+                        call_id="call-seq",
+                        name="mcp__utilities__calculate",
+                    ),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                name="tool_output",
+                item=SimpleNamespace(
+                    type="tool_call_output_item",
+                    output="42",
+                    raw_item=SimpleNamespace(call_id="call-seq"),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                name="message_output_created",
+                item=SimpleNamespace(type="message_output_item"),
+            )
+            self.is_complete = True
+
+    fake_run = _FakeStreamingRun()
+    fake_agent = SimpleNamespace(model="gpt-4.1")
+    config = SimpleNamespace(get_effective_allowed_tools=lambda: ["mcp__utilities__calculate"])
+
+    async def fake_ensure_session(
+        session_id: str | None,
+        fork_session: bool,
+        db_path: str,
+    ):
+        return object(), session_id or "sess-seq"
+
+    monkeypatch.setattr(controller, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(controller, "_build_system_prompt", lambda *_args, **_kwargs: "prompt")
+    monkeypatch.setattr(controller, "_build_agent", lambda *_args, **_kwargs: (fake_agent, 5))
+    monkeypatch.setattr(controller, "get_agent_config", lambda _agent_type: config)
+    monkeypatch.setattr(controller.Runner, "run_streamed", lambda *args, **kwargs: fake_run)
+    monkeypatch.setattr(controller.ItemHelpers, "text_message_output", lambda _item: "after tool")
+
+    messages, result_message, _ = await controller._execute_agent_query(
+        question="do work",
+        session_id="sess-seq",
+        fork_session=False,
+        job_root=None,
+        trace_id="trace-seq",
+    )
+
+    assistant_messages = [m for m in messages if m.get("type") == "assistant"]
+    assert len(assistant_messages) == 3
+    assert assistant_messages[0]["content"][0]["type"] == "tool_use"
+    assert assistant_messages[1]["content"][0]["type"] == "tool_result"
+    assert assistant_messages[2]["content"][0]["type"] == "text"
+    assert assistant_messages[0]["model"] == "gpt-4.1-mini"
+    assert result_message["openai_trace_id"] == "oa-trace-seq"
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_query_cancelled_keeps_openai_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStreamingRun:
+        def __init__(self) -> None:
+            self.cancel_modes: list[str] = []
+            self.is_complete = False
+            self.final_output = "partial"
+            self.current_turn = 1
+            self.raw_responses = [SimpleNamespace(openai_trace_id="oa-trace-cancel")]
+
+        def cancel(self, mode: str) -> None:
+            self.cancel_modes.append(mode)
+            self.is_complete = True
+
+        async def stream_events(self):
+            self.is_complete = True
+            yield SimpleNamespace(type="unknown_event")
+
+    fake_run = _FakeStreamingRun()
+    fake_agent = SimpleNamespace(model="gpt-4.1")
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    async def fake_ensure_session(
+        session_id: str | None,
+        fork_session: bool,
+        db_path: str,
+    ):
+        return object(), session_id or "sess-cancel-trace"
+
+    monkeypatch.setattr(controller, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(controller, "_build_system_prompt", lambda *_args, **_kwargs: "prompt")
+    monkeypatch.setattr(controller, "_build_agent", lambda *_args, **_kwargs: (fake_agent, 5))
+    monkeypatch.setattr(controller.Runner, "run_streamed", lambda *args, **kwargs: fake_run)
+
+    _, result_message, _ = await controller._execute_agent_query(
+        question="cancel me",
+        session_id="sess-cancel-trace",
+        fork_session=False,
+        job_root=None,
+        stop_event=stop_event,
+        trace_id="trace-cancel",
+    )
+
+    assert result_message["subtype"] == "cancelled"
+    assert result_message["openai_trace_id"] == "oa-trace-cancel"
 
 
 @pytest.mark.asyncio
@@ -354,4 +564,139 @@ async def test_query_stream_emits_error_event_without_done(
     assert "event: assistant" in payload
     assert "event: error" in payload
     assert '"error": "boom"' in payload
+    assert '"trace_id":' in payload
     assert "event: done" not in payload
+
+
+@pytest.mark.asyncio
+async def test_query_agent_summary_includes_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_execute_agent_query(**_kwargs):
+        result_message = {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 5,
+            "duration_api_ms": None,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "sess-trace-summary",
+            "total_cost_usd": None,
+            "usage": None,
+            "result": "ok",
+            "structured_output": None,
+        }
+        return [result_message], result_message, "sess-trace-summary"
+
+    monkeypatch.setattr(controller, "_execute_agent_query", fake_execute_agent_query)
+    monkeypatch.setattr(controller, "_maybe_reload_volume", lambda: None)
+    monkeypatch.setattr(controller, "_maybe_commit_volume", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_start", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_end", lambda **_kwargs: None)
+    monkeypatch.setattr(controller._settings, "enable_multiplayer_sessions", False)
+
+    request = _request()
+    request.state.request_id = "req-trace-summary"
+    response = await controller.query_agent(
+        QueryBody(question="hello", session_id="sess-trace-summary"),
+        request,
+    )
+    assert response["summary"]["trace_id"] == "req-trace-summary"
+
+
+@pytest.mark.asyncio
+async def test_query_agent_summary_includes_openai_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_execute_agent_query(**_kwargs):
+        result_message = {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 5,
+            "duration_api_ms": None,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "sess-openai-summary",
+            "trace_id": "trace-openai-summary",
+            "openai_trace_id": "oa-trace-summary",
+            "total_cost_usd": None,
+            "usage": None,
+            "result": "ok",
+            "structured_output": None,
+        }
+        return [result_message], result_message, "sess-openai-summary"
+
+    monkeypatch.setattr(controller, "_execute_agent_query", fake_execute_agent_query)
+    monkeypatch.setattr(controller, "_maybe_reload_volume", lambda: None)
+    monkeypatch.setattr(controller, "_maybe_commit_volume", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_start", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_end", lambda **_kwargs: None)
+    monkeypatch.setattr(controller._settings, "enable_multiplayer_sessions", False)
+
+    request = _request()
+    request.state.request_id = "req-openai-summary"
+    response = await controller.query_agent(
+        QueryBody(question="hello", session_id="sess-openai-summary"),
+        request,
+    )
+    assert response["summary"]["openai_trace_id"] == "oa-trace-summary"
+
+
+@pytest.mark.asyncio
+async def test_query_stream_done_event_includes_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_execute_agent_query(**kwargs):
+        on_message = kwargs["on_message"]
+        await on_message(
+            {
+                "type": "assistant",
+                "content": [{"type": "text", "text": "partial output"}],
+                "model": "gpt-4.1",
+                "parent_tool_use_id": None,
+                "error": None,
+                "trace_id": "client-trace-123",
+            }
+        )
+        result_message = {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 5,
+            "duration_api_ms": None,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "sess-stream-done",
+            "trace_id": "client-trace-123",
+            "openai_trace_id": "oa-trace-stream",
+            "total_cost_usd": None,
+            "usage": None,
+            "result": "done",
+            "structured_output": None,
+        }
+        await on_message(result_message)
+        return [], result_message, "sess-stream-done"
+
+    monkeypatch.setattr(controller, "_execute_agent_query", fake_execute_agent_query)
+    monkeypatch.setattr(controller, "_maybe_reload_volume", lambda: None)
+    monkeypatch.setattr(controller, "_maybe_commit_volume", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_start", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "record_session_end", lambda **_kwargs: None)
+    monkeypatch.setattr(controller._settings, "enable_multiplayer_sessions", False)
+
+    response = await controller.query_agent_stream(
+        QueryBody(question="hello", session_id="sess-stream-done", trace_id="client-trace-123"),
+        _request(),
+    )
+
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, bytes):
+            chunks.append(chunk.decode("utf-8"))
+        else:
+            chunks.append(chunk)
+
+    payload = "".join(chunks)
+    assert "event: assistant" in payload
+    assert "event: done" in payload
+    assert '"trace_id": "client-trace-123"' in payload
+    assert '"openai_trace_id": "oa-trace-stream"' in payload

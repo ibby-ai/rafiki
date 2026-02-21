@@ -20,7 +20,7 @@ def test_query_body_with_job_id():
 
 
 def test_query_body_empty_string():
-    """Test that empty string is allowed (validation may be added later)."""
+    """Test that empty string remains accepted for compatibility."""
     body = QueryBody(question="")
     assert body.question == ""
 
@@ -47,6 +47,14 @@ def test_query_body_whitespace_stripping():
     """Test that whitespace is stripped from strings."""
     body = QueryBody(question="  What is the capital?  ")
     assert body.question == "What is the capital?"
+
+
+def test_query_body_trace_id_validation():
+    body = QueryBody(question="hello", trace_id="trace_abc-123")
+    assert body.trace_id == "trace_abc-123"
+
+    with pytest.raises(ValidationError):
+        QueryBody(question="hello", trace_id="invalid trace id with spaces")
 
 
 if __name__ == "__main__":

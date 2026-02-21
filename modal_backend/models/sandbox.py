@@ -1,11 +1,14 @@
 """Sandbox-related request/response schemas."""
 
+import re
 from typing import Literal
 from uuid import UUID
 
 from pydantic import field_validator
 
 from modal_backend.models.base import BaseSchema
+
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def _validate_job_id(value: str | None) -> str | None:
@@ -29,11 +32,28 @@ class QueryBody(BaseSchema):
     user_id: str | None = None  # For statistics tracking
     tenant_id: str | None = None  # Tenant context from Cloudflare Worker
     warm_id: str | None = None  # Pre-warm correlation ID from POST /warm
+    trace_id: str | None = None  # Client-provided correlation id for logs/traces
 
     @field_validator("job_id")
     @classmethod
     def validate_job_id(cls, value: str | None) -> str | None:
         return _validate_job_id(value)
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        if len(value) > 20_000:
+            raise ValueError("question exceeds maximum length")
+        return value
+
+    @field_validator("trace_id")
+    @classmethod
+    def validate_trace_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _TRACE_ID_RE.match(value):
+            raise ValueError("trace_id must match [A-Za-z0-9._:-] and be <= 128 chars")
+        return value
 
 
 # =============================================================================

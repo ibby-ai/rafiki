@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 from agents import Agent, Runner, SQLiteSession, handoff
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,6 +83,12 @@ async def ensure_session(
     db_path: str,
 ) -> tuple[SQLiteSession, str]:
     """Return a SQLiteSession, cloning history on fork when requested."""
+    from modal_backend.settings.settings import get_settings
+
+    settings = get_settings()
+    max_items = settings.openai_session_max_items
+    keep_items = settings.openai_session_compaction_keep_items
+
     db_file = Path(db_path)
     if str(db_file) != ":memory:":
         db_file.parent.mkdir(parents=True, exist_ok=True)
@@ -91,10 +100,57 @@ async def ensure_session(
         items = await source.get_items()
         if items:
             await target.add_items(items)
+            await _compact_session_history(
+                target,
+                session_id=new_session_id,
+                max_items=max_items,
+                keep_items=keep_items,
+            )
         return target, new_session_id
 
     resolved = session_id or str(uuid4())
-    return SQLiteSession(resolved, db_path=db_path), resolved
+    session = SQLiteSession(resolved, db_path=db_path)
+    await _compact_session_history(
+        session,
+        session_id=resolved,
+        max_items=max_items,
+        keep_items=keep_items,
+    )
+    return session, resolved
+
+
+async def _compact_session_history(
+    session: SQLiteSession,
+    *,
+    session_id: str,
+    max_items: int | None,
+    keep_items: int | None,
+) -> None:
+    """Trim session history to deterministic bounds when configured."""
+    if max_items is None:
+        return
+
+    items = await session.get_items()
+    item_count = len(items)
+    if item_count <= max_items:
+        return
+
+    retained_items = keep_items if keep_items is not None else max_items
+    retained_items = min(retained_items, max_items)
+    trimmed = items[-retained_items:]
+
+    await session.clear_session()
+    await session.add_items(trimmed)
+    _logger.info(
+        "openai.session.compacted",
+        extra={
+            "session_id": session_id,
+            "items_before": item_count,
+            "items_after": retained_items,
+            "max_items": max_items,
+            "keep_items": retained_items,
+        },
+    )
 
 
 def build_agent_options(
@@ -177,6 +233,7 @@ class OpenAIAgentExecutor(AgentExecutor):
         context: ExecutionContext | None = None,
     ) -> AsyncIterable[dict[str, Any]]:
         from modal_backend.settings.settings import get_settings
+        from modal_backend.tracing import langsmith_run_context
 
         settings = get_settings()
         max_turns = self.config.max_turns or settings.agent_max_turns or 50
@@ -202,12 +259,19 @@ class OpenAIAgentExecutor(AgentExecutor):
             db_path=settings.openai_session_db_path,
         )
 
-        result = await Runner.run(
-            agent,
-            question,
-            session=session,
-            max_turns=max_turns,
-        )
+        metadata = {
+            "agent_type": self.config.name,
+            "session_id": resolved_session_id,
+            "job_id": context.job_id if context else None,
+            "user_id": context.user_id if context else None,
+        }
+        with langsmith_run_context(metadata):
+            result = await Runner.run(
+                agent,
+                question,
+                session=session,
+                max_turns=max_turns,
+            )
 
         yield {
             "type": "result",

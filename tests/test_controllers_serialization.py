@@ -68,6 +68,22 @@ def test_serialize_message_dict_preserves_shape() -> None:
     assert serialize_message(message) == message
 
 
+def test_serialize_message_normalizes_metadata_fields() -> None:
+    message = {
+        "type": "assistant",
+        "content": [{"type": "tool_result", "tool_use_id": 123, "content": 456, "is_error": False}],
+        "session_id": 7,
+        "trace_id": 9,
+        "request_id": 11,
+    }
+    serialized = serialize_message(message)
+    assert serialized["session_id"] == 7
+    assert serialized["trace_id"] == 9
+    assert serialized["request_id"] == 11
+    assert serialized["content"][0]["tool_use_id"] == 123
+    assert serialized["content"][0]["content"] == 456
+
+
 def test_serialize_message_model_like() -> None:
     message = _ModelLike({"type": "result", "subtype": "success", "session_id": "sess_1"})
     assert serialize_message(message) == {

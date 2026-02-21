@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from modal_backend.settings import settings as settings_module
 
 
@@ -10,6 +12,26 @@ def test_settings_openai_defaults() -> None:
     assert cfg.openai_model_default == "gpt-4.1"
     assert cfg.openai_model_subagent == "gpt-4.1-mini"
     assert cfg.openai_session_db_path == "/data/openai_agents_sessions.sqlite3"
+    assert cfg.openai_session_max_items == 400
+    assert cfg.openai_session_compaction_keep_items == 300
+
+
+def test_settings_openai_session_compaction_validation() -> None:
+    with pytest.raises(ValueError, match="openai_session_max_items must be > 0 when set"):
+        settings_module.Settings(
+            internal_auth_secret="test-secret",
+            openai_session_max_items=0,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="openai_session_compaction_keep_items cannot exceed openai_session_max_items",
+    ):
+        settings_module.Settings(
+            internal_auth_secret="test-secret",
+            openai_session_max_items=200,
+            openai_session_compaction_keep_items=201,
+        )
 
 
 def test_get_modal_secrets_includes_required_openai_and_internal(

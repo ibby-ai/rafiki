@@ -147,6 +147,8 @@ class TestSummarySchema:
         summary = SummarySchema(
             text="The answer is 4.",
             is_complete=True,
+            trace_id="trace-123",
+            openai_trace_id="oa-trace-123",
             subtype="success",
             duration_ms=1234,
             duration_api_ms=5678,
@@ -160,6 +162,8 @@ class TestSummarySchema:
         )
         assert summary.text == "The answer is 4."
         assert summary.is_complete is True
+        assert summary.trace_id == "trace-123"
+        assert summary.openai_trace_id == "oa-trace-123"
         assert summary.subtype == "success"
         assert summary.duration_ms == 1234
         assert summary.total_cost_usd == 0.015

@@ -1,6 +1,7 @@
 """Tests for agent loop execution and multi-agent architecture."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -273,6 +274,68 @@ async def test_ensure_session_resume_uses_existing_history(tmp_path: Path):
 
     assert resumed_id == source_id
     assert len(items) == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_resume_compacts_history_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from modal_backend.settings import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            openai_session_max_items=5,
+            openai_session_compaction_keep_items=3,
+        ),
+    )
+
+    db_path = str(tmp_path / "sessions.sqlite")
+    source_id = str(uuid4())
+    source = SQLiteSession(source_id, db_path=db_path)
+    source_items = [{"role": "user", "content": f"message-{i}"} for i in range(8)]
+    await source.add_items(source_items)
+
+    resumed, resumed_id = await ensure_session(source_id, fork_session=False, db_path=db_path)
+    items = await resumed.get_items()
+
+    assert resumed_id == source_id
+    assert len(items) == 3
+    assert [item["content"] for item in items] == ["message-5", "message-6", "message-7"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_fork_compacts_target_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from modal_backend.settings import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            openai_session_max_items=4,
+            openai_session_compaction_keep_items=2,
+        ),
+    )
+
+    db_path = str(tmp_path / "sessions.sqlite")
+    source_id = str(uuid4())
+    source = SQLiteSession(source_id, db_path=db_path)
+    source_items = [{"role": "user", "content": f"source-{i}"} for i in range(6)]
+    await source.add_items(source_items)
+
+    forked, forked_id = await ensure_session(source_id, fork_session=True, db_path=db_path)
+    forked_items = await forked.get_items()
+    source_after = await source.get_items()
+
+    assert forked_id != source_id
+    assert len(forked_items) == 2
+    assert [item["content"] for item in forked_items] == ["source-4", "source-5"]
+    assert len(source_after) == 6
 
 
 @pytest.mark.slow

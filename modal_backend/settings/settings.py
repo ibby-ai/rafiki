@@ -40,6 +40,22 @@ class Settings(BaseSettings):
         default="/data/openai_agents_sessions.sqlite3",
         description="SQLiteSession path used by openai-agents for conversation memory.",
     )
+    openai_session_max_items: int | None = Field(
+        default=400,
+        description=(
+            "Maximum number of OpenAI session history items to retain. "
+            "When exceeded, history is compacted deterministically. "
+            "Set to None to disable item-based compaction."
+        ),
+    )
+    openai_session_compaction_keep_items: int | None = Field(
+        default=300,
+        description=(
+            "Number of newest history items to keep when compaction is triggered. "
+            "Must be less than or equal to openai_session_max_items. "
+            "Set to None to keep exactly openai_session_max_items."
+        ),
+    )
 
     # Sandbox configuration
     sandbox_name: str = "svc-runner-8001"
@@ -557,6 +573,22 @@ class Settings(BaseSettings):
         """Require internal auth secret for Cloudflare control plane access."""
         if not (self.internal_auth_secret or "").strip():
             raise ValueError("internal_auth_secret must be set")
+        return self
+
+    @model_validator(mode="after")
+    def validate_openai_session_compaction_settings(self) -> Self:
+        """Validate deterministic session compaction controls."""
+        max_items = self.openai_session_max_items
+        keep_items = self.openai_session_compaction_keep_items
+
+        if max_items is not None and max_items <= 0:
+            raise ValueError("openai_session_max_items must be > 0 when set")
+        if keep_items is not None and keep_items <= 0:
+            raise ValueError("openai_session_compaction_keep_items must be > 0 when set")
+        if max_items is not None and keep_items is not None and keep_items > max_items:
+            raise ValueError(
+                "openai_session_compaction_keep_items cannot exceed openai_session_max_items"
+            )
         return self
 
 

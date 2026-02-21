@@ -6,6 +6,14 @@ from collections.abc import Iterable
 from typing import Any
 
 
+def _safe_scalar(value: Any) -> str | int | float | bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str | int | float | bool):
+        return value
+    return str(value)
+
+
 def serialize_content_block(block: Any) -> dict[str, Any]:
     """Convert a content block into a JSON-serializable dict."""
     if isinstance(block, dict):
@@ -21,15 +29,15 @@ def serialize_content_block(block: Any) -> dict[str, Any]:
         if block_type == "tool_use":
             return {
                 "type": "tool_use",
-                "id": block.get("id"),
-                "name": block.get("name"),
+                "id": _safe_scalar(block.get("id")),
+                "name": _safe_scalar(block.get("name")),
                 "input": block.get("input", {}),
             }
         if block_type == "tool_result":
             return {
                 "type": "tool_result",
-                "tool_use_id": block.get("tool_use_id"),
-                "content": block.get("content"),
+                "tool_use_id": _safe_scalar(block.get("tool_use_id")),
+                "content": _safe_scalar(block.get("content")),
                 "is_error": bool(block.get("is_error", False)),
             }
         return dict(block)
@@ -57,6 +65,16 @@ def serialize_message(message: Any) -> dict[str, Any]:
         msg = dict(message)
         if msg.get("content") is not None:
             msg["content"] = _serialize_content(msg.get("content"))
+        for field in (
+            "trace_id",
+            "openai_trace_id",
+            "session_id",
+            "parent_tool_use_id",
+            "request_id",
+            "agent_type",
+        ):
+            if field in msg:
+                msg[field] = _safe_scalar(msg.get(field))
         return msg
 
     if hasattr(message, "model_dump"):
@@ -105,6 +123,7 @@ def build_final_summary(
                 "is_error": result_message.get("is_error"),
                 "num_turns": result_message.get("num_turns"),
                 "session_id": result_message.get("session_id"),
+                "openai_trace_id": result_message.get("openai_trace_id"),
                 "total_cost_usd": result_message.get("total_cost_usd"),
                 "usage": result_message.get("usage"),
                 "result": result_message.get("result"),

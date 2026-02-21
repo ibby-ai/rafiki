@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import glob
+import ipaddress
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from agents import Tool, WebSearchTool, function_tool
@@ -17,6 +20,55 @@ from modal_backend.mcp_tools.session_tools import (
     list_child_sessions,
     spawn_session,
 )
+
+_BASH_MAX_COMMAND_CHARS = 1000
+_BASH_MAX_TIMEOUT_SECONDS = 300
+_BASH_DENYLIST_PATTERNS = (
+    "rm -rf /",
+    "mkfs",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    ":(){:|:&};:",
+    "dd if=",
+    ">/dev/sd",
+    ">/dev/nvme",
+)
+_SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+
+
+def _validate_bash_command(command: str) -> None:
+    if not command or not command.strip():
+        raise ValueError("Bash command cannot be empty")
+    if len(command) > _BASH_MAX_COMMAND_CHARS:
+        raise ValueError("Bash command exceeds maximum length")
+
+    lowered = command.lower()
+    for pattern in _BASH_DENYLIST_PATTERNS:
+        if pattern in lowered:
+            raise ValueError(f"Bash command contains blocked pattern: {pattern}")
+
+
+def _is_private_host(host: str) -> bool:
+    if host in {"localhost", "localhost.localdomain"}:
+        return True
+    if not _SAFE_HOSTNAME_RE.match(host):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
+
+
+def _validate_web_fetch_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("WebFetch only supports http and https URLs")
+    if not parsed.hostname:
+        raise ValueError("WebFetch URL must include a hostname")
+    if _is_private_host(parsed.hostname):
+        raise ValueError("WebFetch URL points to a private or blocked host")
 
 
 @function_tool(name_override="Read")
@@ -44,12 +96,14 @@ def glob_files(pattern: str) -> list[str]:
 @function_tool(name_override="Bash")
 def run_bash(command: str, timeout_seconds: int = 60) -> str:
     """Run a bash command in the sandbox."""
+    _validate_bash_command(command)
+    timeout = max(1, min(timeout_seconds, _BASH_MAX_TIMEOUT_SECONDS))
     completed = subprocess.run(
         command,
         shell=True,
         capture_output=True,
         text=True,
-        timeout=timeout_seconds,
+        timeout=timeout,
     )
     output = completed.stdout or ""
     error = completed.stderr or ""
@@ -61,11 +115,14 @@ def run_bash(command: str, timeout_seconds: int = 60) -> str:
 @function_tool(name_override="WebFetch")
 def web_fetch(url: str, timeout_seconds: int = 15, max_chars: int = 20000) -> str:
     """Fetch a URL and return text content."""
-    resp = requests.get(url, timeout=timeout_seconds)
+    _validate_web_fetch_url(url)
+    timeout = max(1, min(timeout_seconds, 60))
+    max_len = max(256, min(max_chars, 100000))
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     text = resp.text
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[truncated]"
+    if len(text) > max_len:
+        return text[:max_len] + "\n\n[truncated]"
     return text
 
 

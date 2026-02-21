@@ -10,7 +10,9 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import modal
 from agents import ItemHelpers, Runner
@@ -42,6 +44,7 @@ from modal_backend.models.base import BaseSchema
 from modal_backend.models.responses import ErrorResponse, QueryResponse
 from modal_backend.security.cloudflare_auth import internal_auth_middleware
 from modal_backend.settings.settings import get_settings
+from modal_backend.tracing import langsmith_run_context
 
 app = FastAPI()
 app.add_middleware(RequestIdMiddleware)
@@ -184,6 +187,14 @@ def _resolve_session_id(body: QueryBody) -> str | None:
     return body.session_id
 
 
+def _resolve_trace_id(body: QueryBody, request_id: str | None) -> str:
+    if body.trace_id:
+        return body.trace_id
+    if request_id:
+        return request_id
+    return str(uuid4())
+
+
 def _build_system_prompt(agent_type: str, job_root: Path | None) -> str:
     config = get_agent_config(agent_type)
     system_prompt = config.system_prompt
@@ -252,6 +263,41 @@ def _usage_to_dict(run: RunResultStreaming) -> dict[str, Any] | None:
     }
 
 
+def _extract_openai_trace_id(run: RunResultStreaming | Any) -> str | None:
+    """Best-effort extraction of OpenAI trace/request correlation id."""
+    candidate_fields = (
+        "openai_trace_id",
+        "trace_id",
+        "response_id",
+        "openai_request_id",
+        "request_id",
+    )
+
+    def _extract_from_obj(value: Any) -> str | None:
+        if value is None:
+            return None
+        for field_name in candidate_fields:
+            field_value = None
+            if isinstance(value, dict):
+                field_value = value.get(field_name)
+            else:
+                field_value = getattr(value, field_name, None)
+            if isinstance(field_value, str) and field_value.strip():
+                return field_value.strip()
+        return None
+
+    direct = _extract_from_obj(run)
+    if direct:
+        return direct
+
+    raw_responses = getattr(run, "raw_responses", []) or []
+    for response in raw_responses:
+        response_trace_id = _extract_from_obj(response)
+        if response_trace_id:
+            return response_trace_id
+    return None
+
+
 def _json_safe_structured_output(value: Any) -> Any | None:
     """Return value only when it can be JSON-serialized as-is."""
     if value is None:
@@ -268,11 +314,13 @@ def _json_safe_structured_output(value: Any) -> Any | None:
 def _make_result_message(
     *,
     session_id: str,
+    trace_id: str,
     duration_ms: int,
     final_output: Any,
     run: RunResultStreaming,
     is_error: bool,
     subtype: str,
+    openai_trace_id: str | None = None,
 ) -> dict[str, Any]:
     usage = _usage_to_dict(run)
     final_text = (
@@ -288,6 +336,8 @@ def _make_result_message(
         "is_error": is_error,
         "num_turns": getattr(run, "current_turn", None),
         "session_id": session_id,
+        "trace_id": trace_id,
+        "openai_trace_id": openai_trace_id,
         "total_cost_usd": None,
         "usage": usage,
         "result": final_text,
@@ -299,7 +349,14 @@ def _make_result_message(
     }
 
 
-def _messages_from_run_event(event: Any, current_model: str) -> list[dict[str, Any]]:
+def _messages_from_run_event(
+    event: Any,
+    current_model: str,
+    *,
+    allowed_tools: list[str],
+    session_id: str,
+    trace_id: str,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     if getattr(event, "type", None) != "run_item_stream_event":
@@ -319,6 +376,8 @@ def _messages_from_run_event(event: Any, current_model: str) -> list[dict[str, A
                     "model": current_model,
                     "parent_tool_use_id": None,
                     "error": None,
+                    "session_id": session_id,
+                    "trace_id": trace_id,
                 }
             )
         return out
@@ -328,6 +387,26 @@ def _messages_from_run_event(event: Any, current_model: str) -> list[dict[str, A
         arguments = _safe_json_loads(getattr(raw, "arguments", None))
         call_id = getattr(raw, "call_id", None) or getattr(raw, "id", None)
         tool_name = getattr(raw, "name", "tool")
+        if not _is_tool_allowed(tool_name, allowed_tools):
+            out.append(
+                {
+                    "type": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": f"Blocked tool call: {tool_name}",
+                            "is_error": True,
+                        }
+                    ],
+                    "model": current_model,
+                    "parent_tool_use_id": call_id,
+                    "error": "tool_not_allowed",
+                    "session_id": session_id,
+                    "trace_id": trace_id,
+                }
+            )
+            return out
         out.append(
             {
                 "type": "assistant",
@@ -342,6 +421,8 @@ def _messages_from_run_event(event: Any, current_model: str) -> list[dict[str, A
                 "model": current_model,
                 "parent_tool_use_id": None,
                 "error": None,
+                "session_id": session_id,
+                "trace_id": trace_id,
             }
         )
         return out
@@ -364,6 +445,8 @@ def _messages_from_run_event(event: Any, current_model: str) -> list[dict[str, A
                 "model": current_model,
                 "parent_tool_use_id": call_id,
                 "error": None,
+                "session_id": session_id,
+                "trace_id": trace_id,
             }
         )
         return out
@@ -402,6 +485,8 @@ async def _execute_agent_query(
     job_root: Path | None,
     stop_event: asyncio.Event | None = None,
     agent_type: str = "default",
+    trace_id: str = "",
+    trace_metadata: dict[str, Any] | None = None,
     on_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     """Execute an agent query and collect serialized message objects."""
@@ -411,6 +496,8 @@ async def _execute_agent_query(
     if pre_registered_id:
         pre_registered_state = _preregister_active_client(pre_registered_id, stop_event)
 
+    config = get_agent_config(agent_type)
+    allowed_tools = config.get_effective_allowed_tools()
     system_prompt = _build_system_prompt(agent_type, job_root)
     agent, max_turns = _build_agent(agent_type, system_prompt)
 
@@ -424,13 +511,6 @@ async def _execute_agent_query(
         if pre_registered_id and pre_registered_id != resolved_session_id:
             if ACTIVE_CLIENTS.get(pre_registered_id) is pre_registered_state:
                 ACTIVE_CLIENTS.pop(pre_registered_id, None)
-
-        run = Runner.run_streamed(
-            agent,
-            question,
-            session=session,
-            max_turns=max_turns,
-        )
     except Exception:
         if pre_registered_id and ACTIVE_CLIENTS.get(pre_registered_id) is pre_registered_state:
             ACTIVE_CLIENTS.pop(pre_registered_id, None)
@@ -439,54 +519,91 @@ async def _execute_agent_query(
     messages: list[dict[str, Any]] = []
     started = time.time()
     current_model = str(getattr(agent, "model", _settings.openai_model_default))
-
-    active_state = _attach_run_to_active_client(resolved_session_id, run, stop_event)
-    watcher = asyncio.create_task(_watch_for_cancellation(run, resolved_session_id, stop_event))
-
+    metadata = dict(trace_metadata or {})
+    metadata.setdefault("trace_id", trace_id)
+    metadata.setdefault("agent_type", agent_type)
+    metadata.setdefault("session_id", resolved_session_id)
+    run: RunResultStreaming | None = None
     error: Exception | None = None
+    active_state: _ActiveClientState | None = None
+    watcher: asyncio.Task[Any] | None = None
     try:
-        async for event in run.stream_events():
-            if getattr(event, "type", None) == "agent_updated_stream_event":
-                new_agent = getattr(event, "new_agent", None)
-                if new_agent is not None:
-                    current_model = str(getattr(new_agent, "model", current_model))
+        with langsmith_run_context(metadata):
+            run = Runner.run_streamed(
+                agent,
+                question,
+                session=session,
+                max_turns=max_turns,
+            )
+            active_state = _attach_run_to_active_client(resolved_session_id, run, stop_event)
+            watcher = asyncio.create_task(
+                _watch_for_cancellation(run, resolved_session_id, stop_event)
+            )
 
-            event_messages = _messages_from_run_event(event, current_model)
-            for msg in event_messages:
-                messages.append(msg)
-                if on_message is not None:
-                    await on_message(msg)
+            try:
+                async for event in run.stream_events():
+                    if getattr(event, "type", None) == "agent_updated_stream_event":
+                        new_agent = getattr(event, "new_agent", None)
+                        if new_agent is not None:
+                            current_model = str(getattr(new_agent, "model", current_model))
+
+                    event_messages = _messages_from_run_event(
+                        event,
+                        current_model,
+                        allowed_tools=allowed_tools,
+                        session_id=resolved_session_id,
+                        trace_id=trace_id,
+                    )
+                    for msg in event_messages:
+                        messages.append(msg)
+                        if on_message is not None:
+                            await on_message(msg)
+            except Exception as exc:
+                error = exc
+            finally:
+                if watcher is not None:
+                    watcher.cancel()
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await watcher
+                if (
+                    active_state is not None
+                    and ACTIVE_CLIENTS.get(resolved_session_id) is active_state
+                ):
+                    ACTIVE_CLIENTS.pop(resolved_session_id, None)
     except Exception as exc:
         error = exc
-    finally:
-        watcher.cancel()
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            await watcher
-        if ACTIVE_CLIENTS.get(resolved_session_id) is active_state:
-            ACTIVE_CLIENTS.pop(resolved_session_id, None)
+
+    if run is None:
+        run = SimpleNamespace(raw_responses=[], current_turn=None, final_output=None)
 
     duration_ms = int((time.time() - started) * 1000)
 
     if error is not None:
+        openai_trace_id = _extract_openai_trace_id(run)
         result_message = _make_result_message(
             session_id=resolved_session_id,
+            trace_id=trace_id,
             duration_ms=duration_ms,
             final_output=str(error),
             run=run,
             is_error=True,
             subtype="error_during_execution",
+            openai_trace_id=openai_trace_id,
         )
     else:
+        openai_trace_id = _extract_openai_trace_id(run)
         cancelled = stop_event.is_set() or (
             _settings.enable_session_cancellation and is_session_cancelled(resolved_session_id)
         )
         result_message = _make_result_message(
             session_id=resolved_session_id,
+            trace_id=trace_id,
             duration_ms=duration_ms,
             final_output=getattr(run, "final_output", None),
             run=run,
             is_error=False,
             subtype="cancelled" if cancelled else "success",
+            openai_trace_id=openai_trace_id,
         )
 
     messages.append(result_message)
@@ -534,10 +651,16 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     job_root = _ensure_job_workspace(body.job_id)
     resolved_session_id = _resolve_session_id(body)
     request_id = getattr(request.state, "request_id", None)
+    trace_id = _resolve_trace_id(body, request_id)
 
     _logger.info(
         "agent.query.start",
-        extra={"job_id": body.job_id, "request_id": request_id, "session_id": resolved_session_id},
+        extra={
+            "job_id": body.job_id,
+            "request_id": request_id,
+            "session_id": resolved_session_id,
+            "trace_id": trace_id,
+        },
     )
 
     record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
@@ -556,6 +679,15 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             job_root=job_root,
             stop_event=stop_event,
             agent_type=body.agent_type,
+            trace_id=trace_id,
+            trace_metadata={
+                "trace_id": trace_id,
+                "request_id": request_id,
+                "session_id": resolved_session_id,
+                "job_id": body.job_id,
+                "user_id": body.user_id,
+                "tenant_id": body.tenant_id,
+            },
         )
 
         text_blocks = iter_text_blocks(messages)
@@ -564,6 +696,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
             final_text = "\n".join(text_blocks)
 
         summary = build_final_summary(result_message, final_text)
+        summary["trace_id"] = trace_id
 
         if _settings.enable_multiplayer_sessions and final_session_id:
             try:
@@ -626,12 +759,14 @@ async def query_agent_stream(body: QueryBody, request: Request):
         resolved_session_id = _resolve_session_id(body)
 
         request_id = getattr(request.state, "request_id", None)
+        trace_id = _resolve_trace_id(body, request_id)
         _logger.info(
             "agent.query_stream.start",
             extra={
                 "job_id": body.job_id,
                 "request_id": request_id,
                 "session_id": resolved_session_id,
+                "trace_id": trace_id,
             },
         )
 
@@ -662,6 +797,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
                                 "error": serialized.get("result") or "Agent execution failed",
                                 "session_id": serialized.get("session_id"),
                                 "subtype": serialized.get("subtype"),
+                                "trace_id": trace_id,
                             },
                         )
                     )
@@ -676,6 +812,15 @@ async def query_agent_stream(body: QueryBody, request: Request):
                     job_root=job_root,
                     stop_event=stop_event,
                     agent_type=body.agent_type,
+                    trace_id=trace_id,
+                    trace_metadata={
+                        "trace_id": trace_id,
+                        "request_id": request_id,
+                        "session_id": resolved_session_id,
+                        "job_id": body.job_id,
+                        "user_id": body.user_id,
+                        "tenant_id": body.tenant_id,
+                    },
                     on_message=on_message,
                 )
             )
@@ -695,7 +840,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 _, result_message, final_session_id = await run_task
             except Exception as exc:
                 error_event_emitted = True
-                yield _format_sse("error", {"error": str(exc)})
+                yield _format_sse("error", {"error": str(exc), "trace_id": trace_id})
                 return
 
             if result_message and result_message.get("is_error"):
@@ -707,6 +852,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
                             "error": result_message.get("result") or "Agent execution failed",
                             "session_id": result_message.get("session_id"),
                             "subtype": result_message.get("subtype"),
+                            "trace_id": trace_id,
                         },
                     )
                 return
@@ -717,6 +863,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
                 final_text = "\n".join(text_blocks)
 
             summary = build_final_summary(result_message, final_text)
+            summary["trace_id"] = trace_id
 
             if _settings.enable_multiplayer_sessions and final_session_id:
                 try:

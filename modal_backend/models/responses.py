@@ -43,6 +43,8 @@ class SummarySchema(BaseSchema):
 
     text: str | None = None
     is_complete: bool
+    trace_id: str | None = None
+    openai_trace_id: str | None = None
     subtype: str | None = None
     duration_ms: int | None = None
     duration_api_ms: int | None = None

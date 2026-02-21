@@ -4,8 +4,11 @@ Call ensure_langsmith_configured() once per process before creating agents/runne
 Safe to call multiple times; configuration is applied only once.
 """
 
+import contextlib
 import logging
 import os
+from collections.abc import Iterator
+from typing import Any
 
 from modal_backend.settings.settings import get_settings
 
@@ -41,4 +44,35 @@ def ensure_langsmith_configured() -> None:
         return
 
     set_trace_processors([OpenAIAgentsTracingProcessor()])
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
     _LANGSMITH_CONFIGURED = True
+    _logger.info("LangSmith tracing processor configured for OpenAI Agents SDK")
+
+
+@contextlib.contextmanager
+def langsmith_run_context(metadata: dict[str, Any] | None = None) -> Iterator[None]:
+    """Attach best-effort metadata context for LangSmith traces."""
+    if not metadata:
+        yield
+        return
+
+    settings = get_settings()
+    if not settings.enable_langsmith_tracing:
+        yield
+        return
+
+    try:
+        from langsmith import tracing_context
+    except ImportError:
+        yield
+        return
+
+    try:
+        with tracing_context(
+            metadata=metadata,
+            tags=["openai-agents-sdk", "modal-backend"],
+        ):
+            yield
+    except Exception:
+        _logger.warning("Failed to initialize LangSmith tracing context", exc_info=True)
+        yield

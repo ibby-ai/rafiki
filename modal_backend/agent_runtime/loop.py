@@ -21,7 +21,10 @@ async def run_agent(
     session_id: str | None = None,
     fork_session: bool = False,
 ):
-    """Execute a single agent query and print the response."""
+    """Execute a single agent query and print the response.
+
+    Session retrieval applies configured history compaction via ensure_session().
+    """
     config = get_agent_config(agent_type)
     max_turns = config.max_turns or _settings.agent_max_turns or 50
 
