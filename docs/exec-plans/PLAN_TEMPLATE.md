@@ -37,13 +37,13 @@ Describe, in prose, the sequence of edits and additions. For each edit, name the
 
 ## Concrete Steps
 
-Write each edit as a separate markdown file in the .agent/tasks/{feature_name}/ directory, with a YAML frontmatter linking it to its parent plan. For example:
+Write each edit as a separate markdown file in the docs/exec-plans/active/{feature_name}/tasks/ directory, with a YAML frontmatter linking it to its parent plan. For example:
 
 ```yaml
 ---
 task_id: 01
 plan_id: PLAN_{feature_name}
-plan_file: ../../plans/PLAN_{feature_name}.md
+plan_file: ../PLAN_{feature_name}.md
 title: Audit current implementation and define input mapping
 phase: Phase 1 - Data Model & Request Construction
 ```
