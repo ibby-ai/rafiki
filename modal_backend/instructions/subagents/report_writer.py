@@ -1,6 +1,6 @@
 """Report writer subagent prompt.
 
-This prompt is used by the report-writer AgentDefinition, which specializes
+This prompt is used by the report-writer handoff agent, which specializes
 in synthesizing research and data into comprehensive reports.
 """
 

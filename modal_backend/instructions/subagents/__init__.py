@@ -1,8 +1,8 @@
 """Subagent prompts for SDK native multi-agent orchestration.
 
-These prompts are used by AgentDefinition subagents, which run in-process
-within the same SDK client as the lead agent. This enables low-latency
-delegation via the built-in Task tool.
+These prompts are used by OpenAI Agents handoff targets, which run in-process
+within the same SDK runtime as the lead agent. This enables low-latency
+delegation via handoff tools.
 
 Exports:
     RESEARCHER_PROMPT: Prompt for research/web search subagent

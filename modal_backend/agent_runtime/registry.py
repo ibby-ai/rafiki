@@ -23,7 +23,7 @@ Usage:
     print(list_agent_types())  # ["default", "marketing", "research"]
 """
 
-from modal_backend.agent_runtime.base import AgentConfig, AgentExecutor, ClaudeAgentExecutor
+from modal_backend.agent_runtime.base import AgentConfig, AgentExecutor, OpenAIAgentExecutor
 
 
 class AgentRegistry:
@@ -97,7 +97,7 @@ class AgentRegistry:
     def get_executor(self, name: str) -> AgentExecutor:
         """Get an executor for an agent type.
 
-        Creates a ClaudeAgentExecutor configured for the specified agent type.
+        Creates an OpenAIAgentExecutor configured for the specified agent type.
 
         Args:
             name: The agent type name.
@@ -109,7 +109,7 @@ class AgentRegistry:
             ValueError: If no agent with that name is registered.
         """
         config = self.get(name)
-        return ClaudeAgentExecutor(config)
+        return OpenAIAgentExecutor(config)
 
     def list_agents(self) -> list[str]:
         """List all registered agent type names.

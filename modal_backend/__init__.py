@@ -20,7 +20,7 @@ Usage:
 """
 
 # Import submodules to ensure all Modal functions are registered
-# Note: mcp_tools module requires claude_agent_sdk which is only available in Modal containers
+# Note: mcp_tools module depends on openai-agents runtime extras in container builds.
 from modal_backend import agent_runtime, api, instructions, models, settings
 
 try:
@@ -36,7 +36,7 @@ try:
         "mcp_tools",
     ]
 except ImportError:
-    # claude_agent_sdk not available (local development/testing)
+    # openai-agents runtime dependencies not available (local development/testing)
     __all__ = [
         "agent_runtime",
         "api",

@@ -4,7 +4,7 @@ This package provides the multi-agent architecture with:
 - AgentConfig: Dataclass defining agent behavior
 - AgentExecutor: Abstract interface for agent execution
 - AgentRegistry: Singleton for managing agent types
-- build_agent_options: Central function for building ClaudeAgentOptions
+- build_agent_options: Central function for building OpenAI Agent configs
 
 Core exports for backward compatibility and common usage:
     from modal_backend.agent_runtime import build_agent_options
@@ -15,9 +15,11 @@ Core exports for backward compatibility and common usage:
 from modal_backend.agent_runtime.base import (
     AgentConfig,
     AgentExecutor,
-    ClaudeAgentExecutor,
     ExecutionContext,
+    OpenAIAgentExecutor,
+    SubAgentConfig,
     build_agent_options,
+    ensure_session,
 )
 
 # Re-export from registry.py
@@ -32,9 +34,11 @@ __all__ = [
     # Base classes and functions
     "AgentConfig",
     "AgentExecutor",
-    "ClaudeAgentExecutor",
+    "OpenAIAgentExecutor",
+    "SubAgentConfig",
     "ExecutionContext",
     "build_agent_options",
+    "ensure_session",
     # Registry functions
     "get_agent_config",
     "get_agent_executor",

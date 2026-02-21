@@ -4,7 +4,7 @@ Configuration and settings management using Pydantic Settings.
 This module handles environment variables, Modal secrets, and application settings.
 All settings can be configured via environment variables (case-insensitive).
 
-See CLAUDE.md and docs/configuration.md for usage guidance.
+See AGENTS.md and docs/configuration.md for usage guidance.
 """
 
 import os
@@ -26,8 +26,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Anthropic API configuration
-    anthropic_api_key: str = ""
+    # OpenAI API configuration
+    openai_api_key: str = ""
+    openai_model_default: str = Field(
+        default="gpt-4.1",
+        description="Default model for lead agents.",
+    )
+    openai_model_subagent: str = Field(
+        default="gpt-4.1-mini",
+        description="Default model for delegated sub-agents/handoffs.",
+    )
+    openai_session_db_path: str = Field(
+        default="/data/openai_agents_sessions.sqlite3",
+        description="SQLiteSession path used by openai-agents for conversation memory.",
+    )
 
     # Sandbox configuration
     sandbox_name: str = "svc-runner-8001"
@@ -61,8 +73,8 @@ class Settings(BaseSettings):
         description="Include the modal auth secret in sandbox/function secrets.",
     )
 
-    # LangSmith tracing (Claude Agent SDK)
-    # See: https://docs.langchain.com/langsmith/trace-claude-agent-sdk
+    # LangSmith tracing (OpenAI Agents SDK)
+    # See: https://docs.langchain.com/langsmith/trace-with-openai-agents-sdk
     enable_langsmith_tracing: bool = Field(
         default=False,
         description=(
@@ -558,7 +570,7 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
     Returns:
         List of Modal Secret objects.
     """
-    secrets = [modal.Secret.from_name("anthropic-secret", required_keys=["ANTHROPIC_API_KEY"])]
+    secrets = [modal.Secret.from_name("openai-secret", required_keys=["OPENAI_API_KEY"])]
     settings = get_settings()
 
     if include_admin:

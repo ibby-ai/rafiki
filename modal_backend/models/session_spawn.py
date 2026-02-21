@@ -10,7 +10,7 @@ Key Concepts:
     - Child Registry: Tracks parent-child relationships for lookup
 
 Sandbox Types:
-    - agent_sdk: Uses Claude Agent SDK for conversational research tasks.
+    - agent_sdk: Uses OpenAI Agents SDK for conversational research tasks.
                  Good for: research, analysis, information gathering
 
 Usage Flow:

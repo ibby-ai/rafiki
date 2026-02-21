@@ -984,7 +984,7 @@ def store_session_snapshot(
     resumes in a new sandbox.
 
     Args:
-        session_id: The Claude Agent SDK session ID to associate with this snapshot.
+        session_id: The OpenAI Agents session ID to associate with this snapshot.
         image_id: Modal Image object_id from sandbox.snapshot_filesystem().
         sandbox_name: Name of the sandbox that was snapshotted (e.g., "svc-runner-8001").
 
@@ -1040,7 +1040,7 @@ def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
     used to restore filesystem state when creating a new sandbox.
 
     Args:
-        session_id: The Claude Agent SDK session ID to look up.
+        session_id: The OpenAI Agents session ID to look up.
 
     Returns:
         Snapshot metadata dict if found, containing:
@@ -1956,7 +1956,7 @@ def cancel_session(
     causing the agent to terminate gracefully.
 
     Args:
-        session_id: The Claude Agent SDK session ID to cancel.
+        session_id: The OpenAI Agents session ID to cancel.
         requested_by: Optional identifier of who requested cancellation.
         reason: Optional human-readable reason for cancellation.
         expiry_seconds: Custom expiry time (defaults to settings.cancellation_expiry_seconds).

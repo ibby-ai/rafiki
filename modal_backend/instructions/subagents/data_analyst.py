@@ -1,6 +1,6 @@
 """Data analyst subagent prompt.
 
-This prompt is used by the data-analyst AgentDefinition, which specializes
+This prompt is used by the data-analyst handoff agent, which specializes
 in processing research findings, extracting data, and creating visualizations.
 """
 

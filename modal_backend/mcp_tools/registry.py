@@ -1,8 +1,14 @@
-"""Tool registry for managing MCP servers and allowed tools."""
+"""Tool registry for OpenAI Agents SDK tools."""
 
+from __future__ import annotations
+
+import glob
+import subprocess
+from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import create_sdk_mcp_server
+import requests
+from agents import Tool, WebSearchTool, function_tool
 
 from modal_backend.mcp_tools.calculate_tool import calculate
 from modal_backend.mcp_tools.session_tools import (
@@ -13,105 +19,152 @@ from modal_backend.mcp_tools.session_tools import (
 )
 
 
+@function_tool(name_override="Read")
+def read_file(path: str) -> str:
+    """Read a file from disk."""
+    file_path = Path(path).expanduser()
+    return file_path.read_text(encoding="utf-8")
+
+
+@function_tool(name_override="Write")
+def write_file(path: str, content: str) -> str:
+    """Write content to a file on disk."""
+    file_path = Path(path).expanduser()
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    return f"Wrote {len(content)} bytes to {file_path}"
+
+
+@function_tool(name_override="Glob")
+def glob_files(pattern: str) -> list[str]:
+    """Find files matching a glob pattern."""
+    return sorted(glob.glob(pattern, recursive=True))
+
+
+@function_tool(name_override="Bash")
+def run_bash(command: str, timeout_seconds: int = 60) -> str:
+    """Run a bash command in the sandbox."""
+    completed = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    output = completed.stdout or ""
+    error = completed.stderr or ""
+    if completed.returncode != 0:
+        return f"Exit code: {completed.returncode}\nSTDOUT:\n{output}\nSTDERR:\n{error}"
+    return output or error or "(command completed with no output)"
+
+
+@function_tool(name_override="WebFetch")
+def web_fetch(url: str, timeout_seconds: int = 15, max_chars: int = 20000) -> str:
+    """Fetch a URL and return text content."""
+    resp = requests.get(url, timeout=timeout_seconds)
+    resp.raise_for_status()
+    text = resp.text
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n[truncated]"
+    return text
+
+
 class ToolRegistry:
-    """Registry for MCP tool servers and allowed tools."""
+    """Registry for available tools and allowlist mapping."""
 
     def __init__(self):
         self._servers: dict[str, Any] = {}
         self._allowed_tools: list[str] = []
+        self._tool_map: dict[str, Tool] = {}
         self._initialize_defaults()
 
-    def _initialize_defaults(self):
-        """Initialize default MCP servers and allowed tools."""
-        # Create multi-tool server with utilities
-        multi_tool_server = create_sdk_mcp_server(
-            name="utilities", version="1.0.0", tools=[calculate]
-        )
-
-        # Create session management server for child session spawning
-        session_server = create_sdk_mcp_server(
-            name="sessions",
-            version="1.0.0",
-            tools=[
-                spawn_session,
-                check_session_status,
-                get_session_result,
-                list_child_sessions,
-            ],
-        )
-
-        self._servers = {
-            "utilities": multi_tool_server,
-            "sessions": session_server,
-        }
-
+    def _initialize_defaults(self) -> None:
+        self._servers = {}
         self._allowed_tools = [
-            # Built-in tools that may be available in runtime
             "Read",
             "Write",
+            "Glob",
+            "Bash",
             "WebSearch(*)",
             "WebFetch(*)",
-            # Custom MCP tools - utilities
             "mcp__utilities__calculate",
-            # Custom MCP tools - session spawning
             "mcp__sessions__spawn_session",
             "mcp__sessions__check_session_status",
             "mcp__sessions__get_session_result",
             "mcp__sessions__list_child_sessions",
         ]
+        self._tool_map = {
+            "Read": read_file,
+            "Write": write_file,
+            "Glob": glob_files,
+            "Bash": run_bash,
+            "WebFetch": web_fetch,
+            "mcp__utilities__calculate": calculate,
+            "mcp__sessions__spawn_session": spawn_session,
+            "mcp__sessions__check_session_status": check_session_status,
+            "mcp__sessions__get_session_result": get_session_result,
+            "mcp__sessions__list_child_sessions": list_child_sessions,
+        }
 
     def register_server(self, name: str, server: Any):
-        """Register an MCP server.
-
-        Args:
-            name: Server identifier.
-            server: MCP server instance.
-        """
         self._servers[name] = server
 
     def add_allowed_tool(self, tool_name: str):
-        """Add a tool to the allowed list.
-
-        Args:
-            tool_name: Tool identifier to allow.
-        """
         if tool_name not in self._allowed_tools:
             self._allowed_tools.append(tool_name)
 
     def get_servers(self) -> dict[str, Any]:
-        """Get all registered MCP servers.
-
-        Returns:
-            Dictionary mapping server names to server instances.
-        """
         return self._servers.copy()
 
     def get_allowed_tools(self) -> list[str]:
-        """Get list of allowed tool names.
-
-        Returns:
-            List of allowed tool identifiers.
-        """
         return self._allowed_tools.copy()
 
+    def build_tools_for_allowed(self, allowed_tools: list[str]) -> list[Tool]:
+        """Build concrete OpenAI tool objects from an allowlist."""
+        built: list[Tool] = []
+        added_ids: set[str] = set()
 
-# Global registry instance
+        def _add(tool: Tool, key: str) -> None:
+            if key in added_ids:
+                return
+            added_ids.add(key)
+            built.append(tool)
+
+        for allowed in allowed_tools:
+            if allowed == "WebSearch(*)":
+                _add(WebSearchTool(), "WebSearch")
+                continue
+            if allowed == "WebFetch(*)":
+                tool = self._tool_map.get("WebFetch")
+                if tool:
+                    _add(tool, "WebFetch")
+                continue
+
+            # Exact matches first
+            if allowed in self._tool_map:
+                _add(self._tool_map[allowed], allowed)
+                continue
+
+            # Support wildcard prefixes from legacy allowlists
+            if allowed.endswith("(*)"):
+                prefix = allowed[:-3]
+                for name, tool in self._tool_map.items():
+                    if name == prefix or name.startswith(prefix):
+                        _add(tool, name)
+
+        return built
+
+
 _registry = ToolRegistry()
 
 
 def get_mcp_servers() -> dict[str, Any]:
-    """Get all registered MCP servers.
-
-    Returns:
-        Dictionary mapping server names to server instances.
-    """
     return _registry.get_servers()
 
 
 def get_allowed_tools() -> list[str]:
-    """Get list of allowed tool names.
-
-    Returns:
-        List of allowed tool identifiers.
-    """
     return _registry.get_allowed_tools()
+
+
+def build_tools_for_allowed(allowed_tools: list[str]) -> list[Tool]:
+    return _registry.build_tools_for_allowed(allowed_tools)

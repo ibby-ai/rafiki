@@ -50,7 +50,7 @@ def test_job_status_response_with_metrics():
         duration_ms=1200,
         agent_duration_ms=1100,
         tool_call_count=2,
-        models=["claude-3.5-sonnet"],
+        models=["gpt-4.1"],
     )
     assert response.duration_ms == 1200
     assert response.agent_duration_ms == 1100

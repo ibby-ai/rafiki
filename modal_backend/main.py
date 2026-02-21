@@ -195,38 +195,22 @@ def _add_internal_auth_header(request: Request, headers: dict[str, str]) -> None
     headers[INTERNAL_AUTH_HEADER] = internal_auth
 
 
-def _base_anthropic_sdk_image() -> modal.Image:
-    """Build a base image with Python, FastAPI, uvicorn, httpx and Claude SDK.
-
-    - Uses Debian slim with Python 3.11
-    - Installs `claude-agent-sdk` plus FastAPI/uvicorn/httpx
-    - Installs Node.js and `@anthropic-ai/claude-agent-sdk` (Agent SDK dependency)
-    - Installs Claude Code CLI via the official curl installer
-    - Sets `/root/app` as the workdir and copies the local project into place
-    """
+def _base_openai_agents_image() -> modal.Image:
+    """Build a base image with Python, FastAPI, uvicorn, httpx and openai-agents."""
     return (
         modal.Image.debian_slim(python_version="3.11")
         .pip_install(
-            "claude-agent-sdk",
+            "openai-agents==0.9.2",
             "fastapi",
             "uvicorn",
             "httpx",
-            "langsmith[claude-agent-sdk]",
+            "langsmith[openai-agents]>=0.3.15",
         )
         .pip_install("uv")
-        .apt_install("curl")
-        .run_commands(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
-            "apt-get install -y nodejs",
-            "npm install -g @anthropic-ai/claude-agent-sdk",  # Needed for Agent SDK
-        )
         .env(
             {
                 "AGENT_FS_ROOT": "/data",
-                "PATH": (
-                    "/root/.local/bin:/root/.claude/bin:"
-                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                ),
+                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             }
         )
         .workdir("/root/app")
@@ -773,10 +757,10 @@ def _extract_job_metrics(result: dict) -> dict[str, object]:
             - num_turns: Number of conversation turns in the agent loop
             - session_id: Agent session identifier for resumption
             - tool_call_count: Number of tool invocations (counted from messages)
-            - models: Sorted list of unique model IDs used (e.g., ["claude-sonnet-4"])
+            - models: Sorted list of unique model IDs used (e.g., ["gpt-4.1"])
 
     Metric Sources:
-        From summary dict (provided by Claude Agent SDK):
+        From summary dict (provided by the OpenAI Agents runtime):
             - duration_ms, duration_api_ms: Timing metrics
             - total_cost_usd: Cost calculation
             - usage: Token counts
@@ -799,11 +783,11 @@ def _extract_job_metrics(result: dict) -> dict[str, object]:
             },
             "messages": [
                 {
-                    "model": "claude-sonnet-4",
+                    "model": "gpt-4.1",
                     "content": [{"type": "tool_use", "name": "calculate"}]
                 },
                 {
-                    "model": "claude-sonnet-4",
+                    "model": "gpt-4.1",
                     "content": [{"type": "text", "text": "result"}]
                 }
             ]
@@ -818,7 +802,7 @@ def _extract_job_metrics(result: dict) -> dict[str, object]:
             "num_turns": 3,
             "session_id": "sess_abc123",
             "tool_call_count": 1,
-            "models": ["claude-sonnet-4"]
+            "models": ["gpt-4.1"]
         }
 
     Usage:
@@ -999,7 +983,7 @@ def _maybe_trigger_webhook(job_id: str, event: str) -> None:
 
 
 # Create image and secrets
-agent_sdk_image = _base_anthropic_sdk_image()
+agent_sdk_image = _base_openai_agents_image()
 agent_sdk_secrets = get_modal_secrets()
 
 
@@ -1826,7 +1810,7 @@ async def stop_session(
     signals to the agent that it should stop working.
 
     Args:
-        session_id: The Claude Agent SDK session ID to stop.
+        session_id: The OpenAI Agents session ID to stop.
         body: Optional request body with mode, reason and requester info.
 
     Returns:
@@ -1917,7 +1901,7 @@ async def get_session_stop_status(session_id: str) -> SessionStopResponse:
     that the session has no active cancellation.
 
     Args:
-        session_id: The Claude Agent SDK session ID to check.
+        session_id: The OpenAI Agents session ID to check.
 
     Returns:
         SessionStopResponse with current cancellation status.
@@ -2798,7 +2782,7 @@ def get_or_start_background_sandbox(
         1. The snapshot image is used instead of the base agent_sdk_image
         2. This restores installed packages, downloaded files, and other
            filesystem changes from the previous session
-        3. The Claude Agent SDK session is resumed via its resume= parameter
+        3. The OpenAI SQLite session memory is resumed via `session_id`
            (handled in the controller)
     """
     global SANDBOX, SERVICE_URL
@@ -3283,8 +3267,8 @@ class AgentRunner:
             config.get_effective_allowed_tools(),
             system_prompt,
             subagents=config.get_subagents(),
-            max_turns=max_turns,
         )
+        self._max_turns = max_turns
 
     @modal.enter(snap=False)
     def _post_restore(self) -> None:
@@ -3306,8 +3290,8 @@ class AgentRunner:
                 config.get_effective_allowed_tools(),
                 system_prompt,
                 subagents=config.get_subagents(),
-                max_turns=max_turns,
             )
+            self._max_turns = max_turns
 
     @modal.exit()
     def _cleanup(self) -> None:
@@ -3318,13 +3302,24 @@ class AgentRunner:
     def run(self, question: str = DEFAULT_QUESTION) -> None:
         """Execute an agent query and stream responses to stdout."""
         import anyio
-        from claude_agent_sdk import ClaudeSDKClient
+        from agents import Runner
+
+        from modal_backend.agent_runtime import ensure_session
 
         async def _run() -> None:
-            async with ClaudeSDKClient(options=self._options) as client:
-                await client.query(question)
-                async for msg in client.receive_response():
-                    print(msg)
+            session, session_id = await ensure_session(
+                None,
+                fork_session=False,
+                db_path=_settings.openai_session_db_path,
+            )
+            result = await Runner.run(
+                self._options,
+                question,
+                session=session,
+                max_turns=self._max_turns or 50,
+            )
+            print(f"session_id={session_id}")
+            print(result.final_output)
 
         anyio.run(_run)
 
@@ -3845,7 +3840,7 @@ def snapshot_session_state(session_id: str, sandbox_id: str | None = None) -> di
     allowing per-session restoration.
 
     Args:
-        session_id: The Claude Agent SDK session ID to associate with this snapshot.
+        session_id: The OpenAI Agents session ID to associate with this snapshot.
 
     Returns:
         Dict with snapshot info:

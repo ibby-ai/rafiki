@@ -1,109 +1,94 @@
-"""Serialization helpers for Claude Agent SDK messages."""
+"""Serialization helpers for provider-neutral agent messages."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Any
 
-from claude_agent_sdk.types import (
-    AssistantMessage,
-    ContentBlock,
-    Message,
-    ResultMessage,
-    StreamEvent,
-    SystemMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
 
-
-def serialize_content_block(block: ContentBlock) -> dict[str, Any]:
+def serialize_content_block(block: Any) -> dict[str, Any]:
     """Convert a content block into a JSON-serializable dict."""
-    if isinstance(block, TextBlock):
-        return {"type": "text", "text": block.text}
-    if isinstance(block, ThinkingBlock):
-        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
-    if isinstance(block, ToolUseBlock):
-        return {
-            "type": "tool_use",
-            "id": block.id,
-            "name": block.name,
-            "input": block.input,
-        }
-    if isinstance(block, ToolResultBlock):
-        return {
-            "type": "tool_result",
-            "tool_use_id": block.tool_use_id,
-            "content": block.content,
-            "is_error": block.is_error,
-        }
-    raise TypeError(f"Unsupported content block type: {type(block)!r}")
+    if isinstance(block, dict):
+        block_type = block.get("type")
+        if block_type == "text":
+            return {"type": "text", "text": block.get("text", "")}
+        if block_type == "thinking":
+            return {
+                "type": "thinking",
+                "thinking": block.get("thinking", ""),
+                "signature": block.get("signature", ""),
+            }
+        if block_type == "tool_use":
+            return {
+                "type": "tool_use",
+                "id": block.get("id"),
+                "name": block.get("name"),
+                "input": block.get("input", {}),
+            }
+        if block_type == "tool_result":
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.get("tool_use_id"),
+                "content": block.get("content"),
+                "is_error": bool(block.get("is_error", False)),
+            }
+        return dict(block)
+
+    # Fallback for unknown objects
+    if hasattr(block, "model_dump"):
+        dumped = block.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    return {"type": "unknown", "value": str(block)}
 
 
-def _serialize_content(value: str | list[ContentBlock]) -> str | list[dict[str, Any]]:
+def _serialize_content(value: Any) -> Any:
     if isinstance(value, list):
         return [serialize_content_block(block) for block in value]
     return value
 
 
-def serialize_message(message: Message) -> dict[str, Any]:
-    """Convert a Claude Agent SDK message into a JSON-serializable dict."""
-    if isinstance(message, AssistantMessage):
-        return {
-            "type": "assistant",
-            "content": [serialize_content_block(block) for block in message.content],
-            "model": message.model,
-            "parent_tool_use_id": message.parent_tool_use_id,
-            "error": message.error,
-        }
-    if isinstance(message, UserMessage):
-        return {
-            "type": "user",
-            "content": _serialize_content(message.content),
-            "uuid": message.uuid,
-            "parent_tool_use_id": message.parent_tool_use_id,
-        }
-    if isinstance(message, SystemMessage):
-        return {"type": "system", "subtype": message.subtype, "data": message.data}
-    if isinstance(message, ResultMessage):
-        return {
-            "type": "result",
-            "subtype": message.subtype,
-            "duration_ms": message.duration_ms,
-            "duration_api_ms": message.duration_api_ms,
-            "is_error": message.is_error,
-            "num_turns": message.num_turns,
-            "session_id": message.session_id,
-            "total_cost_usd": message.total_cost_usd,
-            "usage": message.usage,
-            "result": message.result,
-            "structured_output": message.structured_output,
-        }
-    if isinstance(message, StreamEvent):
-        return {
-            "type": "stream_event",
-            "uuid": message.uuid,
-            "session_id": message.session_id,
-            "event": message.event,
-            "parent_tool_use_id": message.parent_tool_use_id,
-        }
+def serialize_message(message: Any) -> dict[str, Any]:
+    """Convert a runtime message into a JSON-serializable dict.
+
+    For OpenAI migration we keep wire compatibility by accepting already-serialized dicts.
+    """
+    if isinstance(message, dict):
+        msg = dict(message)
+        if msg.get("content") is not None:
+            msg["content"] = _serialize_content(msg.get("content"))
+        return msg
+
+    if hasattr(message, "model_dump"):
+        dumped = message.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+
     raise TypeError(f"Unsupported message type: {type(message)!r}")
 
 
-def iter_text_blocks(messages: Iterable[Message]) -> list[str]:
+def iter_text_blocks(messages: Iterable[Any]) -> list[str]:
     """Extract text blocks from assistant messages in order."""
     parts: list[str] = []
     for message in messages:
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    parts.append(block.text)
+        msg = serialize_message(message)
+        if msg.get("type") != "assistant":
+            continue
+
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+        elif isinstance(content, str):
+            parts.append(content)
     return parts
 
 
 def build_final_summary(
-    result_message: ResultMessage | None,
+    result_message: dict[str, Any] | None,
     final_text: str | None,
 ) -> dict[str, Any]:
     """Build a consistent summary for the completed agent run."""
@@ -114,16 +99,17 @@ def build_final_summary(
     if result_message:
         summary.update(
             {
-                "subtype": result_message.subtype,
-                "duration_ms": result_message.duration_ms,
-                "duration_api_ms": result_message.duration_api_ms,
-                "is_error": result_message.is_error,
-                "num_turns": result_message.num_turns,
-                "session_id": result_message.session_id,
-                "total_cost_usd": result_message.total_cost_usd,
-                "usage": result_message.usage,
-                "result": result_message.result,
-                "structured_output": result_message.structured_output,
+                "subtype": result_message.get("subtype"),
+                "duration_ms": result_message.get("duration_ms"),
+                "duration_api_ms": result_message.get("duration_api_ms"),
+                "is_error": result_message.get("is_error"),
+                "num_turns": result_message.get("num_turns"),
+                "session_id": result_message.get("session_id"),
+                "total_cost_usd": result_message.get("total_cost_usd"),
+                "usage": result_message.get("usage"),
+                "result": result_message.get("result"),
+                "structured_output": result_message.get("structured_output"),
             }
         )
-    return summary
+
+    return {k: v for k, v in summary.items() if v is not None or k in {"text", "is_complete"}}

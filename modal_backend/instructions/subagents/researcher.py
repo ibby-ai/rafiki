@@ -1,6 +1,6 @@
 """Researcher subagent prompt.
 
-This prompt is used by the researcher AgentDefinition, which specializes
+This prompt is used by the researcher handoff agent, which specializes
 in gathering information from web sources and documenting findings.
 """
 
