@@ -17,6 +17,10 @@ Repository knowledge is the system of record. Agents should route work through t
 - Architecture and system design: `docs/design-docs/`
 - Mandatory sub-agent planning/review/finalization workflow: `docs/AGENT_COLLABORATION_PROCESS.md`
 - Operational references and runbooks: `docs/references/`
+  - Canonical Cloudflare ↔ Modal E2E runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
+  - Cloudflare runtime entrypoint index: `docs/references/runtime-docs-overview.md`
+- Canonical session token helper for E2E/public Worker auth:
+  - `edge-control-plane/scripts/generate-session-token.js`
 - Execution planning and tracking:
   - `docs/exec-plans/PLAN_TEMPLATE.md`
   - `docs/exec-plans/active/<feature>/`
@@ -32,6 +36,7 @@ Repository knowledge is the system of record. Agents should route work through t
   - Update architecture docs in `docs/design-docs/` if design changed
 - Bug fix or small implementation change:
   - Update relevant reference docs in `docs/references/`
+  - If Cloudflare ↔ Modal E2E behavior/docs are touched, update `docs/references/runbooks/cloudflare-modal-e2e.md` and related links in the same PR
   - If multi-step/high-risk, track with an active ExecPlan
 - Refactor or migration:
   - Create/update an active ExecPlan and link impacted architecture docs

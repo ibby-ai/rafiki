@@ -23,6 +23,8 @@ edge-control-plane/
 │   └── durable-objects/
 │       ├── SessionAgent.ts           # Per-session DO
 │       └── EventBus.ts               # Real-time event bus DO
+├── scripts/
+│   └── generate-session-token.js     # Session token helper for E2E tests
 ├── wrangler.jsonc                    # Cloudflare configuration
 ├── package.json                      # Dependencies
 ├── tsconfig.json                     # TypeScript config
@@ -33,6 +35,10 @@ edge-control-plane/
 ```
 
 ## Quick Start
+
+Canonical E2E setup and verification sequence:
+
+- [Canonical E2E Runbook](../docs/references/runbooks/cloudflare-modal-e2e.md)
 
 ### Prerequisites
 
@@ -209,21 +215,27 @@ for WebSocket connections). Phase 3 supports **session tokens only**.
 
 ### Session Tokens
 
-```typescript
-const token = generateSessionToken({
-  user_id: "user-123",
-  tenant_id: "tenant-456",
-  session_ids: ["sess_abc"],
-  expires_at: Date.now() + 3600000, // 1 hour
-});
-
-// Use in requests
-fetch("/query", {
-  headers: { Authorization: `Bearer ${token}` },
-});
+```bash
+TOKEN="$(node ./scripts/generate-session-token.js \
+  --user-id user-123 \
+  --tenant-id tenant-456 \
+  --session-id sess_abc \
+  --ttl-seconds 3600 \
+  --secret "$SESSION_SIGNING_SECRET")"
 ```
 
-See [AUTH.md](./AUTH.md) for detailed authentication design.
+Use it in requests:
+
+```bash
+curl -X POST http://localhost:8787/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is 2+2?","session_id":"sess_abc"}'
+```
+
+See [AUTH.md](./AUTH.md) for token format details and
+[Canonical E2E Runbook](../docs/references/runbooks/cloudflare-modal-e2e.md)
+for the full flow.
 
 ## WebSocket Events
 

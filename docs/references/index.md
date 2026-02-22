@@ -3,6 +3,7 @@
 Operational and implementation references live here.
 
 ## Runtime References
+- [Canonical E2E Runbook (Cloudflare <-> Modal)](./runbooks/cloudflare-modal-e2e.md)
 - [Runtime Docs Overview](./runtime-docs-overview.md)
 - [API Usage](./api-usage.md)
 - [Configuration](./configuration.md)

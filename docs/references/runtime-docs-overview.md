@@ -26,14 +26,18 @@ If startup fails, verify:
 
 ## Start Here
 
-1. [Architecture Overview](../design-docs/architecture-overview.md)
-2. [Controllers](../design-docs/controllers-background-service.md)
-3. [Configuration](./configuration.md)
-4. [API Usage](./api-usage.md)
+1. [Canonical E2E Runbook (Cloudflare <-> Modal)](./runbooks/cloudflare-modal-e2e.md)
+2. [Architecture Overview](../design-docs/architecture-overview.md)
+3. [Cloudflare + Modal Hybrid Architecture](../design-docs/cloudflare-hybrid-architecture.md)
+4. [Controllers](../design-docs/controllers-background-service.md)
+5. [Configuration](./configuration.md)
+6. [API Usage](./api-usage.md)
 
 ## Core Docs
 
+- [Canonical E2E Runbook](./runbooks/cloudflare-modal-e2e.md)
 - [Architecture Overview](../design-docs/architecture-overview.md)
+- [Cloudflare + Modal Hybrid Architecture](../design-docs/cloudflare-hybrid-architecture.md)
 - [Controllers: Background Service](../design-docs/controllers-background-service.md)
 - [Multi-Agent Architecture](../design-docs/multi-agent-architecture.md)
 - [Configuration Guide](./configuration.md)

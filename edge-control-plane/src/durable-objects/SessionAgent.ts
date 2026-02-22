@@ -144,26 +144,41 @@ export class SessionAgent extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const metadata = this.sessionState;
     
-    const entries: [string, string][] = [
+    const requiredEntries: [string, string][] = [
       ["session_id", metadata.session_id],
       ["created_at", metadata.created_at.toString()],
       ["last_active_at", metadata.last_active_at.toString()],
       ["status", metadata.status]
     ];
-    
-    if (metadata.session_key) entries.push(["session_key", metadata.session_key]);
-    if (metadata.user_id) entries.push(["user_id", metadata.user_id]);
-    if (metadata.tenant_id) entries.push(["tenant_id", metadata.tenant_id]);
-    if (metadata.current_prompt) entries.push(["current_prompt", metadata.current_prompt]);
-    if (metadata.modal_sandbox_id) entries.push(["modal_sandbox_id", metadata.modal_sandbox_id]);
-    if (metadata.modal_sandbox_url) entries.push(["modal_sandbox_url", metadata.modal_sandbox_url]);
-    
-    for (const [key, value] of entries) {
+
+    const optionalEntries: Array<[string, string | undefined]> = [
+      ["session_key", metadata.session_key],
+      ["user_id", metadata.user_id],
+      ["tenant_id", metadata.tenant_id],
+      ["current_prompt", metadata.current_prompt],
+      ["modal_sandbox_id", metadata.modal_sandbox_id],
+      ["modal_sandbox_url", metadata.modal_sandbox_url]
+    ];
+
+    for (const [key, value] of requiredEntries) {
       sql.exec(
         `INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)`,
         key,
         value
       );
+    }
+
+    for (const [key, value] of optionalEntries) {
+      if (value && value.length > 0) {
+        sql.exec(
+          `INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)`,
+          key,
+          value
+        );
+      } else {
+        // Clear stale optional metadata values (e.g. current_prompt after completion).
+        sql.exec(`DELETE FROM session_metadata WHERE key = ?`, key);
+      }
     }
   }
 

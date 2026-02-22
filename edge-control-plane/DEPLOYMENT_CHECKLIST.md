@@ -2,6 +2,8 @@
 
 Use this checklist to deploy the Cloudflare control plane.
 
+Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
+
 ## Pre-Deployment
 
 ### Cloudflare Account Setup
@@ -128,8 +130,13 @@ curl -X POST https://your-worker.workers.dev/query \
   -d '{"question":"Test"}'
 # Expected: 401 Unauthorized
 
-# Generate a test token (see AUTH.md)
-# Then test with valid token
+# Generate a test token (concrete command)
+TOKEN="$(node ./scripts/generate-session-token.js \
+  --user-id deploy-check-user \
+  --tenant-id deploy-check-tenant \
+  --session-id test-session-123 \
+  --ttl-seconds 3600 \
+  --secret "$SESSION_SIGNING_SECRET")"
 ```
 
 ### Test Query Endpoint
@@ -137,7 +144,7 @@ curl -X POST https://your-worker.workers.dev/query \
 ```bash
 # Replace <token> with valid session token
 curl -X POST https://your-worker.workers.dev/query \
-  -H "Authorization: Bearer <token>" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "question": "What is 2+2?",
@@ -153,8 +160,7 @@ curl -X POST https://your-worker.workers.dev/query \
 npm install -g wscat
 
 # Connect to streaming endpoint
-wscat -c "wss://your-worker.workers.dev/query_stream" \
-  -H "Authorization: Bearer <token>"
+wscat -c "wss://your-worker.workers.dev/query_stream?session_id=test-123&token=$TOKEN"
 
 # Send query
 > {"question":"What is the capital of Canada?","session_id":"test-123"}
@@ -244,7 +250,7 @@ wscat -c "wss://your-worker.workers.dev/ws?user_id=test-user&session_ids=test-12
 - [ ] Update internal wiki with deployment info
 - [ ] Document API endpoints for team
 - [ ] Share authentication guide
-- [ ] Create runbook for common issues
+- [ ] Confirm docs point to canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
 
 ## Rollout Strategy (Phase 3 Cloudflare-first)
 

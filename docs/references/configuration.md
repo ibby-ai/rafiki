@@ -37,6 +37,43 @@ Control-plane traffic requires `internal-auth-secret` with `INTERNAL_AUTH_SECRET
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<shared-secret>
 ```
 
+## Cloudflare <-> Modal E2E Environment Baseline
+
+Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
+
+### Required Worker-side configuration
+
+- `MODAL_API_BASE_URL` (`edge-control-plane/wrangler.jsonc`)
+- `SESSION_CACHE` KV binding
+- `SESSION_SIGNING_SECRET` secret
+- `INTERNAL_AUTH_SECRET` secret
+
+### Required Modal-side configuration
+
+- `internal-auth-secret` Modal secret containing `INTERNAL_AUTH_SECRET`
+- value must exactly match the Worker `INTERNAL_AUTH_SECRET`
+
+### Standard local exports
+
+```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter
+
+export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
+export DEV_URL="$MODAL_API_BASE_URL"
+export WORKER_URL="http://localhost:8787"
+```
+
+### Generate a test session token
+
+```bash
+TOKEN="$(node edge-control-plane/scripts/generate-session-token.js \
+  --user-id e2e-user \
+  --tenant-id e2e-tenant \
+  --session-id sess-e2e-001 \
+  --ttl-seconds 3600 \
+  --secret "$SESSION_SIGNING_SECRET")"
+```
+
 ## Core OpenAI Agent Settings
 
 Defined in `modal_backend/settings/settings.py`:

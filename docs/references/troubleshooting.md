@@ -2,11 +2,17 @@
 
 This guide covers common issues you may encounter when working with the agent sandbox and how to resolve them.
 
+Canonical E2E flow reference: `docs/references/runbooks/cloudflare-modal-e2e.md`
+
 ## Quick Diagnostics
 
 Before diving into specific issues, run these checks:
 
 ```bash
+# Derive baseline URLs from checked-in Worker config
+export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
+export DEV_URL="$MODAL_API_BASE_URL"
+
 # 1. Verify Modal is configured
 modal setup
 
@@ -119,7 +125,16 @@ modal setup
 **Solutions:**
 
 1. **Include the Authorization header** on all public requests.
-2. **Verify session tokens** are signed with `SESSION_SIGNING_SECRET`.
+2. **Regenerate token using the helper script**:
+   ```bash
+   TOKEN="$(node edge-control-plane/scripts/generate-session-token.js \
+     --user-id e2e-user \
+     --tenant-id e2e-tenant \
+     --session-id sess-e2e-001 \
+     --ttl-seconds 3600 \
+     --secret "$SESSION_SIGNING_SECRET")"
+   ```
+3. **Verify `session_id` in requests is authorized by token claims**.
 
 ---
 
