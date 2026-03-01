@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide covers common issues you may encounter when working with the agent sandbox and how to resolve them.
+This guide covers common issues you may encounter when working with Rafiki and how to resolve them.
 
 Canonical E2E flow reference: `docs/references/runbooks/cloudflare-modal-e2e.md`
 

@@ -269,7 +269,7 @@ oracle --prompt "Perform a security audit of this codebase. Look for:
 ### 2. Architecture Review
 
 ```bash
-oracle --prompt "Review the architecture of this Modal agent sandbox:
+oracle --prompt "Review the architecture of this Rafiki:
 - Analyze the dual-sandbox pattern (Agent SDK vs CLI)
 - Evaluate cold-start mitigation strategies
 - Assess scalability of the warm pool approach

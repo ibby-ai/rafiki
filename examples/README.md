@@ -1,6 +1,6 @@
 # Examples
 
-Runnable examples demonstrating the key capabilities of the agent-sandbox-starter project.
+Runnable examples demonstrating the key capabilities of the rafiki project.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ Best for: Low-latency APIs, interactive applications
 Set these before running HTTP examples:
 
 ```bash
-export DEV_URL="https://your-org--test-sandbox-http-app-dev.modal.run"
+export DEV_URL="https://your-org--modal-backend-http-app-dev.modal.run"
 ```
 
 ## Related Documentation

@@ -2,7 +2,7 @@
 
 ## Purpose / Big Picture
 
-Introduce advanced Modal platform features to improve persistence, security, scaling, resiliency, and runtime efficiency of the agent sandbox. The user-visible result is faster warm responses, safer public endpoints, smoother burst handling, and more durable artifact storage without needing to terminate the background sandbox. This plan also adds memory snapshots and resource tuning for improved cold starts and throughput. Custom domains are noted as a future enhancement (deferred).
+Introduce advanced Modal platform features to improve persistence, security, scaling, resiliency, and runtime efficiency of Rafiki. The user-visible result is faster warm responses, safer public endpoints, smoother burst handling, and more durable artifact storage without needing to terminate the background sandbox. This plan also adds memory snapshots and resource tuning for improved cold starts and throughput. Custom domains are noted as a future enhancement (deferred).
 
 ## Suprises & Discoveries
 

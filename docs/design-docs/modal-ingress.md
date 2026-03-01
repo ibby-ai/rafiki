@@ -32,17 +32,17 @@ When you deploy with `modal serve` or `modal deploy`, Modal generates public URL
 
 **Development:**
 ```
-https://<org>--test-sandbox-http-app-dev.modal.run
+https://<org>--modal-backend-http-app-dev.modal.run
 ```
 
 **Production:**
 ```
-https://<org>--test-sandbox-http-app.modal.run
+https://<org>--modal-backend-http-app.modal.run
 ```
 
 **Components:**
 - `<org>`: Your Modal organization name
-- `test-sandbox`: Your Modal app name (from `modal.App("test-sandbox")`)
+- `modal-backend`: Your Modal app name (from `modal.App("modal-backend")`)
 - `http-app`: Function name (from `@modal.asgi_app()` decorator)
 - `-dev`: Suffix for development deployments (omitted in production)
 
@@ -60,7 +60,7 @@ implementation steps.
                             │
                             │ HTTPS Request
                             │ POST /query
-                            │ Host: <org>--test-sandbox-http-app-dev.modal.run
+                            │ Host: <org>--modal-backend-http-app-dev.modal.run
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              Modal Infrastructure (Managed)                   │
@@ -143,7 +143,7 @@ def http_app():
 ### 1. Client Makes Request
 
 ```bash
-curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/query' \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is the capital of Canada?"}'
 ```
@@ -157,12 +157,12 @@ curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
 ### 3. Routing Decision
 
 Modal examines:
-- **Host header:** `<org>--test-sandbox-http-app-dev.modal.run`
-- **App name:** Extracted as `test-sandbox`
+- **Host header:** `<org>--modal-backend-http-app-dev.modal.run`
+- **App name:** Extracted as `modal-backend`
 - **Function name:** Extracted as `http-app` (from decorator)
 - **Path:** `/query`
 
-Modal routes to: `test-sandbox` app → `http_app` function → `/query` endpoint
+Modal routes to: `modal-backend` app → `http_app` function → `/query` endpoint
 
 ### 4. Authentication (Optional)
 

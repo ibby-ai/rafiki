@@ -56,7 +56,7 @@ Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
 ### Standard local exports
 
 ```bash
-cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 
 export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
 export DEV_URL="$MODAL_API_BASE_URL"

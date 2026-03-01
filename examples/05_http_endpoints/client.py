@@ -1,7 +1,7 @@
-"""Python client example for agent-sandbox-starter API.
+"""Python client example for rafiki API.
 
 Usage:
-    python client.py https://your-org--test-sandbox-http-app-dev.modal.run
+    python client.py https://your-org--modal-backend-http-app-dev.modal.run
 """
 
 import json
@@ -78,7 +78,7 @@ def get_service_info(base_url: str) -> dict:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python client.py <base_url>")
-        print("Example: python client.py https://your-org--test-sandbox-http-app-dev.modal.run")
+        print("Example: python client.py https://your-org--modal-backend-http-app-dev.modal.run")
         sys.exit(1)
 
     base_url = sys.argv[1].rstrip("/")

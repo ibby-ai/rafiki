@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document explains the overall architecture of the agent sandbox application, focusing on the relationship between Modal's ingress layer and the long-lived background service.
+This document explains the overall architecture of Rafiki, focusing on the relationship between Modal's ingress layer and the long-lived background service.
 
 ## High-Level Architecture
 
@@ -8,7 +8,7 @@ The application uses a **single-sandbox architecture pattern** optimized for low
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                          Modal App (test-sandbox)                          │
+│                          Modal App (modal-backend)                          │
 ├────────────────────────────────────────────────────────────────────────────┤
 │                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -57,7 +57,7 @@ The application uses a **single-sandbox architecture pattern** optimized for low
 - Fully managed by Modal
 - No code required in your application
 - Automatically handles SSL certificates
-- Provides public URLs like `https://<org>--test-sandbox-http-app-dev.modal.run`
+- Provides public URLs like `https://<org>--modal-backend-http-app-dev.modal.run`
 
 **How it works:**
 When you deploy with `modal serve` or `modal deploy`, Modal:
@@ -158,7 +158,7 @@ def http_app():
 
 1. **Client Request:**
    ```bash
-   curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/query' \
+   curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/query' \
      -H 'Content-Type: application/json' \
      -d '{"question":"What is the capital of Canada?"}'
    ```
@@ -189,7 +189,7 @@ def http_app():
 
 1. **Client Request:**
    ```bash
-   curl -X POST 'https://<org>--test-sandbox-http-app-dev.modal.run/submit' \
+   curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/submit' \
      -H 'Content-Type: application/json' \
      -d '{"question":"Analyze this large dataset..."}'
    ```
@@ -211,14 +211,14 @@ def http_app():
 
 4. **Client Polling:**
    ```bash
-   curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}'
+   curl 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}'
    ```
    - Returns job status and result when complete
 
 5. **Artifact Retrieval:**
    ```bash
-   curl 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}/artifacts'
-   curl -O 'https://<org>--test-sandbox-http-app-dev.modal.run/jobs/{job_id}/artifacts/report.md'
+   curl 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}/artifacts'
+   curl -O 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}/artifacts/report.md'
    ```
    - Lists artifacts and downloads generated files
 

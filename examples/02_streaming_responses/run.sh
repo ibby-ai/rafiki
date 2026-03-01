@@ -4,7 +4,7 @@
 
 set -e
 
-DEV_URL="${DEV_URL:-https://your-org--test-sandbox-http-app-dev.modal.run}"
+DEV_URL="${DEV_URL:-https://your-org--modal-backend-http-app-dev.modal.run}"
 
 echo "=== Streaming Responses Example ==="
 echo "Using endpoint: ${DEV_URL}"

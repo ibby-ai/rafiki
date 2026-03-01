@@ -13,7 +13,7 @@ uv run modal serve -m modal_backend.main
 Set the URL:
 
 ```bash
-export DEV_URL="https://your-org--test-sandbox-http-app-dev.modal.run"
+export DEV_URL="https://your-org--modal-backend-http-app-dev.modal.run"
 ```
 
 If Proxy Auth is enabled, export the token credentials so the examples include the headers:

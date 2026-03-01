@@ -24,7 +24,7 @@ modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<shared-internal-s
 Cloudflare Worker secrets (in `edge-control-plane`):
 
 ```bash
-cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter/edge-control-plane
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
 wrangler secret put MODAL_TOKEN_ID
@@ -42,14 +42,14 @@ wrangler secret put MODAL_TOKEN_SECRET
 1. Start Modal backend first:
 
 ```bash
-cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 uv run modal serve -m modal_backend.main
 ```
 
 2. In a second terminal, start Worker dev server:
 
 ```bash
-cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter/edge-control-plane
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
 npm run dev
 # equivalent explicit command:
 # npx wrangler dev
@@ -60,7 +60,7 @@ npm run dev
 Run this in a third terminal before cURL/WebSocket tests:
 
 ```bash
-cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/agent-sandbox-starter
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 
 export MODAL_API_BASE_URL="$(rg -o '"MODAL_API_BASE_URL": "[^"]+"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: "([^"]+)"/\1/')"
 export DEV_URL="$MODAL_API_BASE_URL"
@@ -107,7 +107,7 @@ curl -sS "$WORKER_URL/health"
 Expected:
 
 - HTTP `200`
-- JSON includes `{"ok":true,"service":"edge-control-plane"}`
+- JSON includes `{"ok":true,"service":"rafiki-control-plane"}`
 
 ### 2) `/query` (sync)
 

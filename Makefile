@@ -5,8 +5,8 @@
 #   Terminal 2 (question input): make curl Q='What is 2+2?'
 #
 # Set this once to your dev endpoint URL (from `modal serve -m modal_backend.main`).
-# Example: https://your-org--test-sandbox-http-app-dev.modal.run
-DEV_URL ?= https://saidiibrahim--test-sandbox-http-app-dev.modal.run
+# Example: https://your-org--modal-backend-http-app-dev.modal.run
+DEV_URL ?= https://saidiibrahim--modal-backend-http-app-dev.modal.run
 MODAL_PROXY_KEY ?=
 MODAL_PROXY_SECRET ?=
 CURL_PROXY_HEADERS = $(if $(and $(MODAL_PROXY_KEY),$(MODAL_PROXY_SECRET)),-H Modal-Key:$(MODAL_PROXY_KEY) -H Modal-Secret:$(MODAL_PROXY_SECRET),)
