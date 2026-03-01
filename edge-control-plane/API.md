@@ -36,7 +36,7 @@ Returns service health status.
 ```json
 {
   "ok": true,
-  "service": "edge-control-plane"
+  "service": "rafiki-control-plane"
 }
 ```
 

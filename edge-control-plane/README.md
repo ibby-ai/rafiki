@@ -1,6 +1,6 @@
-# Cloudflare Control Plane for Agent Sandbox
+# Cloudflare Control Plane for Rafiki
 
-This directory contains the Cloudflare Worker + Durable Objects implementation that serves as the control plane for the Agent Sandbox system.
+This directory contains the Cloudflare Worker + Durable Objects implementation that serves as the control plane for the Rafiki system.
 
 **Phase 3 status:** Cloudflare is the primary public API surface. Direct Modal gateway access is internal-only and requires `X-Internal-Auth`.
 
@@ -69,7 +69,7 @@ Edit `wrangler.jsonc`:
 ```jsonc
 {
   "vars": {
-    "MODAL_API_BASE_URL": "https://your-org--app-name-dev.modal.run",
+    "MODAL_API_BASE_URL": "https://your-org--modal-backend-http-app-dev.modal.run",
     "ENVIRONMENT": "development"
   }
 }
@@ -488,7 +488,7 @@ if (DEBUG) {
 For issues or questions:
 
 - GitHub Issues: [link]
-- Slack: #agent-sandbox
+- Slack: #rafiki
 - Email: support@example.com
 
 ## Performance

@@ -1,6 +1,6 @@
-// Cloudflare Worker configuration for Agent Sandbox Control Plane
+// Cloudflare Worker configuration for Rafiki Control Plane
 {
-  "name": "agent-sandbox-control-plane",
+  "name": "rafiki-control-plane",
   "main": "src/index.ts",
   "compatibility_date": "2025-02-11",
   "compatibility_flags": ["nodejs_compat"],
@@ -13,12 +13,12 @@
       {
         "name": "SESSION_AGENT",
         "class_name": "SessionAgent",
-        "script_name": "agent-sandbox-control-plane"
+        "script_name": "rafiki-control-plane"
       },
       {
         "name": "EVENT_BUS",
         "class_name": "EventBus",
-        "script_name": "agent-sandbox-control-plane"
+        "script_name": "rafiki-control-plane"
       }
     ]
   },

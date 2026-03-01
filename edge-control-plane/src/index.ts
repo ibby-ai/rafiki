@@ -60,7 +60,7 @@ export default {
       
       if (path === "/health") {
         response = new Response(
-          JSON.stringify({ ok: true, service: "edge-control-plane" }),
+          JSON.stringify({ ok: true, service: "rafiki-control-plane" }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       } else if (path === "/query") {

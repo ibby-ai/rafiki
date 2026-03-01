@@ -1,7 +1,7 @@
 {
-  "name": "agent-sandbox-control-plane",
+  "name": "rafiki-control-plane",
   "version": "1.0.0",
-  "description": "Cloudflare Worker + Durable Objects control plane for Agent Sandbox",
+  "description": "Cloudflare Worker + Durable Objects control plane for Rafiki",
   "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",

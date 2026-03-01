@@ -1,7 +1,7 @@
 # Cloudflare Durable Objects Integration - Technical Handoff
 
 **Date**: February 4, 2026  
-**Project**: Agent Sandbox - Cloudflare Control Plane  
+**Project**: Rafiki - Cloudflare Control Plane
 **Status**: Phase 3 Cloudflare-first (Production)  
 **Priority**: High - Operational Readiness
 
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-We've implemented a **Cloudflare Workers + Durable Objects control plane** as an architectural enhancement to the existing Modal-based Agent Sandbox system. This implementation was inspired by [Ramp's blog post on their background agent architecture](https://builders.ramp.com/post/why-we-built-our-background-agent), which demonstrates how Cloudflare DOs can provide durable session state and real-time multiplayer capabilities.
+We've implemented a **Cloudflare Workers + Durable Objects control plane** as an architectural enhancement to the existing Modal-based Rafiki system. This implementation was inspired by [Ramp's blog post on their background agent architecture](https://builders.ramp.com/post/why-we-built-our-background-agent), which demonstrates how Cloudflare DOs can provide durable session state and real-time multiplayer capabilities.
 
 **Key Achievement**: We've decoupled session state management from compute execution, enabling session persistence, real-time collaboration, and edge performance while keeping Modal for what it does best—heavy compute and filesystem operations.
 
@@ -842,7 +842,7 @@ Use this template for your review comments:
 
 - Primary: [Your Name/Team]
 - Repository: [GitHub URL]
-- Slack: #agent-sandbox
+- Slack: #rafiki
 
 **Cloudflare Resources**:
 

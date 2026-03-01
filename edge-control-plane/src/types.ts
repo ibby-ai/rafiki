@@ -1,5 +1,5 @@
 /**
- * Type definitions for Agent Sandbox Control Plane
+ * Type definitions for Rafiki Control Plane
  * 
  * This file defines the TypeScript interfaces and types for:
  * - API request/response schemas

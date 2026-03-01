@@ -118,7 +118,7 @@ Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
 
 ```bash
 curl https://your-worker.workers.dev/health
-# Expected: {"ok":true,"service":"edge-control-plane"}
+# Expected: {"ok":true,"service":"rafiki-control-plane"}
 ```
 
 ### Test Authentication
@@ -356,7 +356,7 @@ If session data issues:
 - **Cloudflare Support**: https://support.cloudflare.com
 - **Modal Support**: https://modal.com/support
 - **Documentation**: See README.md and linked docs
-- **Internal Slack**: #agent-sandbox
+- **Internal Slack**: #rafiki
 - **On-Call**: [Your on-call rotation]
 
 ## Completion

@@ -1,6 +1,6 @@
 # Cloudflare DO Integration - Implementation Summary
 
-This document summarizes the Cloudflare Durable Objects integration that has been implemented for the Agent Sandbox project.
+This document summarizes the Cloudflare Durable Objects integration that has been implemented for the Rafiki project.
 
 ## What Was Implemented
 
@@ -370,7 +370,7 @@ Direct Modal gateway access requires `X-Internal-Auth` and is treated as interna
 For questions or issues:
 
 - GitHub: [repository link]
-- Slack: #agent-sandbox
+- Slack: #rafiki
 - Email: team@example.com
 
 ---
