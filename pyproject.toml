@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-sandbox-starter"
+name = "rafiki"
 version = "0.2.0"
-description = "Modal-based agent sandbox with HTTP endpoints and tool integrations"
+description = "Rafiki runtime with HTTP endpoints and tool integrations"
 requires-python = ">=3.11"
 dependencies = [
     "croniter>=2.0.5",

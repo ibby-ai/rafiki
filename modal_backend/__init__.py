@@ -1,7 +1,7 @@
 """
-Agent Sandbox Starter Package
+Rafiki Package
 
-This package provides a Modal-based agent sandbox with HTTP endpoints,
+This package provides a Modal-based Rafiki runtime with HTTP endpoints,
 background services, and tool integrations.
 
 Main entry points:

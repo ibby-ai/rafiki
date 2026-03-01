@@ -12,7 +12,7 @@ os.environ.setdefault("INTERNAL_AUTH_SECRET", "test-internal-auth-secret")
 def mock_settings() -> dict[str, Any]:
     """Mock settings for testing."""
     return {
-        "sandbox_name": "test-sandbox",
+        "sandbox_name": "modal-backend",
         "service_port": 8001,
         "sandbox_timeout": 3600,
         "sandbox_idle_timeout": 600,

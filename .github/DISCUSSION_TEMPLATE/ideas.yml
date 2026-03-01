@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Share your ideas for improving agent-sandbox-starter!
+        Share your ideas for improving rafiki!
         Ideas that gain traction may become feature requests.
 
   - type: textarea

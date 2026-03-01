@@ -1,15 +1,17 @@
-# Agent Sandbox Starter (Modal + OpenAI Agents SDK)
+# Rafiki (Modal + OpenAI Agents SDK)
+<!-- ⚠️ WARNING: This project is experimental. Features and behavior may change without warning. -->
 
-![CI](https://github.com/Saidiibrahim/agent-sandbox-starter/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Saidiibrahim/rafiki/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Modal](https://img.shields.io/badge/Modal-1.2.1+-8B5CF6.svg)
 ![OpenAI Agents SDK](https://img.shields.io/badge/OpenAI%20Agents%20SDK-0.9.2+-0A66C2.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-![Agent Sandbox Starter](docs/images/readme-image.png)
+![Rafiki](docs/images/readme-image.png)
 
-A multiplayer open-source background agent inspired by [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent), powered by Modal, Cloudflare, and the OpenAI Agents Python SDK.
+A multiplayer open-source background agent, powered by Modal, Cloudflare, and the OpenAI Agents Python SDK.
+This project was directly inspired by Ramp's blog post, [Why we built our background agent](https://builders.ramp.com/post/why-we-built-our-background-agent).
 
 ## Setup
 
@@ -63,7 +65,7 @@ See `CLOUDFLARE_INTEGRATION.md` and `edge-control-plane/README.md`.
 
 ## Query Execution Flow
 
-![Query execution flow](docs/images/sandbox-starter-diagram.png)
+![Query execution flow](docs/images/rafiki-diagram.png)
 
 ## Common Ops
 

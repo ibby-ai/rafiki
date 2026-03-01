@@ -1,7 +1,7 @@
 """
 Deployment composition for the full application.
 
-This module serves as the **production deployment entry point** for the agent sandbox.
+This module serves as the **production deployment entry point** for Rafiki.
 Use `modal deploy -m modal_backend.deploy` to deploy the complete application.
 
 Build timestamp: 2026-01-25T09:15:00Z - push refspec fix

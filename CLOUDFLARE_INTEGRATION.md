@@ -260,7 +260,7 @@ wscat -c "wss://your-worker.workers.dev/query_stream"
 
 - **Documentation**: See links at top of this file
 - **Issues**: [GitHub Issues]
-- **Slack**: #agent-sandbox
+- **Slack**: #rafiki
 - **Email**: team@example.com
 
 ## Status

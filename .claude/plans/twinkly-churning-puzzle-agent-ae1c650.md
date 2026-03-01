@@ -230,7 +230,7 @@ def get_sandbox_name():
 
 ## Implementation Recommendation
 
-For your `agent-sandbox-starter` project, I recommend **Option 3** (separate deployed app for sandboxes) combined with proper error handling:
+For your `rafiki` project, I recommend **Option 3** (separate deployed app for sandboxes) combined with proper error handling:
 
 ```python
 # In modal_backend/main.py

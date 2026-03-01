@@ -1,3 +1,3 @@
-"""Utility modules for agent sandbox."""
+"""Utility modules for Rafiki."""
 
 __all__: list[str] = []

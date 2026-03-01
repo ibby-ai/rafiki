@@ -1,1 +1,1 @@
-"""Shared middleware utilities for the agent sandbox."""
+"""Shared middleware utilities for Rafiki."""

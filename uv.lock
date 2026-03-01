@@ -2,7 +2,7 @@ version = 1
 requires-python = ">=3.11"
 
 [[package]]
-name = "agent-sandbox-starter"
+name = "rafiki"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

@@ -1,6 +1,6 @@
 # Roadmap
 
-This roadmap outlines the planned development phases for agent-sandbox-starter. Our focus is on building production-ready infrastructure for autonomous AI agents.
+This roadmap outlines the planned development phases for rafiki. Our focus is on building production-ready infrastructure for autonomous AI agents.
 
 ## Current Status
 

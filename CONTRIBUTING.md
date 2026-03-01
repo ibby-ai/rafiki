@@ -1,4 +1,4 @@
-# Contributing to Agent Sandbox Starter
+# Contributing to Rafiki
 
 Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
 
@@ -14,8 +14,8 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ```bash
 # Clone the repository
-git clone https://github.com/Saidiibrahim/agent-sandbox-starter.git
-cd agent-sandbox-starter
+git clone https://github.com/Saidiibrahim/rafiki.git
+cd rafiki
 
 # Create and activate virtual environment
 uv venv
@@ -45,11 +45,11 @@ uv run pytest
 
 ### Good First Issues
 
-Look for issues labeled [`good first issue`](https://github.com/Saidiibrahim/agent-sandbox-starter/labels/good%20first%20issue) - these are beginner-friendly tasks.
+Look for issues labeled [`good first issue`](https://github.com/Saidiibrahim/rafiki/labels/good%20first%20issue) - these are beginner-friendly tasks.
 
 ### Help Wanted
 
-Issues labeled [`help wanted`](https://github.com/Saidiibrahim/agent-sandbox-starter/labels/help%20wanted) are areas where contributions are especially welcome.
+Issues labeled [`help wanted`](https://github.com/Saidiibrahim/rafiki/labels/help%20wanted) are areas where contributions are especially welcome.
 
 ### Roadmap
 
@@ -57,7 +57,7 @@ Check our [ROADMAP.md](./ROADMAP.md) to see planned features and where you can c
 
 ### GitHub Project Board
 
-Our [project board](https://github.com/Saidiibrahim/agent-sandbox-starter/projects) shows the current status of all work items.
+Our [project board](https://github.com/Saidiibrahim/rafiki/projects) shows the current status of all work items.
 
 ## Making Contributions
 
@@ -112,7 +112,7 @@ We're actively working on adding tracing capabilities. See [ROADMAP.md](./ROADMA
 
 ## Questions?
 
-- Start a [Discussion](https://github.com/Saidiibrahim/agent-sandbox-starter/discussions) for questions
+- Start a [Discussion](https://github.com/Saidiibrahim/rafiki/discussions) for questions
 - Check existing issues before creating new ones
 - Join the conversation in Ideas discussions
 

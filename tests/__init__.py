@@ -1,1 +1,1 @@
-"""Test suite for agent-sandbox-starter."""
+"""Test suite for rafiki."""
