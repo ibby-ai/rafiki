@@ -9,7 +9,7 @@ See AGENTS.md and docs/configuration.md for usage guidance.
 
 import os
 from functools import lru_cache
-from typing import Self
+from typing import Literal, Self
 
 import modal
 from pydantic import Field, model_validator
@@ -110,9 +110,23 @@ class Settings(BaseSettings):
     require_proxy_auth: bool = False
     # internal_auth_secret: HMAC secret for Cloudflare Worker internal auth (required)
     internal_auth_secret: str | None = None
+    # require internal auth secret in this runtime surface (disabled inside sandbox controller
+    # when session-scoped sandbox auth tokens are used instead).
+    require_internal_auth_secret: bool = True
+    # Session-scoped sandbox auth secret injected per-sandbox at launch.
+    sandbox_session_secret: str | None = None
+    # Max TTL for scoped sandbox session auth tokens.
+    sandbox_session_token_ttl_seconds: int = Field(
+        default=120,
+        description="Maximum accepted TTL (seconds) for scoped gateway->sandbox auth tokens.",
+    )
 
     # Timeouts
-    service_timeout: int = Field(default=60, description="Health check timeout (seconds)")
+    service_timeout: int = Field(
+        default=60,
+        ge=1,
+        description="Health check timeout (seconds) for sandbox readiness probes.",
+    )
     sandbox_timeout: int = Field(
         default=60 * 60 * 24, description="Max sandbox lifetime (seconds, default 24h)"
     )
@@ -554,6 +568,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Scoped artifact transfer settings
+    require_artifact_access_token: bool = Field(
+        default=True,
+        description="Require signed scoped artifact access token for artifact downloads.",
+    )
+    artifact_access_token_max_ttl_seconds: int = Field(
+        default=300,
+        description="Maximum TTL accepted for artifact access tokens.",
+    )
+    artifact_access_revocation_store_name: str = Field(
+        default="artifact-access-revocations",
+        description="Modal Dict used for revoking artifact access tokens by token_id.",
+    )
+
     @model_validator(mode="after")
     def validate_concurrency_settings(self) -> Self:
         """Validate that concurrency settings are consistent."""
@@ -571,7 +599,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_internal_auth_secret(self) -> Self:
         """Require internal auth secret for Cloudflare control plane access."""
-        if not (self.internal_auth_secret or "").strip():
+        if self.require_internal_auth_secret and not (self.internal_auth_secret or "").strip():
             raise ValueError("internal_auth_secret must be set")
         return self
 
@@ -592,10 +620,17 @@ class Settings(BaseSettings):
         return self
 
 
-def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
+def get_modal_secrets(
+    *,
+    surface: Literal["function", "sandbox"] = "function",
+    include_admin: bool = False,
+) -> list[modal.Secret]:
     """Get Modal secrets required for the application.
 
     Args:
+        surface: Secret surface contract.
+            - "function": full control-plane/runtime function surface
+            - "sandbox": sandbox runtime surface (OpenAI + optional Modal API auth + optional tracing)
         include_admin: If True, include the admin secret for privileged operations.
             The admin secret is optional and won't fail if not configured.
 
@@ -609,7 +644,7 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
         # Admin secret is optional - use required_keys=[] to avoid failure if not set
         secrets.append(modal.Secret.from_name(settings.admin_secret_name))
 
-    if settings.enable_modal_auth_secret:
+    if surface in {"function", "sandbox"} and settings.enable_modal_auth_secret:
         secrets.append(
             modal.Secret.from_name(
                 settings.modal_auth_secret_name,
@@ -625,12 +660,13 @@ def get_modal_secrets(include_admin: bool = False) -> list[modal.Secret]:
             )
         )
 
-    secrets.append(
-        modal.Secret.from_name(
-            "internal-auth-secret",
-            required_keys=["INTERNAL_AUTH_SECRET"],
+    if surface == "function":
+        secrets.append(
+            modal.Secret.from_name(
+                "internal-auth-secret",
+                required_keys=["INTERNAL_AUTH_SECRET"],
+            )
         )
-    )
 
     return secrets
 

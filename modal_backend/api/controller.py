@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -43,6 +44,10 @@ from modal_backend.models import QueryBody
 from modal_backend.models.base import BaseSchema
 from modal_backend.models.responses import ErrorResponse, QueryResponse
 from modal_backend.security.cloudflare_auth import internal_auth_middleware
+from modal_backend.security.runtime_hardening import (
+    RuntimeHardeningReport,
+    apply_runtime_hardening,
+)
 from modal_backend.settings.settings import get_settings
 from modal_backend.tracing import langsmith_run_context
 
@@ -53,6 +58,7 @@ _settings = get_settings()
 _logger = logging.getLogger(__name__)
 
 _LAST_VOLUME_COMMIT_TS: float | None = None
+_FALLBACK_SESSION_DB_PATH = "/tmp/openai_agents_sessions.sqlite3"
 
 
 @dataclass
@@ -66,6 +72,120 @@ class _ActiveClientState:
 
 # session_id -> active run state
 ACTIVE_CLIENTS: dict[str, _ActiveClientState] = {}
+_RUNTIME_HARDENING_REPORT: RuntimeHardeningReport | None = None
+
+
+def _is_modal_auth_error(exc: Exception) -> bool:
+    return exc.__class__.__name__ == "AuthError"
+
+
+def _is_session_db_path_writable(db_path: str) -> bool:
+    if db_path == ":memory:":
+        return True
+    candidate = Path(db_path)
+    if candidate.exists():
+        target = candidate
+    else:
+        target = candidate.parent
+        # Walk to the nearest existing directory so nested-but-creatable paths
+        # are treated as writable.
+        while not target.exists():
+            parent = target.parent
+            if parent == target:
+                return False
+            target = parent
+        if not target.is_dir():
+            return False
+    try:
+        mode = os.W_OK if target == candidate else (os.W_OK | os.X_OK)
+        return os.access(target, mode)
+    except OSError:
+        return False
+
+
+def _ensure_openai_session_db_path_writable() -> None:
+    current_path = _settings.openai_session_db_path
+    if _is_session_db_path_writable(current_path):
+        return
+
+    _settings.openai_session_db_path = _FALLBACK_SESSION_DB_PATH
+    _logger.warning(
+        "controller.openai_session_db_fallback",
+        extra={
+            "db_path": current_path,
+            "fallback_db_path": _FALLBACK_SESSION_DB_PATH,
+        },
+    )
+
+
+def _record_session_start_best_effort(
+    *,
+    sandbox_type: str,
+    job_id: str | None,
+    user_id: str | None,
+) -> None:
+    try:
+        record_session_start(
+            sandbox_type=sandbox_type,
+            job_id=job_id,
+            user_id=user_id,
+        )
+    except Exception as exc:
+        if _is_modal_auth_error(exc):
+            _logger.warning(
+                "Session start metrics skipped: Modal auth token unavailable in sandbox runtime",
+                extra={"job_id": job_id, "user_id": user_id},
+            )
+            return
+        raise
+
+
+def _record_session_end_best_effort(
+    *,
+    sandbox_type: str,
+    status: str,
+    duration_ms: int,
+) -> None:
+    try:
+        record_session_end(
+            sandbox_type=sandbox_type,
+            status=status,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        if _is_modal_auth_error(exc):
+            _logger.warning(
+                "Session end metrics skipped: Modal auth token unavailable in sandbox runtime",
+                extra={"status": status, "duration_ms": duration_ms},
+            )
+            return
+        raise
+
+
+@app.on_event("startup")
+async def _apply_runtime_hardening_on_startup() -> None:
+    """Apply startup hardening before handling query traffic."""
+    global _RUNTIME_HARDENING_REPORT
+    _RUNTIME_HARDENING_REPORT = apply_runtime_hardening(_settings.agent_fs_root)
+    _ensure_openai_session_db_path_writable()
+    _logger.info(
+        "controller.runtime_hardening",
+        extra={
+            "privilege_status": _RUNTIME_HARDENING_REPORT.privilege_status,
+            "initial_uid": _RUNTIME_HARDENING_REPORT.initial_uid,
+            "final_uid": _RUNTIME_HARDENING_REPORT.final_uid,
+            "scrubbed_keys": _RUNTIME_HARDENING_REPORT.scrubbed_keys,
+            "warnings": _RUNTIME_HARDENING_REPORT.warnings,
+        },
+    )
+
+
+@app.get("/runtime_hardening")
+async def runtime_hardening_status() -> dict[str, object]:
+    """Expose runtime hardening status for runbook verification."""
+    if _RUNTIME_HARDENING_REPORT is None:
+        return {"ok": False, "error": "Runtime hardening not initialized"}
+    return {"ok": True, "report": _RUNTIME_HARDENING_REPORT.model_dump()}
 
 
 def _preregister_active_client(session_id: str, stop_event: asyncio.Event) -> _ActiveClientState:
@@ -663,7 +783,11 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
         },
     )
 
-    record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
+    _record_session_start_best_effort(
+        sandbox_type="agent_sdk",
+        job_id=body.job_id,
+        user_id=body.user_id,
+    )
     start_time = time.time()
     final_status = "failed"
     final_session_id: str | None = None
@@ -737,7 +861,7 @@ async def query_agent(body: QueryBody, request: Request) -> QueryResponse:
     finally:
         reset_parent_context(parent_context_token)
         duration_ms = int((time.time() - start_time) * 1000)
-        record_session_end(
+        _record_session_end_best_effort(
             sandbox_type="agent_sdk",
             status=final_status,
             duration_ms=duration_ms,
@@ -770,7 +894,11 @@ async def query_agent_stream(body: QueryBody, request: Request):
             },
         )
 
-        record_session_start(sandbox_type="agent_sdk", job_id=body.job_id, user_id=body.user_id)
+        _record_session_start_best_effort(
+            sandbox_type="agent_sdk",
+            job_id=body.job_id,
+            user_id=body.user_id,
+        )
         start_time = time.time()
         final_status = "failed"
         stop_event = asyncio.Event()
@@ -899,7 +1027,7 @@ async def query_agent_stream(body: QueryBody, request: Request):
         finally:
             reset_parent_context(parent_context_token)
             duration_ms = int((time.time() - start_time) * 1000)
-            record_session_end(
+            _record_session_end_best_effort(
                 sandbox_type="agent_sdk",
                 status=final_status,
                 duration_ms=duration_ms,

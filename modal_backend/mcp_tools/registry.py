@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import ipaddress
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -33,6 +34,12 @@ _BASH_DENYLIST_PATTERNS = (
     "dd if=",
     ">/dev/sd",
     ">/dev/nvme",
+    "curl ",
+    "wget ",
+    "nc ",
+    "ncat ",
+    "ssh ",
+    "scp ",
 )
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 
@@ -42,11 +49,35 @@ def _validate_bash_command(command: str) -> None:
         raise ValueError("Bash command cannot be empty")
     if len(command) > _BASH_MAX_COMMAND_CHARS:
         raise ValueError("Bash command exceeds maximum length")
+    if "\n" in command or "\r" in command:
+        raise ValueError("Bash command cannot contain newlines")
+    if "`" in command:
+        raise ValueError("Bash command cannot contain backticks")
 
     lowered = command.lower()
     for pattern in _BASH_DENYLIST_PATTERNS:
         if pattern in lowered:
             raise ValueError(f"Bash command contains blocked pattern: {pattern}")
+
+
+def _bash_workdir() -> str:
+    root = (os.getenv("AGENT_FS_ROOT") or "/data").strip() or "/data"
+    path = Path(root).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+    except OSError:
+        fallback = Path("/tmp")
+        fallback.mkdir(parents=True, exist_ok=True)
+        return str(fallback)
+
+
+def _bash_env() -> dict[str, str]:
+    return {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": "/tmp",
+        "LANG": "C.UTF-8",
+    }
 
 
 def _is_private_host(host: str) -> bool:
@@ -69,6 +100,10 @@ def _validate_web_fetch_url(url: str) -> None:
         raise ValueError("WebFetch URL must include a hostname")
     if _is_private_host(parsed.hostname):
         raise ValueError("WebFetch URL points to a private or blocked host")
+    if parsed.username or parsed.password:
+        raise ValueError("WebFetch URL cannot include embedded credentials")
+    if parsed.port and parsed.port not in {80, 443}:
+        raise ValueError("WebFetch URL port is not allowed")
 
 
 @function_tool(name_override="Read")
@@ -99,10 +134,12 @@ def run_bash(command: str, timeout_seconds: int = 60) -> str:
     _validate_bash_command(command)
     timeout = max(1, min(timeout_seconds, _BASH_MAX_TIMEOUT_SECONDS))
     completed = subprocess.run(
-        command,
-        shell=True,
+        ["bash", "-lc", command],
+        shell=False,
         capture_output=True,
         text=True,
+        cwd=_bash_workdir(),
+        env=_bash_env(),
         timeout=timeout,
     )
     output = completed.stdout or ""
