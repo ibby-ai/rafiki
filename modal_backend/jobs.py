@@ -1177,6 +1177,7 @@ def generate_pool_sandbox_name() -> str:
 def register_warm_sandbox(
     sandbox_id: str,
     sandbox_name: str,
+    sandbox_session_secret: str | None = None,
 ) -> dict[str, Any]:
     """Register a new sandbox in the warm pool.
 
@@ -1186,6 +1187,7 @@ def register_warm_sandbox(
     Args:
         sandbox_id: Modal sandbox object_id from sandbox.object_id.
         sandbox_name: Unique name assigned to this sandbox.
+        sandbox_session_secret: Optional scoped auth secret bound to this sandbox.
 
     Returns:
         Dict with pool entry metadata.
@@ -1204,6 +1206,7 @@ def register_warm_sandbox(
     entry = {
         "sandbox_id": sandbox_id,
         "sandbox_name": sandbox_name,
+        "sandbox_session_secret": sandbox_session_secret,
         "status": "warm",
         "created_at": now,
         "claimed_at": None,
@@ -1555,6 +1558,7 @@ def get_image_deployed_at() -> float | None:
 #     "sandbox_type": str,         # "agent_sdk"
 #     "sandbox_id": str | None,    # Modal sandbox object_id (once prepared)
 #     "sandbox_url": str | None,   # Tunnel URL (once prepared)
+#     "sandbox_session_secret": str | None, # Scoped gateway->sandbox auth secret
 #     "status": str,               # "warming" | "ready" | "claimed" | "expired"
 #     "created_at": int,           # Unix timestamp
 #     "expires_at": int,           # Unix timestamp (created_at + timeout)
@@ -1620,6 +1624,7 @@ def register_prewarm(
         "sandbox_type": sandbox_type,
         "sandbox_id": None,
         "sandbox_url": None,
+        "sandbox_session_secret": None,
         "status": "warming",
         "created_at": now,
         "expires_at": now + timeout,
@@ -1635,6 +1640,7 @@ def update_prewarm_ready(
     warm_id: str,
     sandbox_id: str,
     sandbox_url: str,
+    sandbox_session_secret: str | None = None,
 ) -> dict[str, Any] | None:
     """Update a pre-warm entry to ready status with sandbox details.
 
@@ -1644,6 +1650,7 @@ def update_prewarm_ready(
         warm_id: The pre-warm request ID.
         sandbox_id: Modal sandbox object_id.
         sandbox_url: Tunnel URL for the sandbox service.
+        sandbox_session_secret: Optional scoped auth secret for the sandbox.
 
     Returns:
         Updated entry dict, or None if not found or expired.
@@ -1672,6 +1679,7 @@ def update_prewarm_ready(
         "status": "ready",
         "sandbox_id": sandbox_id,
         "sandbox_url": sandbox_url,
+        "sandbox_session_secret": sandbox_session_secret,
     }
     PREWARM_STORE[warm_id] = updated
     return updated

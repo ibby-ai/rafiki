@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from uuid import uuid4
 from agents import Agent, Runner, SQLiteSession, handoff
 
 _logger = logging.getLogger(__name__)
+_FALLBACK_OPENAI_SESSION_DB_PATH = "/tmp/openai_agents_sessions.sqlite3"
 
 
 @dataclass
@@ -89,6 +91,97 @@ async def ensure_session(
     max_items = settings.openai_session_max_items
     keep_items = settings.openai_session_compaction_keep_items
 
+    requested_path = str(Path(db_path))
+    resolved_path = requested_path
+    if (
+        resolved_path != ":memory:"
+        and resolved_path != str(Path(_FALLBACK_OPENAI_SESSION_DB_PATH))
+        and not _is_db_path_writable(resolved_path)
+    ):
+        resolved_path = str(Path(_FALLBACK_OPENAI_SESSION_DB_PATH))
+        _logger.warning(
+            "openai.session.sqlite_path_not_writable",
+            extra={
+                "db_path": requested_path,
+                "fallback_db_path": resolved_path,
+            },
+        )
+
+    try:
+        return await _ensure_session_with_db_path(
+            session_id=session_id,
+            fork_session=fork_session,
+            db_path=resolved_path,
+            max_items=max_items,
+            keep_items=keep_items,
+        )
+    except Exception as exc:
+        if not _is_readonly_sqlite_error(exc):
+            raise
+
+        primary_path = str(Path(db_path))
+        fallback_path = str(Path(_FALLBACK_OPENAI_SESSION_DB_PATH))
+        if primary_path == fallback_path:
+            raise
+
+        _logger.warning(
+            "openai.session.sqlite_readonly_fallback",
+            extra={
+                "db_path": primary_path,
+                "fallback_db_path": fallback_path,
+                "error": str(exc),
+            },
+        )
+        return await _ensure_session_with_db_path(
+            session_id=session_id,
+            fork_session=fork_session,
+            db_path=fallback_path,
+            max_items=max_items,
+            keep_items=keep_items,
+        )
+
+
+def _is_db_path_writable(db_path: str) -> bool:
+    if db_path == ":memory:":
+        return True
+    db_file = Path(db_path)
+    if db_file.exists():
+        target = db_file
+    else:
+        target = db_file.parent
+        # Walk up to the nearest existing directory so creatable paths do not
+        # trigger an unnecessary fallback to /tmp.
+        while not target.exists():
+            parent = target.parent
+            if parent == target:
+                return False
+            target = parent
+        if not target.is_dir():
+            return False
+    try:
+        mode = os.W_OK if target == db_file else (os.W_OK | os.X_OK)
+        return os.access(target, mode)
+    except OSError:
+        return False
+
+
+def _is_readonly_sqlite_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "readonly database" in message
+        or "attempt to write a readonly database" in message
+        or "read-only file system" in message
+    )
+
+
+async def _ensure_session_with_db_path(
+    *,
+    session_id: str | None,
+    fork_session: bool,
+    db_path: str,
+    max_items: int | None,
+    keep_items: int | None,
+) -> tuple[SQLiteSession, str]:
     db_file = Path(db_path)
     if str(db_file) != ":memory:":
         db_file.parent.mkdir(parents=True, exist_ok=True)
