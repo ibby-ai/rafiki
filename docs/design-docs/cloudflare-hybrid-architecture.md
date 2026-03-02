@@ -27,7 +27,7 @@ flowchart TB
     subgraph Modal["Modal Backend"]
         Gateway["HTTP Gateway<br/>(Internal only)"]
 
-        SandboxMgr["Sandbox Lifecycle<br/>(app.py)<br/>- Create/Reuse<br/>- Tunnel discovery<br/>- Health checks"]
+        SandboxMgr["Sandbox Lifecycle<br/>(modal_backend/main.py)<br/>- Create/Reuse<br/>- Tunnel discovery<br/>- Health checks"]
 
         subgraph Sandbox["Modal Sandbox"]
             Controller["Controller<br/>(FastAPI)"]
@@ -93,6 +93,9 @@ flowchart TB
 
 - Client `Authorization` is enforced on all public endpoints
 - Internal `X-Internal-Auth` is enforced on Modal endpoints
+- Artifact downloads use `X-Artifact-Access-Token` (scoped, short-lived, session/job/path bound)
+- Worker job/artifact proxy path enforces ownership precheck (`session_id` / `user_id` / `tenant_id`) before forwarding
+- Malformed artifact-path URL encoding is rejected deterministically with HTTP `400`
 
 **Endpoints:**
 
@@ -124,6 +127,9 @@ flowchart TB
 - Bridge Modal SSE → WebSocket for streaming
 - Broadcast updates to EventBus DO
 - Handle session stop/cancel requests
+- Enforce pre-flight per-session budget rails before Modal forwarding
+- Preserve actionable upstream `/query` error strings/status in Worker error envelopes (no `Unknown error` collapse for known upstream failures)
+- Attach `X-Session-History-Authority: durable-object` for query/query_stream forwarding
 
 **Durable Storage (SQLite):**
 
@@ -264,12 +270,24 @@ execution_state (key, value, updated_at)
 - Idle timeout: 10 minutes
 - Auto-restart on crash
 - Persistent volume at `/data`
+- Startup readiness hardening:
+  - `/health_check` readiness probe uses `service_timeout` (default `60s`)
+  - one recycle+retry on readiness timeout
+  - deterministic second startup-failure cutoff (`Background sandbox startup failed after 2 attempts`)
+  - controller startup validates OpenAI session DB path writability and falls back to `/tmp/openai_agents_sessions.sqlite3` when the configured path is not writable after privilege drop
 
 **Authentication:**
 
-- Verify internal auth token from Cloudflare (required for all non-health endpoints)
-- Token format: raw `payload.signature` (no `Bearer` prefix)
+- Gateway endpoints verify Cloudflare `X-Internal-Auth` (required for non-health gateway routes)
+- Internal auth token format: raw `payload.signature` (no `Bearer` prefix)
 - Optional: Modal Connect tokens (internal gateway → controller)
+- Scoped sandbox auth path:
+  - Modal gateway signs `X-Sandbox-Session-Auth`
+  - Controller requires `X-Sandbox-Id` + scoped token with path/sandbox/TTL validation
+  - Legacy internal-auth fallback has been removed; missing scoped auth headers fail deterministically.
+- Sandbox Modal SDK auth:
+  - sandbox surface includes `modal-auth-secret` (`SANDBOX_MODAL_TOKEN_ID` / `SANDBOX_MODAL_TOKEN_SECRET`) when enabled
+  - required for in-sandbox Modal Dict/Queue/Volume operations used during `/query` lifecycle
 
 ---
 
@@ -538,6 +556,7 @@ Client Token (Session Token)
 │ SessionAgent DO                              │
 │ - Check session ownership                    │
 │ - Verify permissions (read/write/stop)       │
+│ - Enforce session budget rails               │
 │ - Generate internal auth token               │
 └──────────────────┬───────────────────────────┘
                    │ Internal auth token (HMAC)
@@ -547,9 +566,24 @@ Client Token (Session Token)
 │ - Verify internal token signature            │
 │ - Check service = "cloudflare-worker"        │
 │ - Check expiration (5 min TTL)               │
+│ - Enforce `X-Session-History-Authority`      │
 │ - Execute request                            │
 └──────────────────────────────────────────────┘
 ```
+
+### Artifact Transfer Flow
+
+1. Client requests `GET /jobs/{id}/artifacts/{path}` through Worker.
+2. Worker pre-fetches `/jobs/{id}` ownership and enforces session/user/tenant scope.
+3. Worker mints a signed artifact token containing:
+   - `session_id`
+   - `job_id`
+   - `artifact_path`
+   - `artifact_id`
+   - `token_id`
+   - `issued_at`/`expires_at`
+4. Modal verifies signature, TTL, claim binding, and revocation state before file transfer.
+5. If artifact path decoding fails in Worker (`decodeURIComponent`), request returns deterministic `400` and no artifact fetch is attempted.
 
 ### Security Boundaries
 
@@ -625,9 +659,9 @@ Client Token (Session Token)
 - Deploy Cloudflare Worker + DOs alongside existing Modal gateway
 - Route 10% of traffic to Cloudflare (by user ID hash)
 - Monitor metrics (latency, errors, WebSocket stability)
-- Keep Modal gateway as fallback
+- Keep Modal gateway available as a parallel internal ingress path during ramp-up
 
-**Rollback Plan:**
+**Traffic Reversion Controls:**
 
 - Feature flag to route back to Modal
 - DNS switch if Worker is down

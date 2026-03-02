@@ -9,17 +9,25 @@ Use the canonical Cloudflare <-> Modal runbook first:
 
 `docs/references/runbooks/cloudflare-modal-e2e.md`
 
+For local E2E execution, activate the repo virtualenv first:
+
+```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+source .venv/bin/activate
+```
+
 If you only need a quick Modal runtime smoke check:
 
 ```bash
-# Install and authenticate Modal
-pip install modal
-modal setup
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+uv sync --extra dev
+source .venv/bin/activate
+uv run modal setup
 
 # Create required secrets
-modal secret create openai-secret OPENAI_API_KEY=<your-key>
-modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
-modal secret create modal-auth-secret \
+uv run modal secret create openai-secret OPENAI_API_KEY=<your-key>
+uv run modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+uv run modal secret create modal-auth-secret \
   SANDBOX_MODAL_TOKEN_ID=<token-id> \
   SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
@@ -27,7 +35,7 @@ modal secret create modal-auth-secret \
 Run a smoke check:
 
 ```bash
-modal run -m modal_backend.main
+uv run modal run -m modal_backend.main
 ```
 
 If startup fails, verify:
@@ -64,6 +72,11 @@ If startup fails, verify:
   - `http_app` receives public/internal requests.
   - Controller sandbox executes agent runs and streams SSE events.
 - **Session Memory**: OpenAI `SQLiteSession` with persisted session IDs and optional fork behavior.
+- **Readiness Hardening**: gateway startup waits on controller `/health_check`, logs bounded diagnostics on timeout, performs one recycle+retry, and fails deterministically after a second timeout.
+- **TD-003 `/query` Live E2E Closure**:
+  - sandbox runtime now receives Modal auth secret on sandbox surface when enabled.
+  - gateway `/query` error propagation now preserves concrete upstream errors.
+  - controller session DB path falls back to `/tmp/openai_agents_sessions.sqlite3` when configured path is not writable under dropped privileges.
 
 ## Related Resources
 

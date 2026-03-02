@@ -5,11 +5,15 @@ This document covers runtime configuration for the Modal + OpenAI Agents deploym
 ## Quick Setup
 
 ```bash
-pip install modal
-modal setup
-modal secret create openai-secret OPENAI_API_KEY=your-api-key-here
-modal run -m modal_backend.main
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+uv sync --extra dev
+source .venv/bin/activate
+uv run modal setup
+uv run modal secret create openai-secret OPENAI_API_KEY=your-api-key-here
+uv run modal run -m modal_backend.main
 ```
+
+All Modal CLI commands in this doc are expected to run from the activated repo `.venv` (or prefixed with `uv run`).
 
 ## Required Secrets
 
@@ -37,16 +41,89 @@ Control-plane traffic requires `internal-auth-secret` with `INTERNAL_AUTH_SECRET
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<shared-secret>
 ```
 
+This secret remains required for:
+
+- Cloudflare Worker -> Modal gateway internal authentication.
+- Modal function runtime surfaces that mint/verify internal tokens.
+
 ### Modal Auth Secret
 
-Controller calls into Modal sandboxes require `modal-auth-secret` containing
-`SANDBOX_MODAL_TOKEN_ID` and `SANDBOX_MODAL_TOKEN_SECRET`.
+When `ENABLE_MODAL_AUTH_SECRET=true` (default), controller calls into Modal sandboxes
+require `modal-auth-secret` containing `SANDBOX_MODAL_TOKEN_ID` and
+`SANDBOX_MODAL_TOKEN_SECRET`.
 
 ```bash
 modal secret create modal-auth-secret \
   SANDBOX_MODAL_TOKEN_ID=<token-id> \
   SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
+
+## Secret Surface Contract (Task 02)
+
+Rafiki now uses split secret injection by execution surface:
+
+- Function/runtime surface (`get_modal_secrets(surface="function")`):
+  - `openai-secret` (`OPENAI_API_KEY`)
+  - `internal-auth-secret` (`INTERNAL_AUTH_SECRET`)
+  - `modal-auth-secret` (`SANDBOX_MODAL_TOKEN_ID`, `SANDBOX_MODAL_TOKEN_SECRET`) when `ENABLE_MODAL_AUTH_SECRET=true` (default)
+  - optional tracing secret (`LANGSMITH_API_KEY`)
+- Sandbox/controller surface (`get_modal_secrets(surface="sandbox")`):
+  - `openai-secret` (`OPENAI_API_KEY`)
+  - `modal-auth-secret` (`SANDBOX_MODAL_TOKEN_ID`, `SANDBOX_MODAL_TOKEN_SECRET`) when `ENABLE_MODAL_AUTH_SECRET=true` (default)
+  - optional tracing secret (`LANGSMITH_API_KEY`)
+  - explicitly excludes `INTERNAL_AUTH_SECRET`
+
+Scoped sandbox auth is now session/sandbox/path bound via `X-Sandbox-Session-Auth` and
+`X-Sandbox-Id` headers. Tokens are short-lived and validated in
+`modal_backend/security/cloudflare_auth.py`.
+
+## Runtime/Auth Hardening Environment Controls
+
+Relevant settings/env keys introduced for hardening:
+
+- `REQUIRE_INTERNAL_AUTH_SECRET` (default `true`; set `false` inside scoped sandbox runtime)
+- `SANDBOX_SESSION_SECRET` (per-sandbox scoped auth verification key)
+- `SANDBOX_SESSION_TOKEN_TTL_SECONDS` (default `120`)
+- `REQUIRE_ARTIFACT_ACCESS_TOKEN` (default `true`)
+- `ARTIFACT_ACCESS_TOKEN_MAX_TTL_SECONDS` (default `300`)
+- `ARTIFACT_ACCESS_REVOCATION_STORE_NAME` (default `artifact-access-revocations`)
+- `SANDBOX_DROP_PRIVILEGES`, `SANDBOX_RUNTIME_UID`, `SANDBOX_RUNTIME_GID`, `SANDBOX_WRITABLE_ROOTS`
+- `SERVICE_TIMEOUT` (default `60`, minimum `1`) for sandbox readiness probes (`/health_check`)
+- Legacy sandbox fallback controls are removed; scoped sandbox auth is mandatory.
+
+## Rotation and Remediation (Scoped Sandbox/Auth + Artifact)
+
+### Scoped sandbox auth hard-cut (strict scoped-token-only)
+
+1. Deploy code with scoped sandbox token support enabled and legacy fallback branches removed.
+2. Recycle warm pool/service sandboxes so all active entries have `sandbox_session_secret`.
+3. Verify transition health:
+   - `curl -sS "$DEV_URL/pool/status" -H "X-Internal-Auth: <signed-token>" | jq '{missing_scoped_secret_count,scoped_secret_transition_stable}'`
+   - Require `missing_scoped_secret_count == 0` and `scoped_secret_transition_stable == true`.
+4. Verify `/query` and `/query_stream` pass through Cloudflare runbook flow.
+
+Failure behavior:
+
+- Missing/invalid scoped token -> deterministic `401`.
+- Missing scoped sandbox secret metadata -> deterministic `503` at gateway->sandbox forwarding.
+
+Remediation steps:
+
+1. Recycle/recreate affected sandboxes until scoped secrets are present.
+2. Re-run `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_sandbox_auth_header.py`.
+3. Re-run Cloudflare/Modal `/query` + `/query_stream` smoke from runbook.
+
+### Artifact token rollback
+
+Rollback trigger:
+
+- Artifact list/download regressions caused by scoped token enforcement.
+
+Rollback steps:
+
+1. Set `REQUIRE_ARTIFACT_ACCESS_TOKEN=false` (temporary).
+2. Keep path traversal and actor-scope checks enabled.
+3. Re-run `uv run python -m pytest tests/test_jobs_security.py tests/test_artifact_access.py`.
 
 ## Cloudflare <-> Modal E2E Environment Baseline
 
@@ -65,7 +142,7 @@ Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
 
 - `internal-auth-secret` Modal secret containing `INTERNAL_AUTH_SECRET`
 - value must exactly match the Worker `INTERNAL_AUTH_SECRET`
-- `modal-auth-secret` Modal secret containing:
+- `modal-auth-secret` Modal secret containing (required when `ENABLE_MODAL_AUTH_SECRET=true`, default):
   - `SANDBOX_MODAL_TOKEN_ID`
   - `SANDBOX_MODAL_TOKEN_SECRET`
 
@@ -82,7 +159,7 @@ export WORKER_URL="http://localhost:8787"
 ### Edge Control Plane Quality Tooling
 
 `edge-control-plane` uses Ultracite with Biome for lint/format checks.
-This is currently an optional audit step while legacy diagnostics are remediated.
+These checks are required release gates.
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
@@ -93,6 +170,12 @@ Auto-fix pass (mutates files):
 
 ```bash
 npm run fix
+```
+
+Worker integration proxy suite:
+
+```bash
+npm run test:integration
 ```
 
 ### Generate a test session token
@@ -113,7 +196,7 @@ Defined in `modal_backend/settings/settings.py`:
 - `openai_api_key`
 - `openai_model_default` (default: `gpt-4.1`)
 - `openai_model_subagent` (default: `gpt-4.1-mini`)
-- `openai_session_db_path` (default: `/data/openai_agents_sessions.sqlite3`)
+- `openai_session_db_path` (default: `/data/openai_agents_sessions.sqlite3`, with runtime fallback to `/tmp/openai_agents_sessions.sqlite3` when the configured path is not writable under dropped privileges)
 - `openai_session_max_items` (default: `400`, set `None` to disable item-based compaction)
 - `openai_session_compaction_keep_items` (default: `300`, set `None` to keep exactly `openai_session_max_items`)
 - `agent_max_turns`
@@ -160,6 +243,7 @@ When available from OpenAI run metadata, `openai_trace_id` is also surfaced in:
 
 Common controls:
 
+- `service_timeout` (readiness probe timeout)
 - `sandbox_cpu`, `sandbox_memory`
 - `sandbox_timeout`, `sandbox_idle_timeout`
 - `min_containers`, `max_containers`, `buffer_containers`
@@ -167,6 +251,12 @@ Common controls:
 - `volume_commit_interval`
 
 These are documented inline in `modal_backend/settings/settings.py` and can be overridden via environment variables.
+
+Readiness timeout semantics:
+
+- Gateway startup probes controller `/health_check` using `service_timeout`.
+- On timeout, runtime emits diagnostics and retries once.
+- A second startup failure fails deterministically (`Background sandbox startup failed after 2 attempts`).
 
 ## Image Configuration
 

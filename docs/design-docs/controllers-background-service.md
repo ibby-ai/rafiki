@@ -22,6 +22,13 @@ The controller is a FastAPI app running inside a Modal sandbox. It executes Open
 
 The controller is launched by Modal with `uvicorn modal_backend.api.controller:app` and reached through an internal tunnel from the gateway app.
 
+Gateway readiness behavior (`modal_backend/main.py`):
+
+- probes controller readiness via `/health_check` using `service_timeout` (default `60s`)
+- emits bounded timeout diagnostics (phase/attempt/sandbox/tunnel/poll context)
+- performs one recycle+retry on readiness timeout
+- fails deterministically after the second startup failure (`Background sandbox startup failed after 2 attempts`)
+
 ## Endpoints
 
 ### `GET /health_check`
@@ -66,6 +73,7 @@ Returns active/stop-requested status for an active in-memory run.
 - Resume with `fork_session=true`: creates a new UUID session and copies prior items.
 
 Configured by `openai_session_db_path` in `modal_backend/settings/settings.py`.
+At controller startup, if the configured DB path is not writable under runtime privilege-drop, the controller falls back to `/tmp/openai_agents_sessions.sqlite3` to preserve query availability.
 
 ### Memory Trimming and Compaction
 
@@ -119,4 +127,9 @@ Cancellation terminal payloads retain `trace_id` correlation, and successful ter
 ## Security
 
 - Internal auth middleware requires `X-Internal-Auth` for non-health endpoints.
+- Gateway -> sandbox forwarding requires scoped headers:
+  - `X-Sandbox-Session-Auth`
+  - `X-Sandbox-Id`
+  with strict scoped-token-only validation (no legacy internal-auth fallback path).
 - Optional connect token validation can be enforced through settings.
+- Sandbox runtime receives Modal auth credentials via `modal-auth-secret` (when enabled) so in-sandbox Modal Dict/Queue/Volume operations can authenticate without reintroducing legacy gateway auth fallback paths.

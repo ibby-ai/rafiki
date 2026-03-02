@@ -73,8 +73,10 @@ Primary test files:
 
 Current built-in policy checks in `modal_backend/mcp_tools/registry.py`:
 
-- `Bash` rejects blocked destructive patterns and overlong commands.
-- `WebFetch` only allows `http/https` and blocks private/loopback hosts.
+- `Calculate` uses AST-only arithmetic evaluation (no `eval`, no names, no function calls, no attribute access).
+- `Bash` rejects blocked destructive/network patterns, backticks, newline payloads, and overlong commands.
+- `Bash` executes with constrained env (`PATH`, `HOME`, `LANG`) and confined workdir (`AGENT_FS_ROOT` or `/tmp` fallback).
+- `WebFetch` only allows `http/https`, blocks embedded credentials, blocks non-standard ports, and blocks private/loopback hosts.
 - Timeout and output-size parameters are clamped to safe ranges.
 
 When adding new tools, follow the same pattern: validate inputs before side effects, and fail closed with explicit error messages.

@@ -39,6 +39,8 @@ Request body:
 Error responses:
 
 - `400` when the request body is not valid JSON or does not include a string `question`.
+- `409` when a session is already executing.
+- `429` when session budget rails deny pre-flight execution (`request_budget_exceeded` or `cost_budget_exceeded`).
 - `500` when execution fails after request validation.
 
 Response envelope (unchanged):
@@ -110,6 +112,7 @@ Error responses:
 
 - `400` when the request body is not valid JSON or does not include a string `question`.
 - `429` when the session queue has reached its configured max size.
+- `429` when session budget rails deny queue preflight (`request_budget_exceeded` or `cost_budget_exceeded`).
 
 Internal SSE example:
 
@@ -169,12 +172,45 @@ Queues a background job.
 
 Returns status + result/summary/metrics when complete.
 
+Actor scope (session/user/tenant) is enforced for Worker-proxied reads.
+If ownership precheck fails, Worker returns deterministic `403` with mismatch reason.
+
+### `GET /jobs/{job_id}/artifacts`
+
+Returns artifact manifest for a completed job.
+
+Worker behavior:
+
+- Performs ownership precheck (`session_id`, `user_id`, `tenant_id`) before proxying.
+- Returns `403` on ownership mismatch.
+
+### `GET /jobs/{job_id}/artifacts/{artifact_path}`
+
+Artifact download requires Worker-minted scoped token (`X-Artifact-Access-Token`) with:
+
+- `session_id`
+- `job_id`
+- `artifact_path`
+- expiry and revocation controls
+
+Additional behavior:
+
+- Worker ownership precheck runs before token minting.
+- malformed URL-encoded artifact paths return deterministic `400` with `Invalid artifact path encoding` (no downstream artifact fetch).
+
 Model list examples now use OpenAI IDs such as `gpt-4.1`.
 
 ## Auth
 
 - Public worker endpoints: `Authorization: Bearer <session_token>`.
 - Internal gateway/controller calls: `X-Internal-Auth`.
+- Modal gateway -> sandbox controller calls: `X-Sandbox-Session-Auth` + `X-Sandbox-Id` (strict scoped-token-only, no legacy internal-auth fallback).
+- Session authority contract for query forwarding: `X-Session-History-Authority: durable-object`.
+
+Readiness behavior:
+
+- Gateway startup probes controller `/health_check` and performs one bounded retry on timeout.
+- Repeated startup failure fails deterministically (`Background sandbox startup failed after 2 attempts`).
 
 ## References
 

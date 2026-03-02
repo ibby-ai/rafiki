@@ -9,18 +9,22 @@ Canonical E2E flow reference: `docs/references/runbooks/cloudflare-modal-e2e.md`
 Before diving into specific issues, run these checks:
 
 ```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+source .venv/bin/activate
+
 # Derive baseline URLs from checked-in Worker config
 export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
 export DEV_URL="$MODAL_API_BASE_URL"
+export WORKER_URL="http://localhost:8787"
 
 # 1. Verify Modal is configured
-modal setup
+uv run modal setup
 
 # 2. Check your secrets exist
-modal secret list
+uv run modal secret list
 
 # 3. Test a simple run
-modal run -m modal_backend.main
+uv run modal run -m modal_backend.main
 
 # 4. Check Cloudflare control plane health
 curl "https://<your-worker>.workers.dev/health"
@@ -28,6 +32,8 @@ curl "https://<your-worker>.workers.dev/health"
 # 5. Check background sandbox info (internal only)
 curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
 ```
+
+All Modal CLI commands in this troubleshooting guide are expected to run from the activated repo `.venv` (or prefixed with `uv run`).
 
 ---
 
@@ -168,11 +174,53 @@ modal setup
 2. Ensure `SESSION_CACHE` is configured and reachable.
 3. Re-send `session_key` to rebuild the mapping (default TTL 30 days).
 
+---
+
+### Worker `/query` returns `500` with `Token missing. Could not authenticate client`
+
+**Cause**: The sandbox controller cannot authenticate Modal SDK calls at runtime (missing `modal-auth-secret` on sandbox surface or stale sandbox still running old env).
+
+**Fast checks**:
+
+```bash
+# Direct gateway check with internal auth (should include error_type/request_id on failure)
+curl -sS -X POST "$DEV_URL/query" \
+  -H "X-Internal-Auth: <signed-token>" \
+  -H "X-Session-History-Authority: durable-object" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"diag","session_id":"sess-diag"}'
+```
+
+**Fix**:
+
+1. Confirm `modal-auth-secret` exists and contains `SANDBOX_MODAL_TOKEN_ID` + `SANDBOX_MODAL_TOKEN_SECRET`.
+2. Ensure sandbox secret surface includes `modal-auth-secret` when `ENABLE_MODAL_AUTH_SECRET=true`.
+3. Recycle the service sandbox and clear stale metadata if needed:
+   ```bash
+   modal run -m modal_backend.main::terminate_service_sandbox
+   ```
+4. Re-run Worker `/query` smoke.
+
+---
+
+### Worker `/query` returns `500` with `attempt to write a readonly database`
+
+**Cause**: Controller runtime dropped privileges and the configured OpenAI session SQLite path is not writable.
+
+**Fix**:
+
+1. Use a writable session DB path fallback (`/tmp/openai_agents_sessions.sqlite3`) when runtime detects unwritable configured path.
+2. Recycle the active sandbox so startup path checks run again:
+   ```bash
+   modal run -m modal_backend.main::terminate_service_sandbox
+   ```
+3. Re-run `/query` and confirm `200` response.
+
 ## Sandbox Issues
 
 ### "Failed to start background sandbox or get service URL"
 
-**Cause**: The 30-second timeout for tunnel discovery was exceeded, or the sandbox failed to start.
+**Cause**: Startup failed during tunnel discovery (fixed 30-second window) or readiness probing (`SERVICE_TIMEOUT`, default 60 seconds).
 
 **Possible reasons**:
 - Network connectivity issues
@@ -309,8 +357,10 @@ with open("/root/output.txt", "w") as f:
 
 **Verify persistence**:
 ```bash
+# Requires a valid Worker session token in $TOKEN
 # Write a file
-curl -X POST "${DEV_URL}/query" \
+curl -X POST "${WORKER_URL}/query" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"question":"Write hello to /data/test.txt"}'
 
@@ -319,7 +369,8 @@ modal run -m modal_backend.main::terminate_service_sandbox
 modal serve -m modal_backend.main
 
 # Check if file exists
-curl -X POST "${DEV_URL}/query" \
+curl -X POST "${WORKER_URL}/query" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"question":"Read /data/test.txt"}'
 ```
@@ -442,7 +493,7 @@ _allowed_tools = [
 
 1. **Check if sandbox is running**:
    ```bash
-   curl "${DEV_URL}/service_info"
+   curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <signed-token>"
    ```
 
 2. **Restart the service**:
@@ -454,6 +505,15 @@ _allowed_tools = [
 3. **Check for errors in logs**:
    ```bash
    make tail-logs
+   ```
+
+4. **Confirm readiness timeout diagnostics**:
+   ```bash
+   # Expected on transient startup timeout:
+   # - "Handled retryable sandbox startup failure (async)"
+   # - "Retrying background sandbox startup after retryable failure (async)"
+   # Deterministic terminal failure:
+   # - "Background sandbox startup failed after 2 attempts"
    ```
 
 ---
