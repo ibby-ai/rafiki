@@ -172,7 +172,17 @@ function scheduleJobEvent(
  * Handle query requests (sync and streaming)
  */
 async function handleQuery(request: Request, env: Env): Promise<Response> {
-  const body = await request.json() as QueryRequest;
+  let requestBody: unknown;
+  try {
+    requestBody = await request.json();
+  } catch {
+    return new Response(
+      JSON.stringify({ ok: false, error: "Invalid JSON request body" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const body = requestBody as QueryRequest;
 
   const auth = await authenticateClientRequest({
     request,

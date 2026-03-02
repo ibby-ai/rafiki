@@ -341,7 +341,7 @@ export class EventBus extends DurableObject<Env> {
   /**
    * Get all active connections
    */
-  private async handleGetConnections(request: Request): Response {
+  private handleGetConnections(_request: Request): Response {
     const connections = Array.from(this.connectionInfo.values());
     
     return new Response(
@@ -357,7 +357,7 @@ export class EventBus extends DurableObject<Env> {
   /**
    * Get presence information (who's online)
    */
-  private async handleGetPresence(request: Request): Response {
+  private handleGetPresence(request: Request): Response {
     const url = new URL(request.url);
     const sessionId = url.searchParams.get("session_id");
     

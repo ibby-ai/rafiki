@@ -345,7 +345,7 @@ export class SessionAgent extends DurableObject<Env> {
     // Send connection acknowledgment
     server.send(JSON.stringify({
       type: "connection_ack",
-      session_id: this.sessionState?.session_id,
+      session_id: this.getCurrentSessionId(),
       timestamp: Date.now(),
       data: { status: this.sessionState?.status }
     } satisfies WebSocketMessage));
@@ -379,7 +379,7 @@ export class SessionAgent extends DurableObject<Env> {
       if (msg.type === "ping") {
         ws.send(JSON.stringify({
           type: "pong",
-          session_id: this.sessionState?.session_id,
+          session_id: this.getCurrentSessionId(),
           timestamp: Date.now(),
           data: {}
         }));
@@ -419,6 +419,108 @@ export class SessionAgent extends DurableObject<Env> {
     }
   }
 
+  private getCurrentSessionId(): string {
+    return this.sessionState?.session_id ?? this.ctx.id.toString();
+  }
+
+  private parseNullableString(value: unknown): string | null | undefined {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (typeof value === "string") return value;
+    return undefined;
+  }
+
+  private parseQueryRequestPayload(payload: unknown): QueryRequest | null {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+
+    const record = payload as Record<string, unknown>;
+    if (typeof record.question !== "string") {
+      return null;
+    }
+
+    const parsed: QueryRequest = { question: record.question };
+
+    if (typeof record.agent_type === "string") {
+      parsed.agent_type = record.agent_type;
+    }
+    if (typeof record.fork_session === "boolean") {
+      parsed.fork_session = record.fork_session;
+    }
+
+    const sessionId = this.parseNullableString(record.session_id);
+    if (sessionId !== undefined) {
+      parsed.session_id = sessionId;
+    }
+
+    const sessionKey = this.parseNullableString(record.session_key);
+    if (sessionKey !== undefined) {
+      parsed.session_key = sessionKey;
+    }
+
+    const jobId = this.parseNullableString(record.job_id);
+    if (jobId !== undefined) {
+      parsed.job_id = jobId;
+    }
+
+    const userId = this.parseNullableString(record.user_id);
+    if (userId !== undefined) {
+      parsed.user_id = userId;
+    }
+
+    const tenantId = this.parseNullableString(record.tenant_id);
+    if (tenantId !== undefined) {
+      parsed.tenant_id = tenantId;
+    }
+
+    const warmId = this.parseNullableString(record.warm_id);
+    if (warmId !== undefined) {
+      parsed.warm_id = warmId;
+    }
+
+    return parsed;
+  }
+
+  private parseQueryResponsePayload(payload: unknown): QueryResponse | null {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+
+    const record = payload as Record<string, unknown>;
+    if (!Array.isArray(record.messages) || typeof record.session_id !== "string") {
+      return null;
+    }
+
+    const response: QueryResponse = {
+      ok: typeof record.ok === "boolean" ? record.ok : true,
+      session_id: record.session_id,
+      messages: record.messages as Message[]
+    };
+
+    if (typeof record.error === "string" && record.error.length > 0) {
+      response.error = record.error;
+    }
+
+    return response;
+  }
+
+  private extractErrorMessage(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== "object") {
+      return undefined;
+    }
+
+    const record = payload as Record<string, unknown>;
+    if (typeof record.error === "string" && record.error.length > 0) {
+      return record.error;
+    }
+    if (typeof record.message === "string" && record.message.length > 0) {
+      return record.message;
+    }
+
+    return undefined;
+  }
+
   private broadcastToEventBus(message: WebSocketMessage): void {
     if (!this.sessionState?.session_id) return;
 
@@ -450,14 +552,15 @@ export class SessionAgent extends DurableObject<Env> {
   }
 
   private extractQueryRequest(msg: Record<string, unknown>): QueryRequest | null {
-    if (typeof msg.question === "string") {
-      return msg as QueryRequest;
+    const directPayload = this.parseQueryRequestPayload(msg);
+    if (directPayload) {
+      return directPayload;
     }
 
-    if (msg.type === "query" && msg.data && typeof msg.data === "object") {
-      const data = msg.data as Record<string, unknown>;
-      if (typeof data.question === "string") {
-        return data as QueryRequest;
+    if (msg.type === "query") {
+      const nestedPayload = this.parseQueryRequestPayload(msg.data);
+      if (nestedPayload) {
+        return nestedPayload;
       }
     }
 
@@ -702,10 +805,13 @@ export class SessionAgent extends DurableObject<Env> {
               }
             });
 
-            this.sessionState.status = "idle";
-            this.sessionState.current_prompt = undefined;
-            this.sessionState.last_active_at = Date.now();
-            await this.saveSessionState();
+            const sessionState = this.sessionState;
+            if (sessionState) {
+              sessionState.status = "idle";
+              sessionState.current_prompt = undefined;
+              sessionState.last_active_at = Date.now();
+              await this.saveSessionState();
+            }
 
             if (capturedMessages.length > 0) {
               await this.storeMessages(capturedMessages);
@@ -732,10 +838,13 @@ export class SessionAgent extends DurableObject<Env> {
               data: { error: errorMessage }
             });
 
-            this.sessionState.status = "error";
-            this.sessionState.current_prompt = undefined;
-            this.sessionState.last_active_at = Date.now();
-            await this.saveSessionState();
+            const sessionState = this.sessionState;
+            if (sessionState) {
+              sessionState.status = "error";
+              sessionState.current_prompt = undefined;
+              sessionState.last_active_at = Date.now();
+              await this.saveSessionState();
+            }
             return;
           }
 
@@ -766,14 +875,17 @@ export class SessionAgent extends DurableObject<Env> {
         }
       }
     } catch (error) {
-      this.sessionState.status = "error";
-      this.sessionState.last_active_at = Date.now();
-      await this.saveSessionState();
+      const sessionState = this.sessionState;
+      if (sessionState) {
+        sessionState.status = "error";
+        sessionState.last_active_at = Date.now();
+        await this.saveSessionState();
+      }
 
       const errorMessage = error instanceof Error ? error.message : "Streaming error";
       const errorEvent: WebSocketMessage = {
         type: "query_error",
-        session_id: this.sessionState.session_id,
+        session_id: this.getCurrentSessionId(),
         timestamp: Date.now(),
         data: { error: errorMessage }
       };
@@ -986,7 +1098,30 @@ export class SessionAgent extends DurableObject<Env> {
       throw new Error(modalResponse.error || "Modal error");
     }
 
-    const result = modalResponse.data as QueryResponse;
+    const result = this.parseQueryResponsePayload(modalResponse.data);
+    if (!result || !result.ok) {
+      const modalError = result?.error || modalResponse.error || "Invalid Modal response";
+      this.sessionState.status = "error";
+      this.sessionState.current_prompt = undefined;
+      this.sessionState.last_active_at = Date.now();
+      await this.saveSessionState();
+
+      this.broadcastToWebSockets({
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: modalError }
+      });
+      this.broadcastToEventBus({
+        type: "query_error",
+        session_id: this.sessionState.session_id,
+        timestamp: Date.now(),
+        data: { error: modalError }
+      });
+
+      throw new Error(modalError);
+    }
+
     await this.storeMessages(result.messages);
 
     this.sessionState.status = "idle";
@@ -1021,7 +1156,23 @@ export class SessionAgent extends DurableObject<Env> {
    * Handle query execution
    */
   private async handleQuery(request: Request): Promise<Response> {
-    const body = await request.json() as QueryRequest;
+    let requestBody: unknown;
+    try {
+      requestBody = await request.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Invalid JSON request body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const body = this.parseQueryRequestPayload(requestBody);
+    if (!body) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Invalid query request body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     try {
       const result = await this.executeQuery(body);
@@ -1162,7 +1313,23 @@ export class SessionAgent extends DurableObject<Env> {
    * Queue a prompt for sequential processing
    */
   private async handleQueuePrompt(request: Request): Promise<Response> {
-    const body = await request.json() as QueryRequest;
+    let requestBody: unknown;
+    try {
+      requestBody = await request.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ ok: false, queued: false, error: "Invalid JSON request body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const body = this.parseQueryRequestPayload(requestBody);
+    if (!body) {
+      return new Response(
+        JSON.stringify({ ok: false, queued: false, error: "Invalid queue prompt body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     if (!body.question) {
       return new Response(
@@ -1501,14 +1668,25 @@ export class SessionAgent extends DurableObject<Env> {
         headers,
         body: req.body ? JSON.stringify(req.body) : undefined
       });
-      
-      const data = await response.json();
+
+      const rawBody = await response.text();
+      let data: unknown = undefined;
+      if (rawBody.length > 0) {
+        try {
+          data = JSON.parse(rawBody);
+        } catch {
+          data = rawBody;
+        }
+      }
+      const parsedError = this.extractErrorMessage(data);
+      const fallbackError =
+        typeof data === "string" && data.trim().length > 0 ? data : "Unknown error";
       
       return {
         ok: response.ok,
         status: response.status,
         data: response.ok ? data : undefined,
-        error: response.ok ? undefined : data.error || "Unknown error"
+        error: response.ok ? undefined : parsedError || fallbackError
       };
     } catch (error) {
       return {
