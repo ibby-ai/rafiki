@@ -11,7 +11,12 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from modal_backend.security.cloudflare_auth import INTERNAL_AUTH_HEADER, internal_auth_middleware
+from modal_backend.security.cloudflare_auth import (
+    INTERNAL_AUTH_HEADER,
+    SANDBOX_SESSION_AUTH_HEADER,
+    build_scoped_sandbox_token,
+    internal_auth_middleware,
+)
 from modal_backend.settings.settings import get_settings
 
 DEFAULT_SECRET = "super-secret"
@@ -67,7 +72,12 @@ def _build_app() -> FastAPI:
 
 
 def _reset_settings(monkeypatch, **env: str) -> None:
-    for key in ["INTERNAL_AUTH_SECRET"]:
+    for key in [
+        "INTERNAL_AUTH_SECRET",
+        "REQUIRE_INTERNAL_AUTH_SECRET",
+        "SANDBOX_SESSION_SECRET",
+        "SANDBOX_SESSION_TOKEN_TTL_SECONDS",
+    ]:
         monkeypatch.delenv(key, raising=False)
     if "INTERNAL_AUTH_SECRET" not in env:
         monkeypatch.setenv("INTERNAL_AUTH_SECRET", "")
@@ -224,3 +234,107 @@ def test_missing_secret_returns_500(monkeypatch):
     client = TestClient(_build_app(), raise_server_exceptions=False)
     response = client.get("/protected", headers={INTERNAL_AUTH_HEADER: token})
     assert response.status_code == 500
+
+
+def test_accepts_scoped_sandbox_token(monkeypatch):
+    secret = "sandbox-secret"
+    _reset_settings(
+        monkeypatch,
+        INTERNAL_AUTH_SECRET="",
+        REQUIRE_INTERNAL_AUTH_SECRET="false",
+        SANDBOX_SESSION_SECRET=secret,
+        SANDBOX_SESSION_TOKEN_TTL_SECONDS="120",
+    )
+    token = build_scoped_sandbox_token(
+        secret,
+        session_id="sess-1",
+        sandbox_id="sb-1",
+        request_path="/protected",
+        ttl_ms=60_000,
+    )
+    client = TestClient(_build_app())
+    response = client.get(
+        "/protected",
+        headers={
+            SANDBOX_SESSION_AUTH_HEADER: token,
+            "X-Sandbox-Id": "sb-1",
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_rejects_missing_scoped_token_when_scoped_auth_required(monkeypatch):
+    _reset_settings(
+        monkeypatch,
+        INTERNAL_AUTH_SECRET="",
+        REQUIRE_INTERNAL_AUTH_SECRET="false",
+        SANDBOX_SESSION_SECRET="sandbox-secret",
+    )
+    client = TestClient(_build_app())
+    response = client.get("/protected")
+    assert response.status_code == 401
+    assert response.json()["error"] == "Missing sandbox session auth token"
+
+
+def test_rejects_scoped_token_path_mismatch(monkeypatch):
+    secret = "sandbox-secret"
+    _reset_settings(
+        monkeypatch,
+        INTERNAL_AUTH_SECRET="",
+        REQUIRE_INTERNAL_AUTH_SECRET="false",
+        SANDBOX_SESSION_SECRET=secret,
+    )
+    token = build_scoped_sandbox_token(
+        secret,
+        session_id="sess-1",
+        sandbox_id="sb-1",
+        request_path="/query",
+        ttl_ms=60_000,
+    )
+    client = TestClient(_build_app())
+    response = client.get(
+        "/protected",
+        headers={
+            SANDBOX_SESSION_AUTH_HEADER: token,
+            "X-Sandbox-Id": "sb-1",
+        },
+    )
+    assert response.status_code == 401
+    assert response.json()["error"] == "Token path mismatch"
+
+
+def test_rejects_scoped_token_without_sandbox_header(monkeypatch):
+    secret = "sandbox-secret"
+    _reset_settings(
+        monkeypatch,
+        INTERNAL_AUTH_SECRET="",
+        REQUIRE_INTERNAL_AUTH_SECRET="false",
+        SANDBOX_SESSION_SECRET=secret,
+    )
+    token = build_scoped_sandbox_token(
+        secret,
+        session_id="sess-1",
+        sandbox_id="sb-1",
+        request_path="/protected",
+        ttl_ms=60_000,
+    )
+    client = TestClient(_build_app())
+    response = client.get(
+        "/protected",
+        headers={SANDBOX_SESSION_AUTH_HEADER: token},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"] == "Missing sandbox id header"
+
+
+def test_rejects_internal_auth_when_scoped_auth_required(monkeypatch):
+    _reset_settings(
+        monkeypatch,
+        INTERNAL_AUTH_SECRET="legacy-secret",
+        SANDBOX_SESSION_SECRET="sandbox-secret",
+    )
+    token = _build_token("legacy-secret")
+    client = TestClient(_build_app())
+    response = client.get("/protected", headers={INTERNAL_AUTH_HEADER: token})
+    assert response.status_code == 401
+    assert response.json()["error"] == "Missing sandbox session auth token"

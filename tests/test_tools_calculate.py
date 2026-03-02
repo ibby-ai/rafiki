@@ -28,5 +28,29 @@ async def test_calculate_division():
     assert result == "Result: 25.0"
 
 
+@pytest.mark.asyncio
+async def test_calculate_rejects_function_calls():
+    result = await calculate.on_invoke_tool(
+        None,
+        json.dumps({"expression": "__import__('os').system('id')"}),
+    )
+    assert "unsupported" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_calculate_rejects_large_exponent():
+    result = await calculate.on_invoke_tool(
+        None,
+        json.dumps({"expression": "2 ** 999"}),
+    )
+    assert "exponent is too large" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_calculate_rejects_invalid_syntax():
+    result = await calculate.on_invoke_tool(None, json.dumps({"expression": "2 +"}))
+    assert "invalid expression syntax" in result.lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

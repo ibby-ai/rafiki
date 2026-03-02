@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,88 @@ class _FakeRun:
 
 def _request(method: str = "POST") -> Request:
     return Request({"type": "http", "method": method, "path": "/", "headers": []})
+
+
+def test_ensure_openai_session_db_path_writable_falls_back_when_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_path = controller._settings.openai_session_db_path
+    controller._settings.openai_session_db_path = "/data/openai_agents_sessions.sqlite3"
+    monkeypatch.setattr(controller, "_is_session_db_path_writable", lambda _path: False)
+
+    try:
+        controller._ensure_openai_session_db_path_writable()
+        assert controller._settings.openai_session_db_path == "/tmp/openai_agents_sessions.sqlite3"
+    finally:
+        controller._settings.openai_session_db_path = original_path
+
+
+def test_ensure_openai_session_db_path_writable_keeps_path_when_writable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_path = controller._settings.openai_session_db_path
+    controller._settings.openai_session_db_path = "/tmp/custom-openai-session.sqlite3"
+    monkeypatch.setattr(controller, "_is_session_db_path_writable", lambda _path: True)
+
+    try:
+        controller._ensure_openai_session_db_path_writable()
+        assert controller._settings.openai_session_db_path == "/tmp/custom-openai-session.sqlite3"
+    finally:
+        controller._settings.openai_session_db_path = original_path
+
+
+def test_is_session_db_path_writable_accepts_creatable_parent(tmp_path: Path) -> None:
+    db_path = tmp_path / "nested" / "openai_agents_sessions.sqlite3"
+    assert controller._is_session_db_path_writable(str(db_path)) is True
+
+
+@pytest.mark.asyncio
+async def test_query_agent_continues_when_metrics_store_auth_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AuthError(Exception):
+        pass
+
+    metrics_calls = {"start": 0, "end": 0}
+
+    def _raise_auth_error_start(*args, **kwargs):
+        metrics_calls["start"] += 1
+        raise AuthError("Token missing")
+
+    def _raise_auth_error_end(*args, **kwargs):
+        metrics_calls["end"] += 1
+        raise AuthError("Token missing")
+
+    async def _fake_execute_agent_query(*args, **kwargs):
+        return (
+            [
+                {
+                    "type": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "session_id": "sess-auth-metrics",
+                    "trace_id": "trace-auth-metrics",
+                }
+            ],
+            {
+                "type": "result",
+                "session_id": "sess-auth-metrics",
+                "trace_id": "trace-auth-metrics",
+                "result": "ok",
+                "is_error": False,
+            },
+            "sess-auth-metrics",
+        )
+
+    monkeypatch.setattr(controller, "record_session_start", _raise_auth_error_start)
+    monkeypatch.setattr(controller, "record_session_end", _raise_auth_error_end)
+    monkeypatch.setattr(controller, "_execute_agent_query", _fake_execute_agent_query)
+
+    body = QueryBody(question="hello", session_id="sess-auth-metrics")
+    response = await controller.query_agent(body, _request())
+
+    assert response["ok"] is True
+    assert response["session_id"] == "sess-auth-metrics"
+    assert metrics_calls == {"start": 1, "end": 1}
 
 
 @pytest.mark.asyncio

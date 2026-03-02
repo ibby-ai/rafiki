@@ -14,6 +14,7 @@ def test_settings_openai_defaults() -> None:
     assert cfg.openai_session_db_path == "/data/openai_agents_sessions.sqlite3"
     assert cfg.openai_session_max_items == 400
     assert cfg.openai_session_compaction_keep_items == 300
+    assert cfg.sandbox_session_token_ttl_seconds == 120
 
 
 def test_settings_openai_session_compaction_validation() -> None:
@@ -31,6 +32,14 @@ def test_settings_openai_session_compaction_validation() -> None:
             internal_auth_secret="test-secret",
             openai_session_max_items=200,
             openai_session_compaction_keep_items=201,
+        )
+
+
+def test_service_timeout_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        settings_module.Settings(
+            internal_auth_secret="test-secret",
+            service_timeout=0,
         )
 
 
@@ -81,3 +90,29 @@ def test_get_modal_secrets_includes_modal_auth_secret_by_default(
 
     assert len(secrets) == 3
     assert ("modal-auth-secret", ("SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET")) in calls
+
+
+def test_get_modal_secrets_sandbox_surface_includes_modal_auth_but_excludes_internal(
+    monkeypatch,
+) -> None:
+    cfg = settings_module.Settings(
+        internal_auth_secret="test-secret",
+        enable_modal_auth_secret=True,
+        enable_langsmith_tracing=False,
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: cfg)
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_from_name(name: str, required_keys=None):
+        calls.append((name, tuple(required_keys or ())))
+        return {"name": name, "required_keys": required_keys}
+
+    monkeypatch.setattr(settings_module.modal.Secret, "from_name", fake_from_name)
+
+    secrets = settings_module.get_modal_secrets(surface="sandbox")
+
+    assert len(secrets) == 2
+    assert ("openai-secret", ("OPENAI_API_KEY",)) in calls
+    assert ("modal-auth-secret", ("SANDBOX_MODAL_TOKEN_ID", "SANDBOX_MODAL_TOKEN_SECRET")) in calls
+    assert all(name != "internal-auth-secret" for name, _ in calls)

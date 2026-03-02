@@ -64,9 +64,23 @@ async def test_run_bash_blocks_dangerous_commands() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_bash_blocks_network_commands() -> None:
+    result = await run_bash.on_invoke_tool(
+        None, json.dumps({"command": "curl https://example.com"})
+    )
+    assert "blocked pattern" in result
+
+
+@pytest.mark.asyncio
 async def test_web_fetch_blocks_private_hosts() -> None:
     result = await web_fetch.on_invoke_tool(None, json.dumps({"url": "http://127.0.0.1:8080"}))
     assert "private or blocked host" in result
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_blocks_non_standard_ports() -> None:
+    result = await web_fetch.on_invoke_tool(None, json.dumps({"url": "https://example.com:8443"}))
+    assert "port is not allowed" in result
 
 
 @pytest.mark.asyncio
