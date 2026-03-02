@@ -1,8 +1,15 @@
-# Documentation Index
+# Runtime Docs Overview
 
-This directory contains implementation and operations documentation for the Modal + OpenAI Agents runtime.
+This page is the guided map for Cloudflare + Modal runtime operations.
+For the full references catalog (including non-runtime docs), use `docs/references/index.md`.
 
 ## First-Time Setup
+
+Use the canonical Cloudflare <-> Modal runbook first:
+
+`docs/references/runbooks/cloudflare-modal-e2e.md`
+
+If you only need a quick Modal runtime smoke check:
 
 ```bash
 # Install and authenticate Modal
@@ -12,6 +19,9 @@ modal setup
 # Create required secrets
 modal secret create openai-secret OPENAI_API_KEY=<your-key>
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+modal secret create modal-auth-secret \
+  SANDBOX_MODAL_TOKEN_ID=<token-id> \
+  SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
 
 Run a smoke check:
@@ -27,17 +37,19 @@ If startup fails, verify:
 ## Start Here
 
 1. [Canonical E2E Runbook (Cloudflare <-> Modal)](./runbooks/cloudflare-modal-e2e.md)
-2. [Architecture Overview](../design-docs/architecture-overview.md)
-3. [Cloudflare + Modal Hybrid Architecture](../design-docs/cloudflare-hybrid-architecture.md)
-4. [Controllers](../design-docs/controllers-background-service.md)
-5. [Configuration](./configuration.md)
-6. [API Usage](./api-usage.md)
+2. [Cloudflare + Modal Hybrid Architecture](../design-docs/cloudflare-hybrid-architecture.md)
+3. [Architecture Overview](../design-docs/architecture-overview.md) (Modal runtime internals)
+4. [Next.js + Supabase BFF Integration](./nextjs-supabase-bff-integration.md)
+5. [Controllers](../design-docs/controllers-background-service.md)
+6. [Configuration](./configuration.md)
+7. [API Usage](./api-usage.md)
 
 ## Core Docs
 
 - [Canonical E2E Runbook](./runbooks/cloudflare-modal-e2e.md)
-- [Architecture Overview](../design-docs/architecture-overview.md)
 - [Cloudflare + Modal Hybrid Architecture](../design-docs/cloudflare-hybrid-architecture.md)
+- [Architecture Overview](../design-docs/architecture-overview.md)
+- [Next.js + Supabase BFF Integration](./nextjs-supabase-bff-integration.md)
 - [Controllers: Background Service](../design-docs/controllers-background-service.md)
 - [Multi-Agent Architecture](../design-docs/multi-agent-architecture.md)
 - [Configuration Guide](./configuration.md)

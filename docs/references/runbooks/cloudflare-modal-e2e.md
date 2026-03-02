@@ -7,7 +7,7 @@ This is the canonical end-to-end test runbook for the Cloudflare Worker control 
 ### Local tooling
 
 - Python + `uv`
-- Node.js 18+
+- Node.js 20+
 - Modal CLI authenticated: `modal setup`
 - Wrangler authenticated: `wrangler login`
 - `wscat` installed for WebSocket verification: `npm install -g wscat`
@@ -19,6 +19,9 @@ Modal (must exist in the authenticated Modal workspace):
 ```bash
 modal secret create openai-secret OPENAI_API_KEY=<your-openai-key>
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<shared-internal-secret>
+modal secret create modal-auth-secret \
+  SANDBOX_MODAL_TOKEN_ID=<token-id> \
+  SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
 
 Cloudflare Worker secrets (in `edge-control-plane`):

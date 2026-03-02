@@ -36,6 +36,11 @@ Request body:
 }
 ```
 
+Error responses:
+
+- `400` when the request body is not valid JSON or does not include a string `question`.
+- `500` when execution fails after request validation.
+
 Response envelope (unchanged):
 
 ```json
@@ -86,6 +91,25 @@ SSE event names preserved:
 - `result`
 - `done`
 - `error`
+
+### `POST /session/{session_id}/queue`
+
+Queue a prompt for sequential execution in the target session.
+
+Request body:
+
+```json
+{
+  "question": "Your prompt",
+  "agent_type": "default",
+  "user_id": "optional-user-id"
+}
+```
+
+Error responses:
+
+- `400` when the request body is not valid JSON or does not include a string `question`.
+- `429` when the session queue has reached its configured max size.
 
 Internal SSE example:
 

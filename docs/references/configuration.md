@@ -37,6 +37,17 @@ Control-plane traffic requires `internal-auth-secret` with `INTERNAL_AUTH_SECRET
 modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<shared-secret>
 ```
 
+### Modal Auth Secret
+
+Controller calls into Modal sandboxes require `modal-auth-secret` containing
+`SANDBOX_MODAL_TOKEN_ID` and `SANDBOX_MODAL_TOKEN_SECRET`.
+
+```bash
+modal secret create modal-auth-secret \
+  SANDBOX_MODAL_TOKEN_ID=<token-id> \
+  SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
+```
+
 ## Cloudflare <-> Modal E2E Environment Baseline
 
 Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
@@ -47,11 +58,16 @@ Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
 - `SESSION_CACHE` KV binding
 - `SESSION_SIGNING_SECRET` secret
 - `INTERNAL_AUTH_SECRET` secret
+- `MODAL_TOKEN_ID` secret
+- `MODAL_TOKEN_SECRET` secret
 
 ### Required Modal-side configuration
 
 - `internal-auth-secret` Modal secret containing `INTERNAL_AUTH_SECRET`
 - value must exactly match the Worker `INTERNAL_AUTH_SECRET`
+- `modal-auth-secret` Modal secret containing:
+  - `SANDBOX_MODAL_TOKEN_ID`
+  - `SANDBOX_MODAL_TOKEN_SECRET`
 
 ### Standard local exports
 
@@ -61,6 +77,22 @@ cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
 export DEV_URL="$MODAL_API_BASE_URL"
 export WORKER_URL="http://localhost:8787"
+```
+
+### Edge Control Plane Quality Tooling
+
+`edge-control-plane` uses Ultracite with Biome for lint/format checks.
+This is currently an optional audit step while legacy diagnostics are remediated.
+
+```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
+npm run check
+```
+
+Auto-fix pass (mutates files):
+
+```bash
+npm run fix
 ```
 
 ### Generate a test session token
