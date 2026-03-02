@@ -44,7 +44,7 @@ Canonical E2E setup and verification sequence:
 
 1. **Cloudflare Account**: Sign up at https://cloudflare.com
 2. **Wrangler CLI**: Install via `npm install -g wrangler`
-3. **Node.js**: Version 18+ required
+3. **Node.js**: Version 20+ required (Ultracite/Biome tooling dependency)
 4. **Modal Backend**: Must be deployed and accessible
 
 ### Installation
@@ -58,6 +58,15 @@ wrangler login
 
 # Generate TypeScript types
 npm run types
+
+# Optional: lint + format audit (current repo has baseline diagnostics)
+npm run check
+```
+
+Optional fix pass (mutates files):
+
+```bash
+npm run fix
 ```
 
 ### Configuration
@@ -106,8 +115,9 @@ wrangler kv:namespace create SESSION_CACHE
 
 #### 4. Configure Rate Limiting Binding
 
-Ensure `wrangler.jsonc` includes a `RATE_LIMITER` binding under `unsafe.bindings`
-with the desired `limit` and `period` values.
+Optional but recommended: add a `RATE_LIMITER` binding under
+`unsafe.bindings` in `wrangler.jsonc` with the desired `limit` and `period`
+values.
 
 ### Development
 

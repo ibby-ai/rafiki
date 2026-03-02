@@ -14,7 +14,7 @@ Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
 
 ### Local Setup
 
-- [ ] Install Node.js 18+ (`node --version`)
+- [ ] Install Node.js 20+ (`node --version`)
 - [ ] Install Wrangler CLI: `npm install -g wrangler`
 - [ ] Clone repository
 - [ ] Navigate to `edge-control-plane/`
