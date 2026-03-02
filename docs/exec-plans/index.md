@@ -7,11 +7,13 @@
 - Tech debt backlog: `docs/exec-plans/tech-debt-tracker.md`
 
 ## Active Plans
-- [Agent Sandbox Infrastructure Hardening](./active/agent-sandbox-infra-hardening/PLAN_agent-sandbox-infra-hardening.md)
 - [Phase 3 Cloudflare-First Cutover](./active/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md)
 - [Production Readiness (Claude Agent SDK)](./active/prod_readiness_claude_agent_sdk/PLAN_prod_readiness_claude_agent_sdk.md)
 
 ## Completed Plans
+- [Runtime Readiness Hardening](./completed/runtime-readiness-hardening/PLAN_runtime-readiness-hardening.md)
+- [Agent Sandbox Follow-up Hardening](./completed/agent-sandbox-followup-hardening/PLAN_agent-sandbox-followup-hardening.md)
+- [Agent Sandbox Infrastructure Hardening](./completed/agent-sandbox-infra-hardening/PLAN_agent-sandbox-infra-hardening.md)
 - [OpenAI Agents Migration](./completed/openai_agents_migration/PLAN_openai_agents_migration.md)
 - [Next.js Agent Scheduling](./completed/nextjs-agent-scheduling/PLAN_nextjs-agent-scheduling.md)
 - [Modal Advanced Features](./completed/modal-advanced-features/PLAN_modal-advanced-features.md)

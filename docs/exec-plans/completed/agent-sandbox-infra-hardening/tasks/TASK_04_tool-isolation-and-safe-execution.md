@@ -17,3 +17,28 @@ phase: Phase 4 - Tool execution safety
 - Malicious input payloads are denied with deterministic, tested errors.
 - High-risk tool isolation boundaries are documented and covered by policy tests.
 - Rollback notes explicitly document how to restore the previous tool execution path if production regressions appear.
+
+## Evidence Capture (Required)
+- Commands:
+  - `uv run python -m pytest tests/test_tools_calculate.py`
+  - `uv run python -m pytest tests/test_controller_tools.py`
+  - `rg -n "eval\\(" modal_backend/mcp_tools`
+- Expected outcomes:
+  - No runtime `eval(` remains in tool execution paths.
+  - Malicious payload tests and policy tests pass with deterministic error contracts.
+- Artifact path:
+  - Plan `Progress` entry for TASK_04 in `../PLAN_agent-sandbox-infra-hardening.md`.
+
+## Rollback Notes (Required)
+- Trigger:
+  - Production regressions in calculate/tool execution after AST-policy cutover.
+- Rollback steps:
+  - Restore prior calculate execution handler and registry policy behavior behind a temporary guard.
+- Verification:
+  - Re-run tool policy pytest suite and `/query` smoke check.
+- Record location:
+  - Plan `Progress` entry + `docs/references/tool-development.md`.
+
+## Required Doc Sync
+- `docs/references/tool-development.md`
+- `docs/references/api-usage.md`

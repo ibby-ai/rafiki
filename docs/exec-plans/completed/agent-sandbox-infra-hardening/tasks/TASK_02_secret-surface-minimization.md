@@ -17,3 +17,31 @@ phase: Phase 2 - Credential boundary hardening
 - Negative auth regression checks confirm expected `401` behavior for invalid/missing internal auth.
 - Rotation and rollback instructions are updated and tested in the runbook flow.
 - Rollback notes explicitly document how to restore previous secret wiring without exposing additional secrets.
+
+## Evidence Capture (Required)
+- Commands:
+  - `uv run python -m pytest tests/test_internal_auth_middleware.py`
+  - `uv run python -m pytest tests/test_settings_openai.py`
+  - `rg -n "INTERNAL_AUTH_SECRET|MODAL_TOKEN_ID|MODAL_TOKEN_SECRET|SANDBOX_MODAL_TOKEN" modal_backend/main.py modal_backend/settings/settings.py`
+- Expected outcomes:
+  - Middleware negative-path tests pass with deterministic `401` contracts.
+  - Sandbox secret allowlist and split-surface wiring are visible in code.
+  - Session-scoped auth token path is present and covered by tests.
+- Artifact path:
+  - Plan `Progress` entry for TASK_02 in `../PLAN_agent-sandbox-infra-hardening.md`.
+
+## Rollback Notes (Required)
+- Trigger:
+  - `/query` or `/query_stream` fails due to sandbox auth token verification errors.
+- Rollback steps:
+  - Re-enable legacy internal-auth forwarding path for gateway->sandbox calls.
+  - Re-introduce previous sandbox secret wiring while investigating scoped-token failure.
+- Verification:
+  - Re-run `uv run python -m pytest tests/test_internal_auth_middleware.py`.
+  - Re-run Cloudflare↔Modal `/query` smoke from runbook.
+- Record location:
+  - Plan `Progress` entry + runbook note in `docs/references/runbooks/cloudflare-modal-e2e.md`.
+
+## Required Doc Sync
+- `docs/references/configuration.md`
+- `docs/references/runbooks/cloudflare-modal-e2e.md`

@@ -9,6 +9,8 @@
 
 ## Current Specs
 - `agent-runtime-hardening.md` - request/tool guardrails and trace correlation for OpenAI agent runtime.
+- `agent-sandbox-infra-hardening.md` - control-plane authority, runtime hardening, secret minimization, budget/artifact rails.
+- `runtime-readiness-hardening.md` - sandbox startup timeout diagnostics, guarded recycle+retry, and deterministic failure semantics.
 
 ## New Spec Template
 ```md
