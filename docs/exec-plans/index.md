@@ -7,6 +7,7 @@
 - Tech debt backlog: `docs/exec-plans/tech-debt-tracker.md`
 
 ## Active Plans
+- [Agent Sandbox Infrastructure Hardening](./active/agent-sandbox-infra-hardening/PLAN_agent-sandbox-infra-hardening.md)
 - [Phase 3 Cloudflare-First Cutover](./active/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md)
 - [Production Readiness (Claude Agent SDK)](./active/prod_readiness_claude_agent_sdk/PLAN_prod_readiness_claude_agent_sdk.md)
 
