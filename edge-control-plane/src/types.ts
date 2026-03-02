@@ -1,6 +1,6 @@
 /**
  * Type definitions for Rafiki Control Plane
- * 
+ *
  * This file defines the TypeScript interfaces and types for:
  * - API request/response schemas
  * - Durable Object state models
@@ -13,25 +13,28 @@
 // =============================================================================
 
 export interface Env {
-  // Durable Object bindings
-  SESSION_AGENT: DurableObjectNamespace;
+  ENVIRONMENT: "development" | "staging" | "production";
+  ESTIMATED_COST_PER_1K_CHARS_USD?: string;
   EVENT_BUS: DurableObjectNamespace;
-  
-  // KV namespace for caching
-  SESSION_CACHE: KVNamespace;
-  RATE_LIMITER?: RateLimitBinding;
-  
+  INTERNAL_AUTH_SECRET: string;
+  MAX_QUEUED_PROMPTS_PER_SESSION?: string;
+  MAX_SESSION_QUERY_BUDGET_REQUESTS?: string;
+  MAX_SESSION_QUERY_BUDGET_USD?: string;
+
   // Environment variables
   MODAL_API_BASE_URL: string;
-  ENVIRONMENT: "development" | "staging" | "production";
-  SESSION_KEY_TTL_SECONDS?: string;
-  MAX_QUEUED_PROMPTS_PER_SESSION?: string;
-  PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS?: string;
-  
+
   // Secrets (set via wrangler secret put)
   MODAL_TOKEN_ID: string;
   MODAL_TOKEN_SECRET: string;
-  INTERNAL_AUTH_SECRET: string;
+  PROMPT_QUEUE_ENTRY_EXPIRY_SECONDS?: string;
+  RATE_LIMITER?: RateLimitBinding;
+  // Durable Object bindings
+  SESSION_AGENT: DurableObjectNamespace;
+
+  // KV namespace for caching
+  SESSION_CACHE: KVNamespace;
+  SESSION_KEY_TTL_SECONDS?: string;
   SESSION_SIGNING_SECRET: string;
 }
 
@@ -40,22 +43,22 @@ export interface Env {
 // =============================================================================
 
 export interface QueryRequest {
-  question: string;
   agent_type?: string;
-  session_id?: string | null;
-  session_key?: string | null;
   fork_session?: boolean;
   job_id?: string | null;
-  user_id?: string | null;
+  question: string;
+  session_id?: string | null;
+  session_key?: string | null;
   tenant_id?: string | null;
+  user_id?: string | null;
   warm_id?: string | null;
 }
 
 export interface QueryResponse {
+  error?: string;
+  messages: Message[];
   ok: boolean;
   session_id: string;
-  messages: Message[];
-  error?: string;
 }
 
 /**
@@ -65,112 +68,112 @@ export interface QueryResponse {
  * not "role". We keep both for compatibility, but "type" is the primary field from Modal.
  */
 export interface Message {
-  /** Message type from Modal serialization (primary field) */
-  type?: "user" | "assistant" | "system" | "result" | "stream_event";
+  content: MessageContent[];
   /** Legacy role field - may not be present from Modal */
   role?: "user" | "assistant";
-  content: MessageContent[];
+  /** Message type from Modal serialization (primary field) */
+  type?: "user" | "assistant" | "system" | "result" | "stream_event";
 }
 
 export interface MessageContent {
-  type: "text" | "tool_use" | "tool_result";
+  content?: unknown;
+  input?: Record<string, unknown>;
+  is_error?: boolean;
+  name?: string;
   text?: string;
   tool_use_id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-  content?: unknown;
-  is_error?: boolean;
+  type: "text" | "tool_use" | "tool_result";
 }
 
 export interface JobSubmitRequest {
-  question: string;
   agent_type?: string;
+  job_id?: string | null;
+  question: string;
+  schedule_at?: number | null;
   session_id?: string | null;
   session_key?: string | null;
-  job_id?: string | null;
-  user_id?: string | null;
   tenant_id?: string | null;
-  schedule_at?: number | null;
+  user_id?: string | null;
   webhook?: WebhookConfig | null;
 }
 
 export interface WebhookConfig {
-  url: string;
   headers?: Record<string, string>;
-  signing_secret?: string;
-  secret_ref?: string;
-  timeout_seconds?: number;
   max_attempts?: number;
+  secret_ref?: string;
+  signing_secret?: string;
+  timeout_seconds?: number;
+  url: string;
 }
 
 export interface JobSubmitResponse {
-  ok: boolean;
   job_id: string;
+  ok: boolean;
 }
 
 export interface JobStatusResponse {
-  job_id: string;
-  status: "queued" | "running" | "complete" | "failed" | "canceled";
-  created_at: number;
-  started_at?: number | null;
-  completed_at?: number | null;
-  question?: string;
   agent_type?: string;
-  session_id?: string | null;
-  user_id?: string | null;
-  tenant_id?: string | null;
-  result?: QueryResponse | null;
-  error?: string | null;
   artifacts?: ArtifactManifest | null;
+  completed_at?: number | null;
+  created_at: number;
+  error?: string | null;
+  job_id: string;
+  question?: string;
+  result?: QueryResponse | null;
+  session_id?: string | null;
+  started_at?: number | null;
+  status: "queued" | "running" | "complete" | "failed" | "canceled";
+  tenant_id?: string | null;
+  user_id?: string | null;
 }
 
 export type ScheduleType = "one_off" | "cron";
 
 export interface ScheduleCreateRequest {
+  agent_type?: string | null;
+  cron?: string | null;
+  enabled?: boolean;
+  metadata?: Record<string, unknown> | null;
   name: string;
   question: string;
-  agent_type?: string | null;
-  schedule_type: ScheduleType;
   run_at?: number | null;
-  cron?: string | null;
+  schedule_type: ScheduleType;
   timezone?: string | null;
-  enabled?: boolean;
   webhook?: WebhookConfig | null;
-  metadata?: Record<string, unknown> | null;
 }
 
 export interface ScheduleUpdateRequest {
+  agent_type?: string | null;
+  cron?: string | null;
+  enabled?: boolean | null;
+  metadata?: Record<string, unknown> | null;
   name?: string | null;
   question?: string | null;
-  agent_type?: string | null;
   run_at?: number | null;
-  cron?: string | null;
   timezone?: string | null;
-  enabled?: boolean | null;
   webhook?: WebhookConfig | null;
-  metadata?: Record<string, unknown> | null;
 }
 
 export interface ScheduleResponse {
-  schedule_id: string;
-  name: string;
-  question: string;
   agent_type?: string | null;
-  schedule_type: ScheduleType;
-  run_at?: number | null;
-  cron?: string | null;
-  timezone: string;
-  enabled: boolean;
-  webhook?: WebhookConfig | null;
-  metadata?: Record<string, unknown> | null;
-  user_id?: string | null;
-  tenant_id?: string | null;
   created_at: number;
-  updated_at: number;
-  last_run_at?: number | null;
-  next_run_at?: number | null;
-  last_job_id?: string | null;
+  cron?: string | null;
+  enabled: boolean;
   last_error?: string | null;
+  last_job_id?: string | null;
+  last_run_at?: number | null;
+  metadata?: Record<string, unknown> | null;
+  name: string;
+  next_run_at?: number | null;
+  question: string;
+  run_at?: number | null;
+  schedule_id: string;
+  schedule_type: ScheduleType;
+  tenant_id?: string | null;
+  timezone: string;
+  updated_at: number;
+  user_id?: string | null;
+  webhook?: WebhookConfig | null;
 }
 
 export interface ScheduleListResponse {
@@ -179,25 +182,25 @@ export interface ScheduleListResponse {
 }
 
 export interface ArtifactManifest {
-  job_id: string;
-  workspace_path: string;
-  files: ArtifactFile[];
-  total_size_bytes: number;
   collected_at: number;
+  files: ArtifactFile[];
+  job_id: string;
+  total_size_bytes: number;
+  workspace_path: string;
 }
 
 export interface ArtifactFile {
+  mime_type?: string;
+  modified_at: number;
   path: string;
   size_bytes: number;
-  modified_at: number;
-  mime_type?: string;
 }
 
 // =============================================================================
 // WebSocket Message Types
 // =============================================================================
 
-export type WebSocketMessageType = 
+export type WebSocketMessageType =
   | "session_update"
   | "assistant_message"
   | "tool_use"
@@ -218,45 +221,45 @@ export type WebSocketMessageType =
   | "pong";
 
 export interface WebSocketMessage {
-  type: WebSocketMessageType;
+  data: unknown;
   session_id: string;
   timestamp: number;
-  data: unknown;
+  type: WebSocketMessageType;
 }
 
 export interface SessionUpdateMessage extends WebSocketMessage {
-  type: "session_update";
   data: {
     status: "idle" | "executing" | "waiting_approval" | "error";
     current_prompt?: string;
     queue_length?: number;
   };
+  type: "session_update";
 }
 
 export interface AssistantMessageMessage extends WebSocketMessage {
-  type: "assistant_message";
   data: {
     content: string;
     partial: boolean;
   };
+  type: "assistant_message";
 }
 
 export interface ToolUseMessage extends WebSocketMessage {
-  type: "tool_use";
   data: {
     tool_use_id: string;
     name: string;
     input: Record<string, unknown>;
   };
+  type: "tool_use";
 }
 
 export interface QueryCompleteMessage extends WebSocketMessage {
-  type: "query_complete";
   data: {
     messages: Message[];
     duration_ms: number;
     summary?: Record<string, unknown>;
   };
+  type: "query_complete";
 }
 
 // =============================================================================
@@ -264,48 +267,47 @@ export interface QueryCompleteMessage extends WebSocketMessage {
 // =============================================================================
 
 export interface SessionState {
-  session_id: string;
-  session_key?: string;
-  user_id?: string;
-  tenant_id?: string;
   created_at: number;
-  last_active_at: number;
-  status: "idle" | "executing" | "waiting_approval" | "error";
   current_prompt?: string;
+  last_active_at: number;
   modal_sandbox_id?: string;
   modal_sandbox_url?: string;
+  session_id: string;
+  session_key?: string;
+  status: "idle" | "executing" | "waiting_approval" | "error";
+  tenant_id?: string;
+  user_id?: string;
 }
 
 export interface SessionMessage {
-  id: string;
-  session_id: string;
-  role: "user" | "assistant";
   content: MessageContent[];
   created_at: number;
+  id: string;
+  role: "user" | "assistant";
+  session_id: string;
 }
 
 export interface PromptQueueEntry {
-  id: string;
-  session_id: string;
-  question: string;
   agent_type: string;
-  user_id?: string;
-  queued_at: number;
+  id: string;
   priority: number;
+  question: string;
+  queued_at: number;
+  session_id: string;
+  user_id?: string;
 }
 
 export interface ConnectionInfo {
-  connection_id: string;
-  user_id?: string;
-  tenant_id?: string;
-  session_ids: string[];
   connected_at: number;
-  last_ping_at: number;
+  connection_id: string;
   ip?: string;
+  last_ping_at: number;
+  session_ids: string[];
+  tenant_id?: string;
+  user_id?: string;
 }
 
 export interface PresenceUpdateMessage extends WebSocketMessage {
-  type: "presence_update";
   data: {
     users_online: string[];
     connection_count: number;
@@ -313,24 +315,24 @@ export interface PresenceUpdateMessage extends WebSocketMessage {
     user_joined?: string;
     user_left?: string;
   };
+  type: "presence_update";
 }
 
 export interface SubscribeSessionMessage extends WebSocketMessage {
-  type: "subscribe_session";
   data: {
     session_id: string;
   };
+  type: "subscribe_session";
 }
 
 export interface UnsubscribeSessionMessage extends WebSocketMessage {
-  type: "unsubscribe_session";
   data: {
     session_id: string;
   };
+  type: "unsubscribe_session";
 }
 
 export interface JobEventMessage extends WebSocketMessage {
-  type: "job_submitted" | "job_status";
   data: {
     job_id: string;
     status?: JobStatusResponse["status"];
@@ -338,6 +340,7 @@ export interface JobEventMessage extends WebSocketMessage {
     tenant_id?: string;
     payload?: unknown;
   };
+  type: "job_submitted" | "job_status";
 }
 
 // =============================================================================
@@ -345,25 +348,25 @@ export interface JobEventMessage extends WebSocketMessage {
 // =============================================================================
 
 export interface ModalSandboxInfo {
+  created_at: number;
   sandbox_id: string;
   sandbox_name: string;
-  url: string;
   status: "running" | "terminated";
-  created_at: number;
+  url: string;
 }
 
 export interface ModalBackendRequest {
-  endpoint: string;
-  method: "GET" | "POST" | "DELETE";
   body?: unknown;
+  endpoint: string;
   headers?: Record<string, string>;
+  method: "GET" | "POST" | "DELETE";
 }
 
 export interface ModalBackendResponse {
-  ok: boolean;
-  status: number;
   data?: unknown;
   error?: string;
+  ok: boolean;
+  status: number;
 }
 
 // =============================================================================
@@ -371,33 +374,44 @@ export interface ModalBackendResponse {
 // =============================================================================
 
 export interface SessionToken {
-  session_ids?: string[];
-  session_id?: string;
-  user_id?: string;
-  tenant_id?: string;
-  issued_at: number;
   expires_at: number;
+  issued_at: number;
+  session_id?: string;
+  session_ids?: string[];
+  tenant_id?: string;
+  user_id?: string;
 }
 
 export interface AuthContext {
-  user_id?: string;
-  tenant_id?: string;
-  session_ids?: string[];
-  issued_at: number;
   expires_at: number;
+  issued_at: number;
+  session_ids?: string[];
+  tenant_id?: string;
+  user_id?: string;
 }
 
 export interface InternalAuthToken {
-  service: "cloudflare-worker";
-  issued_at: number;
   expires_at: number;
+  issued_at: number;
+  service: "cloudflare-worker";
+}
+
+export interface ArtifactAccessToken {
+  artifact_id: string;
+  artifact_path: string;
+  expires_at: number;
+  issued_at: number;
+  job_id: string;
+  service: "cloudflare-worker-artifact";
+  session_id: string;
+  token_id: string;
 }
 
 export interface RateLimitResult {
-  success: boolean;
   limit?: number;
   remaining?: number;
   reset?: number;
+  success: boolean;
 }
 
 export interface RateLimitBinding {
@@ -409,6 +423,6 @@ export interface RateLimitBinding {
 // =============================================================================
 
 export interface SSEEvent {
-  event: "assistant" | "tool_use" | "result" | "done" | "error";
   data: string; // JSON stringified
+  event: "assistant" | "tool_use" | "result" | "done" | "error";
 }

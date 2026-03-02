@@ -39,7 +39,7 @@ function parseArgs(argv) {
     expiresAtMs: undefined,
     issuedAtMs: Date.now(),
     secret: process.env.SESSION_SIGNING_SECRET,
-    asJson: false
+    asJson: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -104,8 +104,10 @@ function parseArgs(argv) {
 }
 
 function validateArgs(args) {
-  if (!args.secret || !args.secret.trim()) {
-    throw new Error("Missing signing secret. Set --secret or SESSION_SIGNING_SECRET.");
+  if (!args.secret?.trim()) {
+    throw new Error(
+      "Missing signing secret. Set --secret or SESSION_SIGNING_SECRET."
+    );
   }
 
   if (!Number.isFinite(args.issuedAtMs)) {
@@ -139,11 +141,15 @@ function validateArgs(args) {
 function createPayload(args) {
   const payload = {
     issued_at: args.issuedAtMs,
-    expires_at: args.expiresAtMs
+    expires_at: args.expiresAtMs,
   };
 
-  if (args.userId) payload.user_id = args.userId;
-  if (args.tenantId) payload.tenant_id = args.tenantId;
+  if (args.userId) {
+    payload.user_id = args.userId;
+  }
+  if (args.tenantId) {
+    payload.tenant_id = args.tenantId;
+  }
   if (args.sessionId) {
     payload.session_id = args.sessionId;
   } else if (args.sessionIds && args.sessionIds.length > 0) {

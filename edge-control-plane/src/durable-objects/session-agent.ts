@@ -1,13 +1,13 @@
 /**
  * SessionAgent Durable Object
- * 
+ *
  * Per-session state management and orchestration.
  * Each session gets its own DO instance with:
  * - Durable SQLite storage for messages, parts, and queue
  * - Session metadata and execution state
  * - Prompt queueing and sequential processing
  * - WebSocket connection management for real-time updates
- * 
+ *
  * Architecture:
  * - One SessionAgent DO per session_id (derived from DO name)
  * - DO persists session state across worker restarts
@@ -16,7 +16,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { buildInternalAuthToken } from "../auth/internalAuth";
+import { buildInternalAuthToken } from "../auth/internal-auth";
 import type {
   Env,
   Message,
@@ -29,17 +29,39 @@ import type {
   SessionMessage,
   SessionState,
   SessionUpdateMessage,
-  WebSocketMessage
+  WebSocketMessage,
 } from "../types";
+
+interface BudgetDenial {
+  code: "request_budget_exceeded" | "cost_budget_exceeded";
+  details: Record<string, unknown>;
+  error: string;
+  status: 429;
+}
+
+const TRAILING_CARRIAGE_RETURN_REGEX = /\r$/;
+
+class BudgetDeniedError extends Error {
+  readonly status = 429;
+  readonly code: BudgetDenial["code"];
+  readonly details: BudgetDenial["details"];
+
+  constructor(denial: BudgetDenial) {
+    super(denial.error);
+    this.name = "BudgetDeniedError";
+    this.code = denial.code;
+    this.details = denial.details;
+  }
+}
 
 export class SessionAgent extends DurableObject<Env> {
   private sessionState: SessionState | null = null;
-  private webSockets: Set<WebSocket> = new Set();
+  private readonly webSockets: Set<WebSocket> = new Set();
   private queueDrainInProgress = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    
+
     // Initialize database schema on first access
     this.ctx.blockConcurrencyWhile(async () => {
       await this.initializeSchema();
@@ -50,9 +72,9 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Initialize SQLite schema for session storage
    */
-  private async initializeSchema(): Promise<void> {
+  private initializeSchema(): void {
     const sql = this.ctx.storage.sql;
-    
+
     // Session metadata table
     sql.exec(`
       CREATE TABLE IF NOT EXISTS session_metadata (
@@ -60,7 +82,7 @@ export class SessionAgent extends DurableObject<Env> {
         value TEXT NOT NULL
       )
     `);
-    
+
     // Messages table
     sql.exec(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -70,7 +92,7 @@ export class SessionAgent extends DurableObject<Env> {
         created_at INTEGER NOT NULL
       )
     `);
-    
+
     // Prompt queue table
     sql.exec(`
       CREATE TABLE IF NOT EXISTS prompt_queue (
@@ -82,7 +104,7 @@ export class SessionAgent extends DurableObject<Env> {
         priority INTEGER NOT NULL DEFAULT 0
       )
     `);
-    
+
     // Execution state table
     sql.exec(`
       CREATE TABLE IF NOT EXISTS execution_state (
@@ -98,11 +120,13 @@ export class SessionAgent extends DurableObject<Env> {
    */
   private async loadSessionState(): Promise<void> {
     const sql = this.ctx.storage.sql;
-    
-    const rows = sql.exec(`
+
+    const rows = sql
+      .exec(`
       SELECT key, value FROM session_metadata
-    `).toArray() as Array<{ key: string; value: string }>;
-    
+    `)
+      .toArray() as Array<{ key: string; value: string }>;
+
     if (rows.length === 0) {
       // Initialize new session
       const sessionId = this.ctx.id.toString();
@@ -110,7 +134,7 @@ export class SessionAgent extends DurableObject<Env> {
         session_id: sessionId,
         created_at: Date.now(),
         last_active_at: Date.now(),
-        status: "idle"
+        status: "idle",
       };
       await this.saveSessionState();
     } else {
@@ -119,18 +143,18 @@ export class SessionAgent extends DurableObject<Env> {
       for (const row of rows) {
         metadata[row.key] = row.value;
       }
-      
+
       this.sessionState = {
         session_id: metadata.session_id,
         session_key: metadata.session_key,
         user_id: metadata.user_id,
         tenant_id: metadata.tenant_id,
-        created_at: parseInt(metadata.created_at),
-        last_active_at: parseInt(metadata.last_active_at),
+        created_at: Number.parseInt(metadata.created_at, 10),
+        last_active_at: Number.parseInt(metadata.last_active_at, 10),
         status: metadata.status as SessionState["status"],
         current_prompt: metadata.current_prompt,
         modal_sandbox_id: metadata.modal_sandbox_id,
-        modal_sandbox_url: metadata.modal_sandbox_url
+        modal_sandbox_url: metadata.modal_sandbox_url,
       };
     }
   }
@@ -138,31 +162,33 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Save session state to durable storage
    */
-  private async saveSessionState(): Promise<void> {
-    if (!this.sessionState) return;
-    
+  private saveSessionState(): void {
+    if (!this.sessionState) {
+      return;
+    }
+
     const sql = this.ctx.storage.sql;
     const metadata = this.sessionState;
-    
+
     const requiredEntries: [string, string][] = [
       ["session_id", metadata.session_id],
       ["created_at", metadata.created_at.toString()],
       ["last_active_at", metadata.last_active_at.toString()],
-      ["status", metadata.status]
+      ["status", metadata.status],
     ];
 
-    const optionalEntries: Array<[string, string | undefined]> = [
+    const optionalEntries: [string, string | undefined][] = [
       ["session_key", metadata.session_key],
       ["user_id", metadata.user_id],
       ["tenant_id", metadata.tenant_id],
       ["current_prompt", metadata.current_prompt],
       ["modal_sandbox_id", metadata.modal_sandbox_id],
-      ["modal_sandbox_url", metadata.modal_sandbox_url]
+      ["modal_sandbox_url", metadata.modal_sandbox_url],
     ];
 
     for (const [key, value] of requiredEntries) {
       sql.exec(
-        `INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)`,
+        "INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)",
         key,
         value
       );
@@ -171,13 +197,13 @@ export class SessionAgent extends DurableObject<Env> {
     for (const [key, value] of optionalEntries) {
       if (value && value.length > 0) {
         sql.exec(
-          `INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)`,
+          "INSERT OR REPLACE INTO session_metadata (key, value) VALUES (?, ?)",
           key,
           value
         );
       } else {
         // Clear stale optional metadata values (e.g. current_prompt after completion).
-        sql.exec(`DELETE FROM session_metadata WHERE key = ?`, key);
+        sql.exec("DELETE FROM session_metadata WHERE key = ?", key);
       }
     }
   }
@@ -196,11 +222,167 @@ export class SessionAgent extends DurableObject<Env> {
     return { maxQueueSize, expirySeconds };
   }
 
-  private async pruneExpiredQueueEntries(): Promise<void> {
+  private getBudgetConfig(): {
+    maxRequests: number;
+    maxEstimatedCostUsd: number;
+    estimatedCostPer1kCharsUsd: number;
+  } {
+    const maxRequestsRaw = this.env.MAX_SESSION_QUERY_BUDGET_REQUESTS;
+    const maxCostRaw = this.env.MAX_SESSION_QUERY_BUDGET_USD;
+    const costPer1kRaw = this.env.ESTIMATED_COST_PER_1K_CHARS_USD;
+
+    const maxRequests = Number.isFinite(Number(maxRequestsRaw))
+      ? Math.max(1, Number(maxRequestsRaw))
+      : 200;
+
+    const maxEstimatedCostUsd = Number.isFinite(Number(maxCostRaw))
+      ? Math.max(0, Number(maxCostRaw))
+      : 2.0;
+
+    const estimatedCostPer1kCharsUsd = Number.isFinite(Number(costPer1kRaw))
+      ? Math.max(0, Number(costPer1kRaw))
+      : 0.002;
+
+    return {
+      maxRequests,
+      maxEstimatedCostUsd,
+      estimatedCostPer1kCharsUsd,
+    };
+  }
+
+  private getBudgetState(): {
+    requestCount: number;
+    estimatedCostUsd: number;
+  } {
+    const sql = this.ctx.storage.sql;
+    const rows = sql
+      .exec(
+        `SELECT key, value FROM execution_state WHERE key IN ('budget_request_count', 'budget_estimated_cost_usd')`
+      )
+      .toArray() as Array<{ key: string; value: string }>;
+
+    let requestCount = 0;
+    let estimatedCostUsd = 0;
+    for (const row of rows) {
+      if (row.key === "budget_request_count") {
+        requestCount = Number.parseInt(row.value, 10) || 0;
+        continue;
+      }
+      if (row.key === "budget_estimated_cost_usd") {
+        estimatedCostUsd = Number.parseFloat(row.value) || 0;
+      }
+    }
+
+    return { requestCount, estimatedCostUsd };
+  }
+
+  private setBudgetState(state: {
+    requestCount: number;
+    estimatedCostUsd: number;
+  }): void {
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    sql.exec(
+      "INSERT OR REPLACE INTO execution_state (key, value, updated_at) VALUES (?, ?, ?)",
+      "budget_request_count",
+      String(Math.max(0, Math.trunc(state.requestCount))),
+      now
+    );
+    sql.exec(
+      "INSERT OR REPLACE INTO execution_state (key, value, updated_at) VALUES (?, ?, ?)",
+      "budget_estimated_cost_usd",
+      String(Math.max(0, state.estimatedCostUsd)),
+      now
+    );
+  }
+
+  private estimatePromptCostUsd(
+    question: string,
+    estimatedCostPer1kCharsUsd: number
+  ): number {
+    if (!question) {
+      return 0;
+    }
+    const chars = Math.max(0, question.length);
+    const estimated = (chars / 1000) * estimatedCostPer1kCharsUsd;
+    return Number.isFinite(estimated) ? Number(estimated.toFixed(6)) : 0;
+  }
+
+  private previewBudgetReservation(
+    question: string
+  ):
+    | { ok: true; requestCount: number; estimatedCostUsd: number }
+    | ({ ok: false } & BudgetDenial) {
+    const config = this.getBudgetConfig();
+    const state = this.getBudgetState();
+    const nextRequestCount = state.requestCount + 1;
+    const promptCost = this.estimatePromptCostUsd(
+      question,
+      config.estimatedCostPer1kCharsUsd
+    );
+    const nextEstimatedCost = Number(
+      (state.estimatedCostUsd + promptCost).toFixed(6)
+    );
+
+    if (nextRequestCount > config.maxRequests) {
+      return {
+        ok: false,
+        status: 429,
+        error: `Session request budget exceeded (${config.maxRequests})`,
+        code: "request_budget_exceeded",
+        details: {
+          request_count: state.requestCount,
+          requested_increment: 1,
+          max_requests: config.maxRequests,
+          estimated_cost_usd: state.estimatedCostUsd,
+          max_estimated_cost_usd: config.maxEstimatedCostUsd,
+        },
+      };
+    }
+
+    if (nextEstimatedCost > config.maxEstimatedCostUsd) {
+      return {
+        ok: false,
+        status: 429,
+        error: `Session estimated cost budget exceeded (${config.maxEstimatedCostUsd} USD)`,
+        code: "cost_budget_exceeded",
+        details: {
+          request_count: state.requestCount,
+          max_requests: config.maxRequests,
+          estimated_cost_usd: state.estimatedCostUsd,
+          estimated_cost_increment_usd: promptCost,
+          max_estimated_cost_usd: config.maxEstimatedCostUsd,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      requestCount: nextRequestCount,
+      estimatedCostUsd: nextEstimatedCost,
+    };
+  }
+
+  private reserveBudget(
+    question: string
+  ): { ok: true } | ({ ok: false } & BudgetDenial) {
+    const preview = this.previewBudgetReservation(question);
+    if (!preview.ok) {
+      return preview;
+    }
+
+    this.setBudgetState({
+      requestCount: preview.requestCount,
+      estimatedCostUsd: preview.estimatedCostUsd,
+    });
+    return { ok: true };
+  }
+
+  private pruneExpiredQueueEntries(): void {
     const { expirySeconds } = this.getQueueConfig();
     const cutoff = Date.now() - expirySeconds * 1000;
     const sql = this.ctx.storage.sql;
-    sql.exec(`DELETE FROM prompt_queue WHERE queued_at < ?`, cutoff);
+    sql.exec("DELETE FROM prompt_queue WHERE queued_at < ?", cutoff);
   }
 
   private extractSessionInfoFromUrl(request: Request): {
@@ -219,7 +401,7 @@ export class SessionAgent extends DurableObject<Env> {
       sessionId: getParam("session_id"),
       sessionKey: getParam("session_key"),
       userId: getParam("user_id"),
-      tenantId: getParam("tenant_id")
+      tenantId: getParam("tenant_id"),
     };
   }
 
@@ -229,7 +411,9 @@ export class SessionAgent extends DurableObject<Env> {
     userId?: string | null;
     tenantId?: string | null;
   }): Promise<void> {
-    if (!this.sessionState) return;
+    if (!this.sessionState) {
+      return;
+    }
 
     let changed = false;
     const incomingSessionId = params.sessionId ?? undefined;
@@ -246,12 +430,15 @@ export class SessionAgent extends DurableObject<Env> {
         console.warn("Session ID mismatch; keeping stored value", {
           stored_session_id: currentSessionId,
           incoming_session_id: incomingSessionId,
-          do_id: doId
+          do_id: doId,
         });
       }
     }
 
-    if (params.sessionKey && params.sessionKey !== this.sessionState.session_key) {
+    if (
+      params.sessionKey &&
+      params.sessionKey !== this.sessionState.session_key
+    ) {
       this.sessionState.session_key = params.sessionKey;
       changed = true;
     }
@@ -274,15 +461,15 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Handle HTTP requests to this DO
    */
-  async fetch(request: Request): Promise<Response> {
+  fetch(request: Request): Response | Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-    
+
     // Handle WebSocket upgrade requests
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocketUpgrade(request);
     }
-    
+
     // REST API endpoints
     try {
       if (path.startsWith("/queue/")) {
@@ -314,9 +501,9 @@ export class SessionAgent extends DurableObject<Env> {
     } catch (error) {
       console.error("SessionAgent error:", error);
       return new Response(
-        JSON.stringify({ 
-          ok: false, 
-          error: error instanceof Error ? error.message : "Unknown error" 
+        JSON.stringify({
+          ok: false,
+          error: error instanceof Error ? error.message : "Unknown error",
         }),
         { status: 500, headers: { "Content-Type": "application/json" } }
       );
@@ -327,62 +514,75 @@ export class SessionAgent extends DurableObject<Env> {
    * Handle WebSocket upgrade for real-time session updates
    */
   private async handleWebSocketUpgrade(request: Request): Promise<Response> {
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
     await this.reconcileSessionIdentity({
       sessionId,
       sessionKey,
       userId,
-      tenantId
+      tenantId,
     });
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    
+
     // Accept the WebSocket connection using Hibernation API
     this.ctx.acceptWebSocket(server);
     this.webSockets.add(server);
-    
+
     // Send connection acknowledgment
-    server.send(JSON.stringify({
-      type: "connection_ack",
-      session_id: this.getCurrentSessionId(),
-      timestamp: Date.now(),
-      data: { status: this.sessionState?.status }
-    } satisfies WebSocketMessage));
-    
+    server.send(
+      JSON.stringify({
+        type: "connection_ack",
+        session_id: this.getCurrentSessionId(),
+        timestamp: Date.now(),
+        data: { status: this.sessionState?.status },
+      } satisfies WebSocketMessage)
+    );
+
     return new Response(null, {
       status: 101,
-      webSocket: client
+      webSocket: client,
     });
   }
 
   /**
    * Handle incoming WebSocket messages (Hibernation API)
    */
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  async webSocketMessage(
+    ws: WebSocket,
+    message: string | ArrayBuffer
+  ): Promise<void> {
     try {
-      const data = typeof message === "string" ? message : new TextDecoder().decode(message);
+      const data =
+        typeof message === "string"
+          ? message
+          : new TextDecoder().decode(message);
       const msg = JSON.parse(data) as Record<string, unknown>;
 
       if (msg.type === "stop") {
         const stopped = await this.stopExecution();
-        ws.send(JSON.stringify({
-          type: "execution_state",
-          session_id: this.sessionState?.session_id || "",
-          timestamp: Date.now(),
-          data: { event: "stop", ok: stopped }
-        }));
+        ws.send(
+          JSON.stringify({
+            type: "execution_state",
+            session_id: this.sessionState?.session_id || "",
+            timestamp: Date.now(),
+            data: { event: "stop", ok: stopped },
+          })
+        );
         return;
       }
 
       // Handle ping/pong
       if (msg.type === "ping") {
-        ws.send(JSON.stringify({
-          type: "pong",
-          session_id: this.getCurrentSessionId(),
-          timestamp: Date.now(),
-          data: {}
-        }));
+        ws.send(
+          JSON.stringify({
+            type: "pong",
+            session_id: this.getCurrentSessionId(),
+            timestamp: Date.now(),
+            data: {},
+          })
+        );
         return;
       }
 
@@ -399,7 +599,12 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Handle WebSocket close (Hibernation API)
    */
-  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+  webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): void {
     this.webSockets.delete(ws);
     console.log(`WebSocket closed: ${code} ${reason} (clean: ${wasClean})`);
   }
@@ -424,9 +629,15 @@ export class SessionAgent extends DurableObject<Env> {
   }
 
   private parseNullableString(value: unknown): string | null | undefined {
-    if (value === undefined) return undefined;
-    if (value === null) return null;
-    if (typeof value === "string") return value;
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === "string") {
+      return value;
+    }
     return undefined;
   }
 
@@ -488,14 +699,17 @@ export class SessionAgent extends DurableObject<Env> {
     }
 
     const record = payload as Record<string, unknown>;
-    if (!Array.isArray(record.messages) || typeof record.session_id !== "string") {
+    if (
+      !Array.isArray(record.messages) ||
+      typeof record.session_id !== "string"
+    ) {
       return null;
     }
 
     const response: QueryResponse = {
       ok: typeof record.ok === "boolean" ? record.ok : true,
       session_id: record.session_id,
-      messages: record.messages as Message[]
+      messages: record.messages as Message[],
     };
 
     if (typeof record.error === "string" && record.error.length > 0) {
@@ -522,36 +736,40 @@ export class SessionAgent extends DurableObject<Env> {
   }
 
   private broadcastToEventBus(message: WebSocketMessage): void {
-    if (!this.sessionState?.session_id) return;
+    if (!this.sessionState?.session_id) {
+      return;
+    }
 
     const busName =
-      this.sessionState.tenant_id ||
-      this.sessionState.user_id ||
-      "anonymous";
+      this.sessionState.tenant_id || this.sessionState.user_id || "anonymous";
     const doId = this.env.EVENT_BUS.idFromName(busName);
     const doStub = this.env.EVENT_BUS.get(doId);
 
     const payload = {
       message,
       filter: {
-        session_ids: [this.sessionState.session_id]
-      }
+        session_ids: [this.sessionState.session_id],
+      },
     };
 
     this.ctx.waitUntil(
-      doStub.fetch(
-        new Request("https://internal/broadcast", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
+      doStub
+        .fetch(
+          new Request("https://internal/broadcast", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        )
+        .catch((error) => {
+          console.error("Failed to broadcast to EventBus:", error);
         })
-      ).catch(error => {
-        console.error("Failed to broadcast to EventBus:", error);
-      })
     );
   }
 
-  private extractQueryRequest(msg: Record<string, unknown>): QueryRequest | null {
+  private extractQueryRequest(
+    msg: Record<string, unknown>
+  ): QueryRequest | null {
     const directPayload = this.parseQueryRequestPayload(msg);
     if (directPayload) {
       return directPayload;
@@ -568,22 +786,37 @@ export class SessionAgent extends DurableObject<Env> {
   }
 
   private mapSSEEventToWSType(event: string): WebSocketMessage["type"] {
-    if (event === "assistant") return "assistant_message";
-    if (event === "tool_use") return "tool_use";
-    if (event === "tool_result") return "tool_result";
-    if (event === "done") return "query_complete";
-    if (event === "error") return "query_error";
+    if (event === "assistant") {
+      return "assistant_message";
+    }
+    if (event === "tool_use") {
+      return "tool_use";
+    }
+    if (event === "tool_result") {
+      return "tool_result";
+    }
+    if (event === "done") {
+      return "query_complete";
+    }
+    if (event === "error") {
+      return "query_error";
+    }
     return "execution_state";
   }
 
-  private async handleStreamingQuery(ws: WebSocket, body: QueryRequest): Promise<void> {
+  private async handleStreamingQuery(
+    ws: WebSocket,
+    body: QueryRequest
+  ): Promise<void> {
     if (!this.sessionState) {
-      ws.send(JSON.stringify({
-        type: "query_error",
-        session_id: "",
-        timestamp: Date.now(),
-        data: { error: "Session state not initialized" }
-      } satisfies WebSocketMessage));
+      ws.send(
+        JSON.stringify({
+          type: "query_error",
+          session_id: "",
+          timestamp: Date.now(),
+          data: { error: "Session state not initialized" },
+        } satisfies WebSocketMessage)
+      );
       return;
     }
 
@@ -591,16 +824,39 @@ export class SessionAgent extends DurableObject<Env> {
       sessionId: body.session_id,
       sessionKey: body.session_key,
       userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined
+      tenantId: body.tenant_id ?? undefined,
     });
 
     if (this.sessionState.status === "executing") {
-      ws.send(JSON.stringify({
+      ws.send(
+        JSON.stringify({
+          type: "query_error",
+          session_id: this.sessionState.session_id,
+          timestamp: Date.now(),
+          data: { error: "Session already executing" },
+        } satisfies WebSocketMessage)
+      );
+      return;
+    }
+
+    const budgetReservation = await this.reserveBudget(body.question);
+    if (!budgetReservation.ok) {
+      const deniedMessage = {
         type: "query_error",
-        session_id: this.sessionState.session_id,
+        session_id: this.sessionState?.session_id || "",
         timestamp: Date.now(),
-        data: { error: "Session already executing" }
-      } satisfies WebSocketMessage));
+        data: {
+          error: budgetReservation.error,
+          code: budgetReservation.code,
+          details: budgetReservation.details,
+        },
+      } satisfies WebSocketMessage;
+      ws.send(JSON.stringify(deniedMessage));
+      this.broadcastToEventBus(deniedMessage);
+      console.warn("query_budget_denied", {
+        session_id: this.sessionState?.session_id,
+        ...budgetReservation,
+      });
       return;
     }
 
@@ -618,8 +874,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question
-      }
+        current_prompt: body.question,
+      },
     } satisfies SessionUpdateMessage);
     this.broadcastToEventBus({
       type: "session_update",
@@ -627,8 +883,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question
-      }
+        current_prompt: body.question,
+      },
     } satisfies SessionUpdateMessage);
 
     this.broadcastToWebSockets({
@@ -637,8 +893,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         question: body.question,
-        agent_type: body.agent_type || "default"
-      }
+        agent_type: body.agent_type || "default",
+      },
     });
     this.broadcastToEventBus({
       type: "query_start",
@@ -646,8 +902,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         question: body.question,
-        agent_type: body.agent_type || "default"
-      }
+        agent_type: body.agent_type || "default",
+      },
     });
 
     const capturedMessages: Message[] = [];
@@ -664,13 +920,19 @@ export class SessionAgent extends DurableObject<Env> {
       await this.streamModalSSE(
         {
           ...body,
-          session_id: this.sessionState.session_id
+          session_id: this.sessionState.session_id,
         },
+        // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Streaming event fan-out requires ordered, inline handling for state and websocket parity.
         async (event, data) => {
           const sessionId = this.sessionState?.session_id || "";
           const timestamp = Date.now();
 
-          if (event === "assistant" || event === "user" || event === "system" || event === "result") {
+          if (
+            event === "assistant" ||
+            event === "user" ||
+            event === "system" ||
+            event === "result"
+          ) {
             capturedMessages.push(data as Message);
           }
 
@@ -685,7 +947,7 @@ export class SessionAgent extends DurableObject<Env> {
                       type: "execution_state",
                       session_id: sessionId,
                       timestamp,
-                      data: { event: "assistant_block", data: block }
+                      data: { event: "assistant_block", data: block },
                     });
                     continue;
                   }
@@ -693,15 +955,18 @@ export class SessionAgent extends DurableObject<Env> {
                   const blockRecord = block as Record<string, unknown>;
                   const blockType = blockRecord.type;
 
-                  if (blockType === "text" && typeof blockRecord.text === "string") {
+                  if (
+                    blockType === "text" &&
+                    typeof blockRecord.text === "string"
+                  ) {
                     publishWs({
                       type: "assistant_message",
                       session_id: sessionId,
                       timestamp,
                       data: {
                         content: blockRecord.text,
-                        partial: false
-                      }
+                        partial: false,
+                      },
                     });
                     continue;
                   }
@@ -714,8 +979,8 @@ export class SessionAgent extends DurableObject<Env> {
                       data: {
                         tool_use_id: blockRecord.id,
                         name: blockRecord.name,
-                        input: blockRecord.input
-                      }
+                        input: blockRecord.input,
+                      },
                     });
                     continue;
                   }
@@ -728,8 +993,8 @@ export class SessionAgent extends DurableObject<Env> {
                       data: {
                         tool_use_id: blockRecord.tool_use_id,
                         content: blockRecord.content,
-                        is_error: blockRecord.is_error
-                      }
+                        is_error: blockRecord.is_error,
+                      },
                     });
                     continue;
                   }
@@ -738,7 +1003,7 @@ export class SessionAgent extends DurableObject<Env> {
                     type: "execution_state",
                     session_id: sessionId,
                     timestamp,
-                    data: { event: "assistant_block", data: block }
+                    data: { event: "assistant_block", data: block },
                   });
                 }
               } else {
@@ -746,7 +1011,7 @@ export class SessionAgent extends DurableObject<Env> {
                   type: "execution_state",
                   session_id: sessionId,
                   timestamp,
-                  data: { event: "assistant_message", data }
+                  data: { event: "assistant_message", data },
                 });
               }
             } else {
@@ -754,7 +1019,7 @@ export class SessionAgent extends DurableObject<Env> {
                 type: "execution_state",
                 session_id: sessionId,
                 timestamp,
-                data: { event: "assistant_message", data }
+                data: { event: "assistant_message", data },
               });
             }
             return;
@@ -765,7 +1030,7 @@ export class SessionAgent extends DurableObject<Env> {
               type: this.mapSSEEventToWSType(event),
               session_id: sessionId,
               timestamp,
-              data
+              data,
             });
             return;
           }
@@ -778,19 +1043,28 @@ export class SessionAgent extends DurableObject<Env> {
               type: "execution_state",
               session_id: sessionId,
               timestamp,
-              data: { event, data }
+              data: { event, data },
             });
             return;
           }
 
           if (event === "done") {
             receivedDone = true;
-            const summary = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+            const summary =
+              data && typeof data === "object"
+                ? (data as Record<string, unknown>)
+                : {};
             let durationMs = 0;
             const summaryDuration = summary.duration_ms;
-            if (typeof summaryDuration === "number" && Number.isFinite(summaryDuration)) {
+            if (
+              typeof summaryDuration === "number" &&
+              Number.isFinite(summaryDuration)
+            ) {
               durationMs = summaryDuration;
-            } else if (latestResult && typeof latestResult.duration_ms === "number") {
+            } else if (
+              latestResult &&
+              typeof latestResult.duration_ms === "number"
+            ) {
               durationMs = latestResult.duration_ms as number;
             }
 
@@ -801,8 +1075,8 @@ export class SessionAgent extends DurableObject<Env> {
               data: {
                 messages: capturedMessages,
                 duration_ms: durationMs,
-                summary
-              }
+                summary,
+              },
             });
 
             const sessionState = this.sessionState;
@@ -835,7 +1109,7 @@ export class SessionAgent extends DurableObject<Env> {
               type: "query_error",
               session_id: sessionId,
               timestamp,
-              data: { error: errorMessage }
+              data: { error: errorMessage },
             });
 
             const sessionState = this.sessionState;
@@ -852,19 +1126,19 @@ export class SessionAgent extends DurableObject<Env> {
             type: "execution_state",
             session_id: sessionId,
             timestamp,
-            data: { event, data }
+            data: { event, data },
           });
         }
       );
 
-      if (!receivedDone && !receivedError) {
+      if (!(receivedDone || receivedError)) {
         const timestamp = Date.now();
         const sessionId = this.sessionState?.session_id || "";
         publishWs({
           type: "query_error",
           session_id: sessionId,
           timestamp,
-          data: { error: "Modal stream ended without completion" }
+          data: { error: "Modal stream ended without completion" },
         });
 
         if (this.sessionState) {
@@ -882,12 +1156,13 @@ export class SessionAgent extends DurableObject<Env> {
         await this.saveSessionState();
       }
 
-      const errorMessage = error instanceof Error ? error.message : "Streaming error";
+      const errorMessage =
+        error instanceof Error ? error.message : "Streaming error";
       const errorEvent: WebSocketMessage = {
         type: "query_error",
         session_id: this.getCurrentSessionId(),
         timestamp: Date.now(),
-        data: { error: errorMessage }
+        data: { error: errorMessage },
       };
       this.broadcastToWebSockets(errorEvent);
       this.broadcastToEventBus(errorEvent);
@@ -898,24 +1173,30 @@ export class SessionAgent extends DurableObject<Env> {
     body: QueryRequest,
     onEvent: (event: string, data: unknown) => Promise<void>
   ): Promise<void> {
-    const modalUrl = this.sessionState?.modal_sandbox_url || this.env.MODAL_API_BASE_URL;
+    const modalUrl =
+      this.sessionState?.modal_sandbox_url || this.env.MODAL_API_BASE_URL;
     const url = `${modalUrl}/query_stream`;
 
-    const authToken = await buildInternalAuthToken(this.env.INTERNAL_AUTH_SECRET);
+    const authToken = await buildInternalAuthToken(
+      this.env.INTERNAL_AUTH_SECRET
+    );
 
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        "X-Internal-Auth": authToken
+        Accept: "text/event-stream",
+        "X-Internal-Auth": authToken,
+        "X-Session-History-Authority": "durable-object",
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(errorText || `Modal streaming failed (${response.status})`);
+      throw new Error(
+        errorText || `Modal streaming failed (${response.status})`
+      );
     }
 
     if (!response.body) {
@@ -945,7 +1226,7 @@ export class SessionAgent extends DurableObject<Env> {
         parsed = JSON.parse(dataStr);
       } catch {
         console.warn("Failed to parse SSE JSON payload", {
-          event: eventName
+          event: eventName,
         });
       }
       await onEvent(eventName, parsed);
@@ -955,7 +1236,7 @@ export class SessionAgent extends DurableObject<Env> {
     };
 
     const handleLine = async (rawLine: string): Promise<void> => {
-      const line = rawLine.replace(/\r$/, "");
+      const line = rawLine.replace(TRAILING_CARRIAGE_RETURN_REGEX, "");
 
       if (line === "") {
         await emitEvent();
@@ -983,7 +1264,9 @@ export class SessionAgent extends DurableObject<Env> {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -1001,14 +1284,24 @@ export class SessionAgent extends DurableObject<Env> {
     await emitEvent();
   }
 
-  private async executeQuery(body: QueryRequest): Promise<QueryResponse> {
+  private async executeQuery(
+    body: QueryRequest,
+    preflightBudgetReserved = false
+  ): Promise<QueryResponse> {
     const startedAt = Date.now();
     await this.reconcileSessionIdentity({
       sessionId: body.session_id,
       sessionKey: body.session_key,
       userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined
+      tenantId: body.tenant_id ?? undefined,
     });
+
+    if (!preflightBudgetReserved) {
+      const budgetReservation = await this.reserveBudget(body.question);
+      if (!budgetReservation.ok) {
+        throw new BudgetDeniedError(budgetReservation);
+      }
+    }
 
     if (!this.sessionState) {
       throw new Error("Session state not initialized");
@@ -1035,8 +1328,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question
-      }
+        current_prompt: body.question,
+      },
     } satisfies SessionUpdateMessage);
     this.broadcastToEventBus({
       type: "session_update",
@@ -1044,8 +1337,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question
-      }
+        current_prompt: body.question,
+      },
     } satisfies SessionUpdateMessage);
 
     this.broadcastToWebSockets({
@@ -1054,8 +1347,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         question: body.question,
-        agent_type: body.agent_type || "default"
-      }
+        agent_type: body.agent_type || "default",
+      },
     });
     this.broadcastToEventBus({
       type: "query_start",
@@ -1063,8 +1356,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         question: body.question,
-        agent_type: body.agent_type || "default"
-      }
+        agent_type: body.agent_type || "default",
+      },
     });
 
     const modalResponse = await this.callModalBackend({
@@ -1072,8 +1365,8 @@ export class SessionAgent extends DurableObject<Env> {
       method: "POST",
       body: {
         ...body,
-        session_id: this.sessionState.session_id
-      }
+        session_id: this.sessionState.session_id,
+      },
     });
 
     if (!modalResponse.ok) {
@@ -1086,21 +1379,22 @@ export class SessionAgent extends DurableObject<Env> {
         type: "query_error",
         session_id: this.sessionState.session_id,
         timestamp: Date.now(),
-        data: { error: modalResponse.error || "Modal error" }
+        data: { error: modalResponse.error || "Modal error" },
       });
       this.broadcastToEventBus({
         type: "query_error",
         session_id: this.sessionState.session_id,
         timestamp: Date.now(),
-        data: { error: modalResponse.error || "Modal error" }
+        data: { error: modalResponse.error || "Modal error" },
       });
 
       throw new Error(modalResponse.error || "Modal error");
     }
 
     const result = this.parseQueryResponsePayload(modalResponse.data);
-    if (!result || !result.ok) {
-      const modalError = result?.error || modalResponse.error || "Invalid Modal response";
+    if (!result?.ok) {
+      const modalError =
+        result?.error || modalResponse.error || "Invalid Modal response";
       this.sessionState.status = "error";
       this.sessionState.current_prompt = undefined;
       this.sessionState.last_active_at = Date.now();
@@ -1110,13 +1404,13 @@ export class SessionAgent extends DurableObject<Env> {
         type: "query_error",
         session_id: this.sessionState.session_id,
         timestamp: Date.now(),
-        data: { error: modalError }
+        data: { error: modalError },
       });
       this.broadcastToEventBus({
         type: "query_error",
         session_id: this.sessionState.session_id,
         timestamp: Date.now(),
-        data: { error: modalError }
+        data: { error: modalError },
       });
 
       throw new Error(modalError);
@@ -1136,8 +1430,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         messages: result.messages,
-        duration_ms: durationMs
-      }
+        duration_ms: durationMs,
+      },
     } satisfies QueryCompleteMessage);
     this.broadcastToEventBus({
       type: "query_complete",
@@ -1145,8 +1439,8 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         messages: result.messages,
-        duration_ms: durationMs
-      }
+        duration_ms: durationMs,
+      },
     } satisfies QueryCompleteMessage);
 
     return result;
@@ -1174,43 +1468,107 @@ export class SessionAgent extends DurableObject<Env> {
       );
     }
 
-    try {
-      const result = await this.executeQuery(body);
-      this.ctx.waitUntil(this.drainPromptQueue());
+    await this.reconcileSessionIdentity({
+      sessionId: body.session_id,
+      sessionKey: body.session_key,
+      userId: body.user_id,
+      tenantId: body.tenant_id ?? undefined,
+    });
+
+    if (this.sessionState?.status === "executing") {
       return new Response(
-        JSON.stringify(result),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ ok: false, error: "Session already executing" }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
       );
+    }
+
+    const budgetReservation = await this.reserveBudget(body.question);
+    if (!budgetReservation.ok) {
+      console.warn("query_budget_denied", {
+        session_id: this.sessionState?.session_id,
+        ...budgetReservation,
+      });
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: budgetReservation.error,
+          code: budgetReservation.code,
+          details: budgetReservation.details,
+        }),
+        {
+          status: budgetReservation.status,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    try {
+      const result = await this.executeQuery(body, true);
+      this.ctx.waitUntil(this.drainPromptQueue());
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     } catch (error) {
       return new Response(
-        JSON.stringify({ ok: false, error: error instanceof Error ? error.message : "Unknown error" }),
+        JSON.stringify({
+          ok: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        }),
         { status: 500, headers: { "Content-Type": "application/json" } }
       );
     }
   }
 
   private async drainPromptQueue(): Promise<void> {
-    if (this.queueDrainInProgress) return;
-    if (!this.sessionState) return;
+    if (this.queueDrainInProgress) {
+      return;
+    }
+    if (!this.sessionState) {
+      return;
+    }
 
     this.queueDrainInProgress = true;
     try {
       await this.pruneExpiredQueueEntries();
       while (true) {
         const nextPrompt = await this.dequeueNextPrompt();
-        if (!nextPrompt) break;
+        if (!nextPrompt) {
+          break;
+        }
 
         const body: QueryRequest = {
           question: nextPrompt.question,
           agent_type: nextPrompt.agent_type,
           session_id: this.sessionState.session_id,
           user_id: nextPrompt.user_id ?? undefined,
-          tenant_id: this.sessionState.tenant_id ?? undefined
+          tenant_id: this.sessionState.tenant_id ?? undefined,
         };
 
         try {
           await this.executeQuery(body);
         } catch (error) {
+          if (error instanceof BudgetDeniedError) {
+            const budgetDenied = {
+              type: "query_error",
+              session_id: this.sessionState?.session_id || "",
+              timestamp: Date.now(),
+              data: {
+                error: error.message,
+                code: error.code,
+                details: error.details,
+              },
+            } satisfies WebSocketMessage;
+            this.broadcastToWebSockets(budgetDenied);
+            this.broadcastToEventBus(budgetDenied);
+            console.warn("query_budget_denied", {
+              session_id: this.sessionState?.session_id,
+              status: error.status,
+              code: error.code,
+              details: error.details,
+            });
+            break;
+          }
           console.error("Failed to process queued prompt", error);
           break;
         }
@@ -1226,7 +1584,7 @@ export class SessionAgent extends DurableObject<Env> {
    * Note: Modal backend serializes messages with "type" field ("user", "assistant", "system", "result"),
    * but our schema expects "role". We map user/assistant types to roles and skip system/result messages.
    */
-  private async storeMessages(messages: unknown[]): Promise<void> {
+  private storeMessages(messages: unknown[]): void {
     const sql = this.ctx.storage.sql;
 
     for (const message of messages) {
@@ -1238,7 +1596,7 @@ export class SessionAgent extends DurableObject<Env> {
         console.warn("Skipping message with invalid role", {
           type: msg.type,
           role: msg.role,
-          keys: Object.keys(msg)
+          keys: Object.keys(msg),
         });
         continue; // Skip non-storable message types (system, result, etc.)
       }
@@ -1247,7 +1605,7 @@ export class SessionAgent extends DurableObject<Env> {
         console.warn("Skipping message with missing content", {
           type: msg.type,
           role: msg.role,
-          keys: Object.keys(msg)
+          keys: Object.keys(msg),
         });
         continue;
       }
@@ -1257,14 +1615,14 @@ export class SessionAgent extends DurableObject<Env> {
         console.warn("Skipping message with non-serializable content", {
           type: msg.type,
           role: msg.role,
-          keys: Object.keys(msg)
+          keys: Object.keys(msg),
         });
         continue;
       }
 
       const id = crypto.randomUUID();
       sql.exec(
-        `INSERT INTO messages (id, role, content, created_at) VALUES (?, ?, ?, ?)`,
+        "INSERT INTO messages (id, role, content, created_at) VALUES (?, ?, ?, ?)",
         id,
         role,
         contentJson,
@@ -1274,7 +1632,9 @@ export class SessionAgent extends DurableObject<Env> {
   }
 
   private normalizeRole(value: unknown): "user" | "assistant" | null {
-    if (typeof value !== "string") return null;
+    if (typeof value !== "string") {
+      return null;
+    }
     const normalized = value.trim().toLowerCase();
     if (normalized === "user" || normalized === "assistant") {
       return normalized;
@@ -1282,7 +1642,9 @@ export class SessionAgent extends DurableObject<Env> {
     return null;
   }
 
-  private extractRole(msg: Record<string, unknown>): "user" | "assistant" | null {
+  private extractRole(
+    msg: Record<string, unknown>
+  ): "user" | "assistant" | null {
     const roleFromType = this.normalizeRole(msg.type);
     if (roleFromType) {
       return roleFromType;
@@ -1318,7 +1680,11 @@ export class SessionAgent extends DurableObject<Env> {
       requestBody = await request.json();
     } catch {
       return new Response(
-        JSON.stringify({ ok: false, queued: false, error: "Invalid JSON request body" }),
+        JSON.stringify({
+          ok: false,
+          queued: false,
+          error: "Invalid JSON request body",
+        }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
@@ -1326,7 +1692,11 @@ export class SessionAgent extends DurableObject<Env> {
     const body = this.parseQueryRequestPayload(requestBody);
     if (!body) {
       return new Response(
-        JSON.stringify({ ok: false, queued: false, error: "Invalid queue prompt body" }),
+        JSON.stringify({
+          ok: false,
+          queued: false,
+          error: "Invalid queue prompt body",
+        }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
@@ -1342,7 +1712,7 @@ export class SessionAgent extends DurableObject<Env> {
       sessionId: body.session_id,
       sessionKey: body.session_key,
       userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined
+      tenantId: body.tenant_id ?? undefined,
     });
     await this.pruneExpiredQueueEntries();
     const { maxQueueSize, expirySeconds } = this.getQueueConfig();
@@ -1356,16 +1726,38 @@ export class SessionAgent extends DurableObject<Env> {
           session_id: this.sessionState?.session_id || "",
           error: `Queue limit reached (${maxQueueSize})`,
           queue_size: currentLength,
-          max_queue_size: maxQueueSize
+          max_queue_size: maxQueueSize,
         }),
         { status: 429, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const budgetPreview = this.previewBudgetReservation(body.question);
+    if (!budgetPreview.ok) {
+      console.warn("query_budget_denied", {
+        session_id: this.sessionState?.session_id,
+        ...budgetPreview,
+      });
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          queued: false,
+          session_id: this.sessionState?.session_id || "",
+          error: budgetPreview.error,
+          code: budgetPreview.code,
+          details: budgetPreview.details,
+        }),
+        {
+          status: budgetPreview.status,
+          headers: { "Content-Type": "application/json" },
+        }
       );
     }
 
     const sql = this.ctx.storage.sql;
     const id = crypto.randomUUID();
     const queuedAt = Date.now();
-    
+
     sql.exec(
       `INSERT INTO prompt_queue (id, question, agent_type, user_id, queued_at, priority) 
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1379,17 +1771,17 @@ export class SessionAgent extends DurableObject<Env> {
 
     const queueLength = await this.getQueueLength();
     const expiresAt = queuedAt + expirySeconds * 1000;
-    
+
     // Broadcast queue update
     const queueMessage: WebSocketMessage = {
       type: "prompt_queued",
       session_id: this.sessionState?.session_id || "",
       timestamp: Date.now(),
-      data: { prompt_id: id, queue_length: queueLength }
+      data: { prompt_id: id, queue_length: queueLength },
     };
     this.broadcastToWebSockets(queueMessage);
     this.broadcastToEventBus(queueMessage);
-    
+
     return new Response(
       JSON.stringify({
         ok: true,
@@ -1398,7 +1790,7 @@ export class SessionAgent extends DurableObject<Env> {
         prompt_id: id,
         queue_size: queueLength,
         max_queue_size: maxQueueSize,
-        expires_at: expiresAt
+        expires_at: expiresAt,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -1407,10 +1799,12 @@ export class SessionAgent extends DurableObject<Env> {
   private async getQueueEntries(): Promise<PromptQueueEntry[]> {
     await this.pruneExpiredQueueEntries();
     const sql = this.ctx.storage.sql;
-    const rows = sql.exec(
-      `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
+    const rows = sql
+      .exec(
+        `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
        ORDER BY priority DESC, queued_at ASC`
-    ).toArray() as Array<{
+      )
+      .toArray() as Array<{
       id: string;
       question: string;
       agent_type: string;
@@ -1419,20 +1813,26 @@ export class SessionAgent extends DurableObject<Env> {
       priority: number;
     }>;
 
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       session_id: this.sessionState?.session_id || "",
       question: row.question,
       agent_type: row.agent_type,
       user_id: row.user_id || undefined,
       queued_at: row.queued_at,
-      priority: row.priority
+      priority: row.priority,
     }));
   }
 
   private async handleGetQueue(request: Request): Promise<Response> {
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
     const { maxQueueSize, expirySeconds } = this.getQueueConfig();
     const entries = await this.getQueueEntries();
     const prompts = entries.map((entry, index) => ({
@@ -1441,7 +1841,7 @@ export class SessionAgent extends DurableObject<Env> {
       user_id: entry.user_id,
       queued_at: entry.queued_at,
       expires_at: entry.queued_at + expirySeconds * 1000,
-      position: index + 1
+      position: index + 1,
     }));
     const isExecuting = this.sessionState?.status === "executing";
 
@@ -1452,7 +1852,7 @@ export class SessionAgent extends DurableObject<Env> {
         is_executing: isExecuting,
         queue_size: prompts.length,
         prompts,
-        max_queue_size: maxQueueSize
+        max_queue_size: maxQueueSize,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -1461,11 +1861,13 @@ export class SessionAgent extends DurableObject<Env> {
   private async dequeueNextPrompt(): Promise<PromptQueueEntry | null> {
     await this.pruneExpiredQueueEntries();
     const sql = this.ctx.storage.sql;
-    const rows = sql.exec(
-      `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
+    const rows = sql
+      .exec(
+        `SELECT id, question, agent_type, user_id, queued_at, priority FROM prompt_queue
        ORDER BY priority DESC, queued_at ASC
        LIMIT 1`
-    ).toArray() as Array<{
+      )
+      .toArray() as Array<{
       id: string;
       question: string;
       agent_type: string;
@@ -1474,9 +1876,11 @@ export class SessionAgent extends DurableObject<Env> {
       priority: number;
     }>;
 
-    if (rows.length === 0) return null;
+    if (rows.length === 0) {
+      return null;
+    }
     const entry = rows[0];
-    sql.exec(`DELETE FROM prompt_queue WHERE id = ?`, entry.id);
+    sql.exec("DELETE FROM prompt_queue WHERE id = ?", entry.id);
 
     return {
       id: entry.id,
@@ -1485,31 +1889,43 @@ export class SessionAgent extends DurableObject<Env> {
       agent_type: entry.agent_type,
       user_id: entry.user_id || undefined,
       queued_at: entry.queued_at,
-      priority: entry.priority
+      priority: entry.priority,
     };
   }
 
   private async handleClearQueue(request: Request): Promise<Response> {
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
 
     await this.pruneExpiredQueueEntries();
     const clearedCount = await this.getQueueLength();
     const sql = this.ctx.storage.sql;
-    sql.exec(`DELETE FROM prompt_queue`);
+    sql.exec("DELETE FROM prompt_queue");
 
     return new Response(
       JSON.stringify({
         ok: true,
         session_id: this.sessionState?.session_id || "",
         cleared_count: clearedCount,
-        message: clearedCount > 0 ? `Cleared ${clearedCount} queued prompt(s)` : "Queue was already empty"
+        message:
+          clearedCount > 0
+            ? `Cleared ${clearedCount} queued prompt(s)`
+            : "Queue was already empty",
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  private async handleQueueItem(request: Request, path: string): Promise<Response> {
+  private async handleQueueItem(
+    request: Request,
+    path: string
+  ): Promise<Response> {
     if (request.method !== "DELETE") {
       return new Response("Method not allowed", { status: 405 });
     }
@@ -1519,12 +1935,20 @@ export class SessionAgent extends DurableObject<Env> {
       return new Response("Invalid queue path", { status: 400 });
     }
 
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
 
     await this.pruneExpiredQueueEntries();
     const sql = this.ctx.storage.sql;
-    const rows = sql.exec(`SELECT id FROM prompt_queue WHERE id = ?`, promptId).toArray();
+    const rows = sql
+      .exec("SELECT id FROM prompt_queue WHERE id = ?", promptId)
+      .toArray();
     if (rows.length === 0) {
       return new Response(
         JSON.stringify({
@@ -1532,19 +1956,19 @@ export class SessionAgent extends DurableObject<Env> {
           removed: false,
           session_id: this.sessionState?.session_id || "",
           prompt_id: promptId,
-          error: "Prompt not found in queue"
+          error: "Prompt not found in queue",
         }),
         { status: 404, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    sql.exec(`DELETE FROM prompt_queue WHERE id = ?`, promptId);
+    sql.exec("DELETE FROM prompt_queue WHERE id = ?", promptId);
     return new Response(
       JSON.stringify({
         ok: true,
         removed: true,
         session_id: this.sessionState?.session_id || "",
-        prompt_id: promptId
+        prompt_id: promptId,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -1556,7 +1980,9 @@ export class SessionAgent extends DurableObject<Env> {
   private async getQueueLength(): Promise<number> {
     await this.pruneExpiredQueueEntries();
     const sql = this.ctx.storage.sql;
-    const result = sql.exec(`SELECT COUNT(*) as count FROM prompt_queue`).toArray();
+    const result = sql
+      .exec("SELECT COUNT(*) as count FROM prompt_queue")
+      .toArray();
     return (result[0] as { count: number }).count;
   }
 
@@ -1564,8 +1990,14 @@ export class SessionAgent extends DurableObject<Env> {
    * Get session state
    */
   private async handleGetState(request: Request): Promise<Response> {
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
     return new Response(
       JSON.stringify({ ok: true, state: this.sessionState }),
       { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1576,25 +2008,38 @@ export class SessionAgent extends DurableObject<Env> {
    * Get session messages
    */
   private async handleGetMessages(request: Request): Promise<Response> {
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
     const sql = this.ctx.storage.sql;
-    const rows = sql.exec(
-      `SELECT id, role, content, created_at FROM messages ORDER BY created_at ASC`
-    ).toArray() as Array<{ id: string; role: string; content: string; created_at: number }>;
-    
-    const messages: SessionMessage[] = rows.map(row => ({
+    const rows = sql
+      .exec(
+        "SELECT id, role, content, created_at FROM messages ORDER BY created_at ASC"
+      )
+      .toArray() as Array<{
+      id: string;
+      role: string;
+      content: string;
+      created_at: number;
+    }>;
+
+    const messages: SessionMessage[] = rows.map((row) => ({
       id: row.id,
       session_id: this.sessionState?.session_id || "",
       role: row.role as "user" | "assistant",
       content: JSON.parse(row.content),
-      created_at: row.created_at
+      created_at: row.created_at,
     }));
-    
-    return new Response(
-      JSON.stringify({ ok: true, messages }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+
+    return new Response(JSON.stringify({ ok: true, messages }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   /**
@@ -1608,14 +2053,20 @@ export class SessionAgent extends DurableObject<Env> {
       );
     }
 
-    const { sessionId, sessionKey, userId, tenantId } = this.extractSessionInfoFromUrl(request);
-    await this.reconcileSessionIdentity({ sessionId, sessionKey, userId, tenantId });
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
+    await this.reconcileSessionIdentity({
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
+    });
 
     const ok = await this.stopExecution();
-    return new Response(
-      JSON.stringify({ ok }),
-      { status: ok ? 200 : 500, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ ok }), {
+      status: ok ? 200 : 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   private async stopExecution(): Promise<boolean> {
@@ -1626,7 +2077,7 @@ export class SessionAgent extends DurableObject<Env> {
     const modalResponse = await this.callModalBackend({
       endpoint: `/session/${this.sessionState.session_id}/stop`,
       method: "POST",
-      body: {}
+      body: {},
     });
 
     this.sessionState.status = "idle";
@@ -1638,7 +2089,7 @@ export class SessionAgent extends DurableObject<Env> {
       type: "session_update",
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
-      data: { status: "idle" }
+      data: { status: "idle" },
     };
     this.broadcastToWebSockets(update);
     this.broadcastToEventBus(update);
@@ -1649,28 +2100,34 @@ export class SessionAgent extends DurableObject<Env> {
   /**
    * Call Modal backend with authentication
    */
-  private async callModalBackend(req: ModalBackendRequest): Promise<ModalBackendResponse> {
-    const modalUrl = this.sessionState?.modal_sandbox_url || this.env.MODAL_API_BASE_URL;
+  private async callModalBackend(
+    req: ModalBackendRequest
+  ): Promise<ModalBackendResponse> {
+    const modalUrl =
+      this.sessionState?.modal_sandbox_url || this.env.MODAL_API_BASE_URL;
     const url = `${modalUrl}${req.endpoint}`;
-    
+
     // Generate internal auth token
-    const authToken = await buildInternalAuthToken(this.env.INTERNAL_AUTH_SECRET);
-    
+    const authToken = await buildInternalAuthToken(
+      this.env.INTERNAL_AUTH_SECRET
+    );
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Internal-Auth": authToken,
-      ...(req.headers || {})
+      "X-Session-History-Authority": "durable-object",
+      ...(req.headers || {}),
     };
-    
+
     try {
       const response = await fetch(url, {
         method: req.method,
         headers,
-        body: req.body ? JSON.stringify(req.body) : undefined
+        body: req.body ? JSON.stringify(req.body) : undefined,
       });
 
       const rawBody = await response.text();
-      let data: unknown = undefined;
+      let data: unknown;
       if (rawBody.length > 0) {
         try {
           data = JSON.parse(rawBody);
@@ -1680,21 +2137,22 @@ export class SessionAgent extends DurableObject<Env> {
       }
       const parsedError = this.extractErrorMessage(data);
       const fallbackError =
-        typeof data === "string" && data.trim().length > 0 ? data : "Unknown error";
-      
+        typeof data === "string" && data.trim().length > 0
+          ? data
+          : "Unknown error";
+
       return {
         ok: response.ok,
         status: response.status,
         data: response.ok ? data : undefined,
-        error: response.ok ? undefined : parsedError || fallbackError
+        error: response.ok ? undefined : parsedError || fallbackError,
       };
     } catch (error) {
       return {
         ok: false,
         status: 500,
-        error: error instanceof Error ? error.message : "Network error"
+        error: error instanceof Error ? error.message : "Network error",
       };
     }
   }
-
 }

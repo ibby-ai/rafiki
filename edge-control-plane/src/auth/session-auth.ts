@@ -5,7 +5,7 @@ const DEFAULT_SKEW_MS = 60_000;
 
 export class AuthError extends Error {
   status: number;
-  constructor(message: string, status: number = 401) {
+  constructor(message: string, status = 401) {
     super(message);
     this.status = status;
   }
@@ -28,8 +28,8 @@ function base64DecodeToBytes(value: string): Uint8Array {
 function base64EncodeBytes(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let binary = "";
-  for (let i = 0; i < view.length; i += 1) {
-    binary += String.fromCharCode(view[i]);
+  for (const byte of view) {
+    binary += String.fromCharCode(byte);
   }
   return btoa(binary);
 }
@@ -43,7 +43,7 @@ function normalizeToken(rawToken: string): string {
 }
 
 function requireSecret(secret?: string): string {
-  if (!secret || !secret.trim()) {
+  if (!secret?.trim()) {
     throw new AuthError("Session signing secret not configured", 500);
   }
   return secret.trim();
@@ -69,14 +69,16 @@ export async function verifySessionToken(
   let payloadBytes: Uint8Array;
   try {
     payloadBytes = base64DecodeToBytes(payloadB64);
-  } catch (error) {
+  } catch {
     throw new AuthError("Invalid token payload", 401);
   }
 
   let payload: SessionToken;
   try {
-    payload = JSON.parse(new TextDecoder().decode(payloadBytes)) as SessionToken;
-  } catch (error) {
+    payload = JSON.parse(
+      new TextDecoder().decode(payloadBytes)
+    ) as SessionToken;
+  } catch {
     throw new AuthError("Invalid token payload", 401);
   }
 
@@ -86,7 +88,7 @@ export async function verifySessionToken(
 
   const issuedAt = Number(payload.issued_at);
   const expiresAt = Number(payload.expires_at);
-  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) {
+  if (!(Number.isFinite(issuedAt) && Number.isFinite(expiresAt))) {
     throw new AuthError("Invalid token timestamps", 401);
   }
 
@@ -116,16 +118,22 @@ export async function verifySessionToken(
   }
 
   const sessionIds = Array.isArray(payload.session_ids)
-    ? payload.session_ids.filter((value): value is string => typeof value === "string")
+    ? payload.session_ids.filter(
+        (value): value is string => typeof value === "string"
+      )
     : undefined;
 
-  if (!sessionIds?.length && typeof payload.session_id === "string" && payload.session_id) {
+  if (
+    !sessionIds?.length &&
+    typeof payload.session_id === "string" &&
+    payload.session_id
+  ) {
     return {
       user_id: payload.user_id || undefined,
       tenant_id: payload.tenant_id || undefined,
       session_ids: [payload.session_id],
       issued_at: issuedAt,
-      expires_at: expiresAt
+      expires_at: expiresAt,
     };
   }
 
@@ -134,7 +142,7 @@ export async function verifySessionToken(
     tenant_id: payload.tenant_id || undefined,
     session_ids: sessionIds,
     issued_at: issuedAt,
-    expires_at: expiresAt
+    expires_at: expiresAt,
   };
 }
 
@@ -153,20 +161,94 @@ function extractAuthToken(request: Request): string | null {
 }
 
 function normalizeOptionalId(value?: string | null): string | undefined {
-  if (!value) return undefined;
+  if (!value) {
+    return undefined;
+  }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function resolveSessionTtlSeconds(env: Env): number {
   const raw = env.SESSION_KEY_TTL_SECONDS;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
   return 60 * 60 * 24 * 30; // 30 days
 }
 
 function buildSessionKeyCacheKey(scope: string, sessionKey: string): string {
   return `session_key:${scope}:${sessionKey}`;
+}
+
+function assertRequestedContextMatches(
+  context: AuthContext,
+  requestedUserId: string | undefined,
+  requestedTenantId: string | undefined
+): void {
+  if (
+    context.user_id &&
+    requestedUserId &&
+    context.user_id !== requestedUserId
+  ) {
+    throw new AuthError("user_id mismatch", 403);
+  }
+  if (
+    context.tenant_id &&
+    requestedTenantId &&
+    context.tenant_id !== requestedTenantId
+  ) {
+    throw new AuthError("tenant_id mismatch", 403);
+  }
+}
+
+function enforceSessionAuthorization(
+  sessionIds: string[] | undefined,
+  resolvedSessionId: string | undefined
+): void {
+  if (!resolvedSessionId && sessionIds && sessionIds.length > 0) {
+    throw new AuthError("Session not authorized", 403);
+  }
+
+  if (
+    resolvedSessionId &&
+    sessionIds &&
+    sessionIds.length > 0 &&
+    !sessionIds.includes(resolvedSessionId)
+  ) {
+    throw new AuthError("Session not authorized", 403);
+  }
+}
+
+async function resolveSessionIdFromKey(options: {
+  env: Env;
+  resolvedSessionId: string | undefined;
+  sessionKey: string | undefined;
+  cacheScope: string;
+  sessionIds: string[] | undefined;
+}): Promise<string | undefined> {
+  if (options.resolvedSessionId || !options.sessionKey) {
+    return options.resolvedSessionId;
+  }
+
+  const cacheKey = buildSessionKeyCacheKey(
+    options.cacheScope,
+    options.sessionKey
+  );
+  const cached = await options.env.SESSION_CACHE.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (options.sessionIds && options.sessionIds.length > 0) {
+    return options.resolvedSessionId;
+  }
+
+  const generatedSessionId = crypto.randomUUID();
+  await options.env.SESSION_CACHE.put(cacheKey, generatedSessionId, {
+    expirationTtl: resolveSessionTtlSeconds(options.env),
+  });
+  return generatedSessionId;
 }
 
 export async function authenticateClientRequest(options: {
@@ -188,13 +270,7 @@ export async function authenticateClientRequest(options: {
 
   const requestedUserId = normalizeOptionalId(options.userId);
   const requestedTenantId = normalizeOptionalId(options.tenantId);
-
-  if (context.user_id && requestedUserId && context.user_id !== requestedUserId) {
-    throw new AuthError("user_id mismatch", 403);
-  }
-  if (context.tenant_id && requestedTenantId && context.tenant_id !== requestedTenantId) {
-    throw new AuthError("tenant_id mismatch", 403);
-  }
+  assertRequestedContextMatches(context, requestedUserId, requestedTenantId);
 
   const resolvedUserId = context.user_id || requestedUserId;
   const resolvedTenantId = context.tenant_id || requestedTenantId;
@@ -204,40 +280,28 @@ export async function authenticateClientRequest(options: {
   }
 
   const sessionIds = context.session_ids;
-
-  let resolvedSessionId = normalizeOptionalId(options.sessionId);
+  const incomingSessionId = normalizeOptionalId(options.sessionId);
   const sessionKey = normalizeOptionalId(options.sessionKey);
 
   const cacheScope = resolvedTenantId || resolvedUserId || "anonymous";
-  if (!resolvedSessionId && sessionKey) {
-    const cacheKey = buildSessionKeyCacheKey(cacheScope, sessionKey);
-    const cached = await options.env.SESSION_CACHE.get(cacheKey);
-    if (cached) {
-      resolvedSessionId = cached;
-    } else if (!sessionIds || sessionIds.length === 0) {
-      resolvedSessionId = crypto.randomUUID();
-      await options.env.SESSION_CACHE.put(cacheKey, resolvedSessionId, {
-        expirationTtl: resolveSessionTtlSeconds(options.env)
-      });
-    }
-  }
-
-  if (!resolvedSessionId && sessionIds && sessionIds.length > 0) {
-    throw new AuthError("Session not authorized", 403);
-  }
+  let resolvedSessionId = await resolveSessionIdFromKey({
+    env: options.env,
+    resolvedSessionId: incomingSessionId,
+    sessionKey,
+    cacheScope,
+    sessionIds,
+  });
+  enforceSessionAuthorization(sessionIds, resolvedSessionId);
 
   if (!resolvedSessionId) {
     resolvedSessionId = crypto.randomUUID();
   }
-
-  if (sessionIds && sessionIds.length > 0 && !sessionIds.includes(resolvedSessionId)) {
-    throw new AuthError("Session not authorized", 403);
-  }
+  enforceSessionAuthorization(sessionIds, resolvedSessionId);
 
   if (sessionKey) {
     const cacheKey = buildSessionKeyCacheKey(cacheScope, sessionKey);
     await options.env.SESSION_CACHE.put(cacheKey, resolvedSessionId, {
-      expirationTtl: resolveSessionTtlSeconds(options.env)
+      expirationTtl: resolveSessionTtlSeconds(options.env),
     });
   }
 
@@ -248,6 +312,6 @@ export async function authenticateClientRequest(options: {
     tenant_id: resolvedTenantId,
     session_ids: sessionIds,
     issued_at: context.issued_at,
-    expires_at: context.expires_at
+    expires_at: context.expires_at,
   };
 }
