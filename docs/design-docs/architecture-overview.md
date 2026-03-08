@@ -1,6 +1,15 @@
 # Architecture Overview
 
-This document explains the overall architecture of Rafiki, focusing on the relationship between Modal's ingress layer and the long-lived background service.
+This document explains the Modal execution backend inside Rafiki's Cloudflare-first architecture.
+For public ingress, session authority, and control-plane behavior, start with `docs/design-docs/cloudflare-hybrid-architecture.md`.
+
+## Boundary Summary
+
+| Layer | Role | Audience |
+|---|---|---|
+| Cloudflare Worker + Durable Objects | Public control plane, auth, session state, queueing, streaming | Client-facing |
+| Modal `http_app` gateway | Internal Worker-forwarding target and local/operator diagnostic surface | Internal/operator |
+| Controller sandbox | Long-lived OpenAI Agents runtime with tools and sessions | Internal |
 
 ## High-Level Architecture
 
@@ -44,24 +53,25 @@ The application uses a **single-sandbox architecture pattern** optimized for low
 
 ## Component Responsibilities
 
-### 1. Modal Infrastructure (Ingress Layer)
+### 1. Modal Infrastructure (Internal Gateway Layer)
 
 **What it does:**
-- Accepts incoming HTTPS requests from external clients
+- Accepts incoming HTTPS requests for the Modal gateway URL
 - Terminates TLS/SSL connections
 - Routes requests to the appropriate Modal function
 - Provides load balancing and auto-scaling
-- Manages authentication and authorization (via Modal Connect tokens)
+- Carries internal Worker traffic and optional local/operator diagnostics
 
 **Key characteristics:**
 - Fully managed by Modal
 - No code required in your application
 - Automatically handles SSL certificates
-- Provides public URLs like `https://<org>--modal-backend-http-app-dev.modal.run`
+- Provides addressable gateway URLs like `https://<org>--modal-backend-http-app-dev.modal.run`
+- In Rafiki Phase 3, this gateway is not the supported client-facing public ingress
 
 **How it works:**
 When you deploy with `modal serve` or `modal deploy`, Modal:
-1. Provisions a public HTTPS endpoint
+1. Provisions an addressable HTTPS endpoint for the Modal gateway
 2. Routes all traffic to functions decorated with `@modal.asgi_app()`
 3. Handles SSL termination, DDoS protection, and routing automatically
 
@@ -70,7 +80,7 @@ When you deploy with `modal serve` or `modal deploy`, Modal:
 **Location:** `modal_backend/main.py`
 
 **What it does:**
-- Acts as the entry point for all HTTP requests
+- Acts as the Modal-side entry point for internal Worker traffic and local/operator diagnostics
 - Lightweight proxy that forwards requests to the background sandbox
 - Handles Modal Connect token generation (optional)
 - Manages sandbox lifecycle (creates/reuses sandbox)
@@ -87,6 +97,8 @@ def http_app():
 ```
 
 **Endpoints:**
+
+These endpoints exist on the Modal gateway, but client traffic should use the Cloudflare Worker routes documented in `docs/references/api-usage.md`.
 
 | Category | Endpoint | Target |
 |----------|----------|--------|
@@ -127,7 +139,7 @@ def http_app():
 **Key characteristics:**
 - Distributed key-value storage
 - Persists across sandbox restarts
-- Enables job tracking (session continuity now handled by Cloudflare KV)
+- Enables job tracking; durable session continuity lives in SessionAgent DO storage, while Cloudflare KV is used for `session_key -> session_id` cache resolution
 
 ### 5. Agent SDK Sandbox (svc-runner-8001)
 
@@ -158,50 +170,60 @@ def http_app():
 
 1. **Client Request:**
    ```bash
-   curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/query' \
+   curl -X POST 'https://<your-worker>.workers.dev/query' \
+     -H 'Authorization: Bearer <session-token>' \
      -H 'Content-Type: application/json' \
      -d '{"question":"What is the capital of Canada?"}'
    ```
 
-2. **Modal Infrastructure:**
+2. **Cloudflare Control Plane:**
+   - Validates client token and request scope
+   - Routes the request through SessionAgent DO logic
+   - Signs an internal request to the Modal gateway
+
+3. **Modal Infrastructure:**
    - Receives HTTPS request
    - Terminates TLS
    - Routes to `http_app` function
 
-3. **http_app Handler:**
+4. **http_app Handler:**
    - Receives request at `POST /query`
    - Calls `get_or_start_background_sandbox_aio()` to get/reuse sandbox
    - Discovers encrypted tunnel URL for the background service
    - Optionally generates Modal Connect token for authentication
    - Makes HTTP request to background service: `POST {SERVICE_URL}/query`
 
-4. **Background Service (Controller):**
+5. **Background Service (Controller):**
    - Receives request at `/query` endpoint
    - Builds an OpenAI `Agent` from configured options
    - Executes a run via `Runner.run_streamed(...)`
    - Maps stream items into compatibility message events
    - Returns JSON response with messages
 
-5. **Response Path:**
-   - Background service → http_app → Modal Infrastructure → Client
+6. **Response Path:**
+   - Background service → http_app → Modal Infrastructure → Worker/DO → Client
 
 ### Example: User submits an async job
 
 1. **Client Request:**
    ```bash
-   curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/submit' \
+   curl -X POST 'https://<your-worker>.workers.dev/submit' \
+     -H 'Authorization: Bearer <session-token>' \
      -H 'Content-Type: application/json' \
      -d '{"question":"Analyze this large dataset..."}'
    ```
 
-2. **http_app Handler:**
-   - Receives request at `POST /submit`
-   - Generates unique `job_id`
+2. **Cloudflare Control Plane:**
+   - Validates auth and forwards the job request to the Modal gateway with internal auth headers
+
+3. **http_app Handler:**
+   - Receives internal request at `POST /submit`
+   - Receives a Worker-generated `job_id`
    - Creates job record in `JOB_RESULTS` dict (status: `queued`)
-   - Enqueues job payload to `JOB_QUEUE`
+   - Enqueues the supplied job payload to `JOB_QUEUE`
    - Returns immediately: `{"ok": true, "job_id": "..."}`
 
-3. **Worker Processing:**
+4. **Worker Processing:**
    - `process_job_queue` function picks up job from queue
    - Updates job status to `running`
    - Executes agent query via background sandbox
@@ -209,16 +231,19 @@ def http_app():
    - Updates status to `complete` or `failed`
    - If webhook config is present, spawns webhook delivery attempts
 
-4. **Client Polling:**
+5. **Client Polling:**
    ```bash
-   curl 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}'
+   curl 'https://<your-worker>.workers.dev/jobs/{job_id}' \
+     -H 'Authorization: Bearer <session-token>'
    ```
    - Returns job status and result when complete
 
-5. **Artifact Retrieval:**
+6. **Artifact Retrieval:**
    ```bash
-   curl 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}/artifacts'
-   curl -O 'https://<org>--modal-backend-http-app-dev.modal.run/jobs/{job_id}/artifacts/report.md'
+   curl 'https://<your-worker>.workers.dev/jobs/{job_id}/artifacts' \
+     -H 'Authorization: Bearer <session-token>'
+   curl -H 'Authorization: Bearer <session-token>' \
+     -O 'https://<your-worker>.workers.dev/jobs/{job_id}/artifacts/report.md'
    ```
    - Lists artifacts and downloads generated files
 
@@ -259,8 +284,8 @@ def http_app():
 5. **Security:**
    - Sandbox runs in isolated environment
    - Encrypted ports prevent direct access
-   - Modal Connect tokens provide per-request authentication
-   - TLS termination handled by Modal infrastructure
+   - Cloudflare owns public auth, session scope, and rate limiting
+   - Internal Worker -> Modal and gateway -> sandbox auth preserve backend isolation
 
 ### Trade-offs
 
@@ -308,9 +333,11 @@ modal deploy -m modal_backend.deploy
 ```
 
 Both commands:
-1. Deploy `http_app` as a public HTTPS endpoint
-2. Create Agent SDK sandbox on first `/query` request
-3. Handle all routing and lifecycle management automatically
+1. Expose an addressable Modal gateway endpoint for Worker forwarding and operator diagnostics
+2. Create Agent SDK sandbox on first internal `/query` request
+3. Handle backend routing and lifecycle management automatically
+
+Client-facing production also requires deploying `edge-control-plane/` so Cloudflare remains the only supported public ingress.
 
 ## Sandbox Configuration Summary
 

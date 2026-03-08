@@ -1,6 +1,7 @@
-# Modal Ingress: How HTTP Requests Reach Your Application
+# Modal Ingress: Internal Gateway Mechanics in Rafiki
 
-This document explains how Modal handles HTTP ingress (incoming traffic) and routes requests to your application.
+This document explains how Modal handles HTTP ingress for Rafiki's `http_app` gateway.
+In Phase 3, external clients should enter through the Cloudflare Worker + Durable Objects control plane; the Modal URL is an internal gateway plus local/operator diagnostic surface, not the supported client-facing ingress.
 
 ## What is Ingress?
 
@@ -19,16 +20,16 @@ This document explains how Modal handles HTTP ingress (incoming traffic) and rou
 
 Modal provides a **fully managed ingress layer** that:
 
-1. **Accepts HTTPS requests** on public URLs
+1. **Accepts HTTPS requests** on addressable Modal URLs
 2. **Terminates TLS/SSL** (handles SSL certificates automatically)
 3. **Routes to your functions** based on the `@modal.asgi_app()` decorator
 4. **Handles authentication** (Modal Connect tokens, Proxy Auth tokens, API keys)
 5. **Provides DDoS protection** and rate limiting
 6. **Manages load balancing** and auto-scaling
 
-### Public URLs
+### Addressable Modal URLs
 
-When you deploy with `modal serve` or `modal deploy`, Modal generates public URLs:
+When you deploy with `modal serve` or `modal deploy`, Modal generates addressable URLs for the gateway:
 
 **Development:**
 ```
@@ -50,12 +51,14 @@ https://<org>--modal-backend-http-app.modal.run
 This project defers custom-domain configuration for now; see Task 08 in the ExecPlan for future
 implementation steps.
 
+In Rafiki, these URLs are used by the Cloudflare control plane and by local/operator diagnostics. Client-facing traffic should use the Worker URL documented in `docs/references/api-usage.md`.
+
 ### How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Internet / External Clients               │
-│  curl, browser, API clients, etc.                           │
+│        Cloudflare Worker / Operator Diagnostic Client         │
+│  signed internal requests or local validation traffic        │
 └───────────────────────────┬─────────────────────────────────┘
                             │
                             │ HTTPS Request
@@ -121,7 +124,8 @@ def http_app():
 - `@app.function()` defines a Modal function with image and secrets
 - `@modal.asgi_app()` marks it as an HTTP endpoint
 - Function returns an ASGI app (FastAPI instance)
-- Modal automatically creates public URL and routes traffic
+- Modal automatically creates an addressable URL and routes traffic
+- In Rafiki, that URL sits behind Cloudflare for client traffic
 
 ### ASGI Protocol
 
@@ -140,10 +144,11 @@ def http_app():
 
 ## Request Flow: Step by Step
 
-### 1. Client Makes Request
+### 1. Worker or Operator Diagnostic Client Makes Request
 
 ```bash
 curl -X POST 'https://<org>--modal-backend-http-app-dev.modal.run/query' \
+  -H 'X-Internal-Auth: <signed-internal-token>' \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is the capital of Canada?"}'
 ```
@@ -164,9 +169,9 @@ Modal examines:
 
 Modal routes to: `modal-backend` app → `http_app` function → `/query` endpoint
 
-### 4. Authentication (Optional)
+### 4. Rafiki Authentication Layer
 
-If Modal Connect tokens are enabled:
+For Rafiki, internal auth is required on non-health gateway endpoints. Optional Modal Connect token handling may still be used for the gateway-to-sandbox hop:
 
 ```python
 # In http_app handler
@@ -175,7 +180,7 @@ if settings.enforce_connect_token:
     headers = {"Authorization": f"Bearer {creds.token}"}
 ```
 
-Modal validates the token and injects `X-Verified-User-Data` header.
+Modal validates the connect token and injects `X-Verified-User-Data` header when that feature is enabled.
 
 ### 5. Function Invocation
 
@@ -201,7 +206,7 @@ async def query_proxy(request: Request, body: QueryBody):
 - FastAPI generates HTTP response
 - Modal infrastructure receives response
 - TLS encryption applied
-- Response sent back to client
+- Response sent back to the Worker or operator diagnostic client
 
 ## Key Features of Modal Ingress
 
@@ -267,12 +272,11 @@ if not request.headers.get("X-Verified-User-Data"):
 - Token expiration
 - Revocable tokens
 
-### API Keys (Alternative)
+### Modal API Keys (Platform Capability, Not Rafiki Gateway Auth)
 
-Modal also supports API key authentication:
-- Configure in Modal dashboard
-- Pass via `Authorization: Bearer <key>` header
-- Validated by Modal infrastructure
+Modal supports platform-level API key authentication, but Rafiki does not treat Modal API keys as a supported client-ingress alternative for non-health gateway routes.
+- Rafiki non-health gateway requests still require `X-Internal-Auth`.
+- Use the Cloudflare Worker for client traffic and the signed internal gateway path for backend forwarding.
 
 ### Network Isolation
 

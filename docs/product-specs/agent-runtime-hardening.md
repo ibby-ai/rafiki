@@ -30,4 +30,4 @@ Users and operators can reliably correlate a run across logs and SSE output usin
 - Mitigation: explicit validation errors and updated docs.
 
 ## Linked ExecPlan
-- `docs/exec-plans/active/openai-agents-hardening/PLAN_openai-agents-hardening.md`
+- `docs/exec-plans/completed/openai-agents-hardening/PLAN_openai-agents-hardening.md`
