@@ -3,6 +3,11 @@
 This page is the guided map for Cloudflare + Modal runtime operations.
 For the full references catalog (including non-runtime docs), use `docs/references/index.md`.
 
+Phase 3 boundary:
+- Cloudflare Worker + Durable Objects are the only supported client-facing ingress.
+- Modal `http_app` is the internal gateway used by Worker forwarding and by local/operator diagnostics.
+- The controller sandbox executes agent runs behind that gateway.
+
 ## First-Time Setup
 
 Use the canonical Cloudflare <-> Modal runbook first:
@@ -16,7 +21,7 @@ cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 source .venv/bin/activate
 ```
 
-If you only need a quick Modal runtime smoke check:
+If you only need a quick internal Modal runtime smoke check:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
@@ -67,9 +72,11 @@ If startup fails, verify:
 
 ## Key Concepts
 
+- **Worker + Durable Objects**: The public control plane for client auth, session authority, queueing, and streaming.
+- **Modal `http_app`**: The internal gateway for Worker-forwarded traffic and local/operator diagnostics.
 - **Controller**: The long-lived FastAPI service in `modal_backend/api/controller.py` that executes OpenAI Agents runs.
-- **Two-Tier Architecture**:
-  - `http_app` receives public/internal requests.
+- **Backend Architecture**:
+  - `http_app` receives internal Worker traffic plus local/operator diagnostic traffic.
   - Controller sandbox executes agent runs and streams SSE events.
 - **Session Memory**: OpenAI `SQLiteSession` with persisted session IDs and optional fork behavior.
 - **Readiness Hardening**: gateway startup waits on controller `/health_check`, logs bounded diagnostics on timeout, performs one recycle+retry, and fails deterministically after a second timeout.

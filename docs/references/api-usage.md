@@ -1,6 +1,7 @@
 # API Usage Guide
 
-This guide documents the external HTTP contract and streaming behavior.
+This guide documents the client-facing HTTP contract and streaming behavior.
+Cloudflare Worker URLs are the only supported public/client entrypoint; Modal gateway URLs are internal/operator-only surfaces behind internal auth.
 
 ## Base URLs
 
@@ -12,7 +13,7 @@ This guide documents the external HTTP contract and streaming behavior.
 
 `https://<org>--<app>-http-app.modal.run`
 
-Internal endpoints require `X-Internal-Auth` (except health).
+Internal endpoints require `X-Internal-Auth` (except health) and should not be used as direct client traffic.
 
 ## Core Endpoints
 
@@ -79,20 +80,22 @@ Response envelope (unchanged):
 }
 ```
 
-### `POST /query_stream`
+### `GET /query_stream`
 
-Streaming query execution.
+Streaming query execution via WebSocket upgrade.
 
 Public Cloudflare route uses WebSocket transport; internal controller uses SSE.
 
-SSE event names preserved:
+Expected public WebSocket message types include:
 
-- `assistant`
-- `tool_use`
-- `tool_result`
-- `result`
-- `done`
-- `error`
+- `connection_ack`
+- `query_start`
+- `assistant_message`
+- `execution_state`
+- `query_complete`
+- `query_error`
+
+Internal controller SSE event names remain an internal backend contract.
 
 ### `POST /session/{session_id}/queue`
 

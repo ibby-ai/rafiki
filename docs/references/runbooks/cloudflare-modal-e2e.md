@@ -31,9 +31,14 @@ Cloudflare Worker secrets (in `edge-control-plane`):
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
-wrangler secret put MODAL_TOKEN_ID
-wrangler secret put MODAL_TOKEN_SECRET
 ```
+
+Notes:
+
+- The standard local Cloudflare <-> Modal `/health`, `/query`, `/query_stream`, queue, and
+  state flow only consumes `INTERNAL_AUTH_SECRET` and `SESSION_SIGNING_SECRET` on the Worker.
+- `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` are not consumed by the current canonical
+  `edge-control-plane/src` E2E request path documented in this runbook.
 
 ### Required bindings
 
@@ -225,17 +230,12 @@ Expected:
 - env scrubbing assertions pass for sensitive keys.
 - writable-root parsing assertions pass.
 
-Optional runtime endpoint check (when internal auth token is available):
+Optional live controller check:
 
-```bash
-curl -sS "$DEV_URL/runtime_hardening" \
-  -H "X-Internal-Auth: <signed-internal-token>"
-```
-
-Expected:
-
-- `{"ok": true, "report": {...}}`
-- `report` includes `initial_uid`, `final_uid`, `writable_probe`, and `scrubbed_keys`.
+- `/runtime_hardening` is exposed by the sandbox controller, not the top-level
+  `http_app`, so `curl "$DEV_URL/runtime_hardening"` returns `404` in the current topology.
+- Treat `uv run python -m pytest tests/test_runtime_hardening.py` as the canonical gate unless
+  you are intentionally calling the controller URL with scoped sandbox auth.
 
 ### 6) Session Budget Denial Smoke Checks (Task 05)
 

@@ -135,8 +135,14 @@ Canonical runbook: `docs/references/runbooks/cloudflare-modal-e2e.md`
 - `SESSION_CACHE` KV binding
 - `SESSION_SIGNING_SECRET` secret
 - `INTERNAL_AUTH_SECRET` secret
-- `MODAL_TOKEN_ID` secret
-- `MODAL_TOKEN_SECRET` secret
+
+Notes:
+
+- The standard Cloudflare <-> Modal `/health`, `/query`, `/query_stream`, queue, and state
+  path currently signs Worker -> Modal requests with `INTERNAL_AUTH_SECRET`; the Worker source
+  does not consume `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` for that canonical E2E request path.
+- If future Worker routes adopt explicit Modal workspace auth, document those separately instead
+  of treating them as part of the baseline E2E contract.
 
 ### Required Modal-side configuration
 

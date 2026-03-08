@@ -87,14 +87,17 @@ Edit `wrangler.jsonc`:
 #### 2. Create Secrets
 
 ```bash
-# Modal API credentials
-wrangler secret put MODAL_TOKEN_ID
-wrangler secret put MODAL_TOKEN_SECRET
-
-# Internal authentication
+# Internal authentication for the standard local E2E path
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
 ```
+
+Notes:
+
+- The standard local `/health`, `/query`, `/query_stream`, queue, and state flow signs
+  Worker -> Modal requests with `INTERNAL_AUTH_SECRET`.
+- `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` are not consumed by the current canonical
+  `edge-control-plane/src` E2E request path.
 
 Generate secrets:
 
