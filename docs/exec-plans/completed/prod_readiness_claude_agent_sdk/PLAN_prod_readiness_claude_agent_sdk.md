@@ -1,4 +1,6 @@
-# PLAN_prod_readiness_claude_agent_sdk
+# Historical Plan: Production Readiness (Claude Agent SDK)
+
+> Historical note: this plan reflects pre-OpenAI-cutover production-readiness work. The current runtime is OpenAI Agents-based, and this artifact is retained for audit continuity only. Current runtime hardening is captured in `docs/exec-plans/completed/openai-agents-hardening/PLAN_openai-agents-hardening.md` and `docs/exec-plans/completed/openai_agents_migration/PLAN_openai_agents_migration.md`.
 
 ## Purpose / Big Picture
 
@@ -44,7 +46,7 @@ Not started.
 
 ## Concrete Steps
 
-- Task files live in `docs/exec-plans/active/prod_readiness_claude_agent_sdk/tasks/`:
+- Task files live in `docs/exec-plans/completed/prod_readiness_claude_agent_sdk/tasks/`:
   - TASK_01_prod_readiness_claude_agent_sdk.md
   - TASK_02_prod_readiness_claude_agent_sdk.md
   - TASK_03_prod_readiness_claude_agent_sdk.md

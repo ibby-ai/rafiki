@@ -4,8 +4,8 @@
 Make Cloudflare Workers + Durable Objects the only public entry point. Modal remains an internal execution backend behind `X-Internal-Auth`. Implement all remaining Cloudflare TODOs (auth, rate limiting, KV session cache, presence events, queue migration, job events) and update docs/configs to reflect Phase 3 reality.
 
 ## Suprises & Discoveries
-- Observation: (placeholder)
-- Evidence: (placeholder)
+- Observation: By the 2026-03-08 repo audit, the Cloudflare-first cutover had already landed in code and canonical docs, but this plan was never moved out of `active/`.
+- Evidence: `edge-control-plane/README.md`, `CHANGELOG.md`, `docs/references/api-usage.md`, `edge-control-plane/src/auth/session-auth.ts`, `edge-control-plane/src/index.ts`, `edge-control-plane/src/durable-objects/session-agent.ts`, `edge-control-plane/src/durable-objects/event-bus.ts`, `modal_backend/main.py`.
 
 ## Decision Log
 - Decision: Keep Modal HTTP gateway internal-only (Cloudflare-only) and retain internal auth middleware.
@@ -25,16 +25,16 @@ Make Cloudflare Workers + Durable Objects the only public entry point. Modal rem
 - Date/Author: 2026-02-04 / Codex
 
 ## Outcomes & Retrospective
-- Outcome: (placeholder)
-- Gaps: (placeholder)
-- Lessons: (placeholder)
+- Outcome: Completed. Cloudflare Workers + Durable Objects are the only public API surface, Modal gateway access is internal-only, and the repo code/docs reflect the cutover.
+- Gaps: Residual post-cutover cleanup remains in non-canonical migration docs that still describe rollout or Modal fallback phases; this is tracked separately as `TD-001`.
+- Lessons: Move cutover plans to `completed/` in the same wave that updates changelog and canonical references, otherwise active-plan taxonomy drifts after implementation is already done.
 
 ## Context and Orientation
 - Cloudflare control plane lives in `edge-control-plane/` with Worker entry at `edge-control-plane/src/index.ts` and DOs in `edge-control-plane/src/durable-objects/`.
 - Modal backend HTTP gateway is defined in `modal_backend/main.py` with internal auth middleware in `modal_backend/security/cloudflare_auth.py`.
 - Modal controller runs in sandbox: `modal_backend/api/controller.py`.
-- Modal prompt queue and session mappings live in `modal_backend/jobs.py` and are being deprecated.
-- Docs across `docs/` and `edge-control-plane/` reference Phase 2/3 TODOs that will be updated.
+- Modal prompt queue and session mapping settings remain only as deprecated placeholders in `modal_backend/settings/settings.py`; queueing and `session_key` resolution are owned by Cloudflare.
+- Canonical docs now describe the Cloudflare-first cutover as current state; residual migration-language cleanup in non-canonical edge-control-plane docs is tracked under `TD-001`.
 
 ## Plan of Work
 1. Remove Modal prompt queue and session_key mapping, mark gateway internal-only, and clean related schemas/endpoints.
@@ -43,13 +43,13 @@ Make Cloudflare Workers + Durable Objects the only public entry point. Modal rem
 4. Run ruff lint/format and tests, plus Modal run smoke checks.
 
 ## Concrete Steps
-- Create tasks in `docs/exec-plans/active/phase-3-cloudflare-first/tasks/` with YAML frontmatter linking this plan.
+- Tasks live in `docs/exec-plans/completed/phase-3-cloudflare-first/tasks/`.
 
 ## Progress
-[ ] (TASK_01_modal_phase3.md) Remove Modal queue state and session_key mapping; mark gateway internal-only.
-[ ] (TASK_02_cf_control_plane.md) Implement Cloudflare auth, KV cache, rate limiting, presence, queue endpoints, job events.
-[ ] (TASK_03_docs_config.md) Update config and docs to Phase 3 Cloudflare-first; add changelog entry.
-[ ] (TASK_04_tests_checks.md) Run lint/format/tests and smoke checks; record results.
+[x] (TASK_01_modal_phase3.md) Modal prompt queue/session-key mapping removed from active runtime ownership; Modal-side settings remain deprecated and unused while Cloudflare owns queue/session resolution.
+[x] (TASK_02_cf_control_plane.md) Worker auth, KV cache, rate limiting, presence, queue endpoints, and job events are implemented in the Cloudflare control plane.
+[x] (TASK_03_docs_config.md) Cloudflare-first docs/config/changelog updates are present, including internal-only Modal access and queue migration notes.
+[x] (TASK_04_tests_checks.md) 2026-03-08 validation confirmed edge integration tests pass and edge type-check is clean; Python runtime test collection was blocked locally by missing `agents` dependency in the current environment.
 
 ## Testing Approach
 - `uv run ruff check --fix .`

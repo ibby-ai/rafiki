@@ -9,7 +9,7 @@ Adopt the highest-impact security and scaling ideas from the X article "How We B
 - Observation: One high-risk tool path still relies on `eval()` in runtime code.
 - Evidence: `modal_backend/mcp_tools/calculate_tool.py`.
 - Observation: Current docs describe strong Cloudflare-first intent, but active plans and architecture narratives are not fully synchronized on status and next gates.
-- Evidence: `docs/design-docs/cloudflare-hybrid-architecture.md`, `docs/exec-plans/index.md`, `docs/exec-plans/active/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md`.
+- Evidence: `docs/design-docs/cloudflare-hybrid-architecture.md`, `docs/exec-plans/index.md`, `docs/exec-plans/completed/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md`.
 - Observation: `uv run pytest ...` executed against a stale interpreter entrypoint in this workspace and caused false collection failures (`ModuleNotFoundError: agents`); `uv run python -m pytest ...` is hermetic and passed.
 - Evidence: local validation runs on 2026-03-02 (`25/20/17/8 test` command sets).
 - Observation: `npm --prefix edge-control-plane run check` was non-zero during this wave and required a dedicated follow-up remediation pass; `tsc --noEmit` remained green.
