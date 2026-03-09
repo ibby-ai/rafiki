@@ -11,6 +11,7 @@
 - None currently.
 
 ## Completed Plans
+- [Modal SDK 1.3.5 Upgrade](./completed/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md)
 - [Phase 3 Cloudflare-First Cutover](./completed/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md)
 - [OpenAI Agents Hardening](./completed/openai-agents-hardening/PLAN_openai-agents-hardening.md)
 - [Runtime Readiness Hardening](./completed/runtime-readiness-hardening/PLAN_runtime-readiness-hardening.md)

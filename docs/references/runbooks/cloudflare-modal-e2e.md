@@ -8,6 +8,7 @@ This is the canonical end-to-end test runbook for the Cloudflare Worker control 
 
 - Python + `uv`
 - Node.js 20+
+- Repo `.venv` synced with `modal>=1.3.5` (`uv sync --extra dev`)
 - Modal CLI authenticated: `modal setup`
 - Wrangler authenticated: `wrangler login`
 - `wscat` installed for WebSocket verification: `npm install -g wscat`
@@ -80,6 +81,10 @@ export WORKER_URL="http://localhost:8787"
 # Must match the value configured via wrangler secret put SESSION_SIGNING_SECRET
 export SESSION_SIGNING_SECRET="<your-session-signing-secret>"
 ```
+
+Validation note:
+
+- Prefer `uv run python -m pytest ...` over bare `uv run pytest ...` so the repo interpreter and synced Modal SDK are used consistently during Python validation.
 
 Auth consistency expectations:
 

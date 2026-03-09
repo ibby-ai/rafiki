@@ -14,6 +14,8 @@ uv run modal run -m modal_backend.main
 ```
 
 All Modal CLI commands in this doc are expected to run from the activated repo `.venv` (or prefixed with `uv run`).
+This repo now expects the `.venv` to resolve `modal>=1.3.5`.
+For Python validation, prefer `uv run python -m pytest ...` so the repo interpreter is used even when a global `pytest` is on `PATH`.
 
 ## Required Secrets
 

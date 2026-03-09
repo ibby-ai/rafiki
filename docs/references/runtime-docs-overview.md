@@ -21,6 +21,12 @@ cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 source .venv/bin/activate
 ```
 
+Version contract:
+
+- The repo dependency floor is `modal>=1.3.5`.
+- Async runtime handlers rely on Modal 1.3.x async interfaces (`.aio`) for sandbox/app lookups and function spawns.
+- For Python checks, prefer `uv run python -m pytest ...` to ensure the repo interpreter is used.
+
 If you only need a quick internal Modal runtime smoke check:
 
 ```bash
@@ -46,6 +52,7 @@ uv run modal run -m modal_backend.main
 If startup fails, verify:
 - `OPENAI_API_KEY` is valid and present in `openai-secret`
 - `modal setup` completed successfully
+- `.venv` is synced (`uv sync --extra dev`) and `uv run python - <<'PY' ... importlib.metadata.version("modal") ... PY` reports `1.3.5` or newer
 
 ## Start Here
 

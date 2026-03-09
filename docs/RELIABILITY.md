@@ -66,3 +66,21 @@
 
 ### Residual Reliability Risk
 - Hot-reload churn during `modal serve` can repeatedly rebuild/restart the app while files change; runbook now explicitly recommends recycling named sandboxes after secret/runtime-surface changes before final E2E validation.
+
+## 2026-03-09 Reliability Update - Modal SDK 1.3.5 Upgrade
+
+### Delivered Reliability Controls
+- Repo dependency/lock state now targets `modal 1.3.5`, removing drift from the previously locked `1.3.0.post1`.
+- Async request/startup flows now use Modal `.aio` interfaces for sandbox/app lookups and function spawns, eliminating blocking Modal calls in the validated ingress/runtime paths.
+- Async HTTP endpoints that still rely on sync Modal-backed helpers (job/schedule/prewarm/session metadata stores) now run those helpers off the event loop via `anyio.to_thread`.
+- Explicit teardown paths now use `terminate(wait=True)` when supported, making `terminate_service_sandbox` and the local entrypoint wait for sandbox shutdown before assuming persistence/cleanup is complete.
+
+### Validation Evidence
+- `uv run python -m pytest tests/test_sandbox_auth_header.py tests/test_query_proxy_error_normalization.py` -> pass (`28 passed`)
+- `uv run python -m pytest tests/test_schedules.py tests/test_jobs_enqueue.py tests/test_jobs_cancellation.py tests/test_jobs_security.py` -> pass (`21 passed`)
+- `uv run python -W error -m pytest -o asyncio_default_fixture_loop_scope=function tests/test_sandbox_auth_header.py -k 'prewarm or get_or_start_background_sandbox_aio or terminate'` -> pass (`8 passed`)
+- `npm --prefix edge-control-plane run check` -> pass
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> pass
+
+### Residual Reliability Risk
+- The canonical Cloudflare <-> Modal live E2E runbook was not rerun in this upgrade wave, so real network/runtime behavior beyond the targeted local validation matrix remains an explicit follow-up if release confidence requires a full end-to-end replay.

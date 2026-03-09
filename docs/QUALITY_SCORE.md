@@ -99,3 +99,23 @@
 |---|---|---|---|
 | Operational references | 5 | 5 | Failure signatures/remediation paths now cover TD-003 token/db edge cases and concrete Worker error expectations. |
 | Security/reliability governance | 5 | 5 | TD-003 moved from open debt to closed with auditable matrix + live E2E proof and strict-auth preservation. |
+
+## Re-Score (2026-03-09) - Modal SDK 1.3.5 Upgrade
+
+### Change Wave Scope
+- ExecPlan: `docs/exec-plans/active/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md`
+- Runtime/test/docs updates for Modal dependency freshness, async-interface safety, and deterministic teardown behavior
+
+### Evidence Snapshot
+- `uv run python -m pytest tests/test_sandbox_auth_header.py tests/test_query_proxy_error_normalization.py` -> passed (`28 passed`)
+- `uv run python -m pytest tests/test_schedules.py tests/test_jobs_enqueue.py tests/test_jobs_cancellation.py tests/test_jobs_security.py` -> passed (`21 passed`)
+- `uv run python -W error -m pytest -o asyncio_default_fixture_loop_scope=function tests/test_sandbox_auth_header.py -k 'prewarm or get_or_start_background_sandbox_aio or terminate'` -> passed (`8 passed`)
+- `npm --prefix edge-control-plane run check` -> passed
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> passed
+
+### Score Impact
+| Dimension | Previous | New | Rationale |
+|---|---|---|---|
+| Architecture clarity | 5 | 5 | Runtime docs now capture the Modal 1.3.5 async-interface contract and explicit teardown semantics. |
+| Operational references | 5 | 5 | Operator docs now pin the repo Modal floor and the repo-local Python validation command shape. |
+| Security/reliability governance | 5 | 5 | Reliability evidence now includes warning-sensitive async regression coverage for the upgraded SDK. |
