@@ -1,54 +1,9 @@
 version = 1
 requires-python = ">=3.11"
-
-[[package]]
-name = "rafiki"
-version = "0.2.0"
-source = { editable = "." }
-dependencies = [
-    { name = "croniter" },
-    { name = "fastapi" },
-    { name = "langsmith", extra = ["openai-agents"] },
-    { name = "llm-auto-context" },
-    { name = "modal" },
-    { name = "openai-agents" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "tzdata" },
+resolution-markers = [
+    "python_full_version < '3.14'",
+    "python_full_version >= '3.14'",
 ]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "croniter", specifier = ">=2.0.5" },
-    { name = "fastapi", specifier = ">=0.119.1" },
-    { name = "langsmith", extras = ["openai-agents"], specifier = ">=0.3.15" },
-    { name = "llm-auto-context" },
-    { name = "modal", specifier = ">=1.2.5" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "openai-agents", specifier = "==0.9.2" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "tzdata", specifier = ">=2025.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.14.10" }]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -636,13 +591,32 @@ wheels = [
 name = "grpclib"
 version = "0.4.8"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.14'",
+]
 dependencies = [
-    { name = "h2" },
-    { name = "multidict" },
+    { name = "h2", marker = "python_full_version < '3.14'" },
+    { name = "multidict", marker = "python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/75/0f0d3524b38b35e5cd07334b754aa9bd0570140ad982131b04ebfa3b0374/grpclib-0.4.8.tar.gz", hash = "sha256:d8823763780ef94fed8b2c562f7485cf0bbee15fc7d065a640673667f7719c9a", size = 62793 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/8b/ad381ec1b8195fa4a9a693cb8087e031b99530c0d6b8ad036dcb99e144c4/grpclib-0.4.8-py3-none-any.whl", hash = "sha256:a5047733a7acc1c1cee6abf3c841c7c6fab67d2844a45a853b113fa2e6cd2654", size = 76311 },
+]
+
+[[package]]
+name = "grpclib"
+version = "0.4.9"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14'",
+]
+dependencies = [
+    { name = "h2", marker = "python_full_version >= '3.14'" },
+    { name = "multidict", marker = "python_full_version >= '3.14'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/28/5a2c299ec82a876a252c5919aa895a6f1d1d35c96417c5ce4a4660dc3a80/grpclib-0.4.9.tar.gz", hash = "sha256:cc589c330fa81004c6400a52a566407574498cb5b055fa927013361e21466c46", size = 84798 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/90/b0cbbd9efcc82816c58f31a34963071aa19fb792a212a5d9caf8e0fc3097/grpclib-0.4.9-py3-none-any.whl", hash = "sha256:7762ec1c8ed94dfad597475152dd35cbd11aecaaca2f243e29702435ca24cf0e", size = 77063 },
 ]
 
 [[package]]
@@ -1002,14 +976,15 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.3.0.post1"
+version = "1.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "cbor2" },
     { name = "certifi" },
     { name = "click" },
-    { name = "grpclib" },
+    { name = "grpclib", version = "0.4.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "grpclib", version = "0.4.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "protobuf" },
     { name = "rich" },
     { name = "synchronicity" },
@@ -1020,9 +995,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/28/4a6befa42cfa62eedb572b0bbc26edb76b664bf546ee1f9fca566448da8d/modal-1.3.0.post1.tar.gz", hash = "sha256:e86b62c6cfd5c4b40fdf7bcf078d24e4ed7730d2d0b7c70dc3225a36e85067a4", size = 649508 }
+sdist = { url = "https://files.pythonhosted.org/packages/32/fd/f4a684209dab54d7dc9d92f48d779b30d04aa8b4c6dd1395d6c61967ee34/modal-1.3.5.tar.gz", hash = "sha256:2e320e7dbc8995ce0769796a9027248a8b976b519469cc4599d6855a1a53a123", size = 655193 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/87/3c4c9136c2d553307d8547e39bb2ed755e165b8a8272b6990af9912fef5c/modal-1.3.0.post1-py3-none-any.whl", hash = "sha256:98d338aade676bafd7c80645ef7b4302a6a7219338124ef8b210854a043ec7ed", size = 744342 },
+    { url = "https://files.pythonhosted.org/packages/10/39/aa5c773a4dddef833f1c846bb4204b442588b99a1d15ab7818157e66b32c/modal-1.3.5-py3-none-any.whl", hash = "sha256:67e5d3635c2c355d63b3e30f9012dd2bc9c38d5747349335c7ba9da65edca1cb", size = 755272 },
 ]
 
 [[package]]
@@ -1676,6 +1651,55 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/90/4b/07c77d8ba0e01349358082713400435347df8426208171ce297da32c313d/pywin32-311-cp314-cp314-win_amd64.whl", hash = "sha256:3aca44c046bd2ed8c90de9cb8427f581c479e594e99b5c0bb19b29c10fd6cb87", size = 9656800 },
     { url = "https://files.pythonhosted.org/packages/c0/d2/21af5c535501a7233e734b8af901574572da66fcc254cb35d0609c9080dd/pywin32-311-cp314-cp314-win_arm64.whl", hash = "sha256:a508e2d9025764a8270f93111a970e1d0fbfc33f4153b388bb649b7eec4f9b42", size = 8932540 },
 ]
+
+[[package]]
+name = "rafiki"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "croniter" },
+    { name = "fastapi" },
+    { name = "langsmith", extra = ["openai-agents"] },
+    { name = "llm-auto-context" },
+    { name = "modal" },
+    { name = "openai-agents" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "tzdata" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "croniter", specifier = ">=2.0.5" },
+    { name = "fastapi", specifier = ">=0.119.1" },
+    { name = "langsmith", extras = ["openai-agents"], specifier = ">=0.3.15" },
+    { name = "llm-auto-context" },
+    { name = "modal", specifier = ">=1.3.5" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "openai-agents", specifier = "==0.9.2" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "tzdata", specifier = ">=2025.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.14.10" }]
 
 [[package]]
 name = "referencing"
