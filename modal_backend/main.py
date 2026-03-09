@@ -35,6 +35,7 @@ import time
 import time as _time
 import urllib.error
 import urllib.request
+from functools import partial
 from pathlib import Path
 from threading import Lock
 from typing import Literal
@@ -348,6 +349,23 @@ def _require_history_authority_header(request: Request) -> None:
     authority = (request.headers.get("X-Session-History-Authority") or "").strip()
     if authority and authority != "durable-object":
         raise HTTPException(status_code=409, detail="Unsupported session history authority")
+
+
+async def _run_blocking_modal_call(func, /, *args, **kwargs):
+    """Run sync Modal-backed helpers off the event loop in async handlers."""
+    return await anyio.to_thread.run_sync(partial(func, *args, **kwargs))
+
+
+async def _spawn_modal_function(function, /, *args):
+    """Spawn a Modal function from async code without using a blocking interface."""
+    spawn_aio = getattr(function.spawn, "aio", None)
+    if callable(spawn_aio):
+        return await spawn_aio(*args)
+    return await _run_blocking_modal_call(function.spawn, *args)
+
+
+def _set_store_value(store, key, value) -> None:
+    store[key] = value
 
 
 def _normalize_query_upstream_error(raw_body: str) -> dict[str, object]:
@@ -1307,7 +1325,11 @@ async def query_proxy(request: Request, body: QueryBody):
     # Check for pre-warmed sandbox (from POST /warm)
     prewarm_claimed = None
     if body.warm_id and settings.enable_prewarm:
-        prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
+        prewarm_claimed = await _run_blocking_modal_call(
+            claim_prewarm,
+            body.warm_id,
+            resolved_session_id or "anonymous",
+        )
         if prewarm_claimed and prewarm_claimed.get("claimed"):
             _logger.info(
                 "Query using pre-warmed sandbox",
@@ -1333,7 +1355,7 @@ async def query_proxy(request: Request, body: QueryBody):
     url = None
     if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
         try:
-            sb = modal.Sandbox.from_id(prewarm_claimed["sandbox_id"])
+            sb = await modal.Sandbox.from_id.aio(prewarm_claimed["sandbox_id"])
             url = prewarm_claimed["sandbox_url"]
             await _wait_for_service_or_raise_readiness_timeout_aio(
                 sandbox=sb,
@@ -1346,13 +1368,21 @@ async def query_proxy(request: Request, body: QueryBody):
         except _SandboxReadinessTimeoutError as timeout_exc:
             await _handle_readiness_timeout_async(timeout_exc)
             if body.warm_id:
-                mark_prewarm_failed(body.warm_id, f"Readiness timeout: {timeout_exc}")
+                await _run_blocking_modal_call(
+                    mark_prewarm_failed,
+                    body.warm_id,
+                    f"Readiness timeout: {timeout_exc}",
+                )
             sb = None
             url = None
             prewarm_claimed = None
         except Exception:
             if body.warm_id:
-                mark_prewarm_failed(body.warm_id, "Pre-warm sandbox failed readiness probe")
+                await _run_blocking_modal_call(
+                    mark_prewarm_failed,
+                    body.warm_id,
+                    "Pre-warm sandbox failed readiness probe",
+                )
             sb = None
             url = None
             prewarm_claimed = None
@@ -1369,7 +1399,8 @@ async def query_proxy(request: Request, body: QueryBody):
         )
         headers["Authorization"] = f"Bearer {creds.token}"
 
-    _add_sandbox_auth_header(
+    await _run_blocking_modal_call(
+        _add_sandbox_auth_header,
         headers=headers,
         request_path="/query",
         sandbox_id=sb.object_id if sb else None,
@@ -1407,12 +1438,17 @@ async def query_proxy(request: Request, body: QueryBody):
     # This captures filesystem state for session restoration on resume
     if settings.enable_session_snapshots:
         result_session_id = result.get("session_id")
-        if result_session_id and should_snapshot_session(
-            result_session_id, settings.snapshot_min_interval_seconds
-        ):
+        should_snapshot = False
+        if result_session_id:
+            should_snapshot = await _run_blocking_modal_call(
+                should_snapshot_session,
+                result_session_id,
+                settings.snapshot_min_interval_seconds,
+            )
+        if result_session_id and should_snapshot:
             try:
                 # Fire-and-forget: spawn snapshot in background
-                snapshot_session_state.spawn(result_session_id, sb.object_id)
+                await _spawn_modal_function(snapshot_session_state, result_session_id, sb.object_id)
                 _logger.debug(
                     "Spawned session snapshot",
                     extra={"session_id": result_session_id},
@@ -1439,7 +1475,11 @@ async def query_stream(request: Request, body: QueryBody):
     # Check for pre-warmed sandbox (from POST /warm)
     prewarm_claimed = None
     if body.warm_id and settings.enable_prewarm:
-        prewarm_claimed = claim_prewarm(body.warm_id, resolved_session_id or "anonymous")
+        prewarm_claimed = await _run_blocking_modal_call(
+            claim_prewarm,
+            body.warm_id,
+            resolved_session_id or "anonymous",
+        )
         if prewarm_claimed and prewarm_claimed.get("claimed"):
             _logger.info(
                 "Query stream using pre-warmed sandbox",
@@ -1465,7 +1505,7 @@ async def query_stream(request: Request, body: QueryBody):
     url = None
     if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
         try:
-            sb = modal.Sandbox.from_id(prewarm_claimed["sandbox_id"])
+            sb = await modal.Sandbox.from_id.aio(prewarm_claimed["sandbox_id"])
             url = prewarm_claimed["sandbox_url"]
             await _wait_for_service_or_raise_readiness_timeout_aio(
                 sandbox=sb,
@@ -1478,13 +1518,21 @@ async def query_stream(request: Request, body: QueryBody):
         except _SandboxReadinessTimeoutError as timeout_exc:
             await _handle_readiness_timeout_async(timeout_exc)
             if body.warm_id:
-                mark_prewarm_failed(body.warm_id, f"Readiness timeout: {timeout_exc}")
+                await _run_blocking_modal_call(
+                    mark_prewarm_failed,
+                    body.warm_id,
+                    f"Readiness timeout: {timeout_exc}",
+                )
             sb = None
             url = None
             prewarm_claimed = None
         except Exception:
             if body.warm_id:
-                mark_prewarm_failed(body.warm_id, "Pre-warm sandbox failed readiness probe")
+                await _run_blocking_modal_call(
+                    mark_prewarm_failed,
+                    body.warm_id,
+                    "Pre-warm sandbox failed readiness probe",
+                )
             sb = None
             url = None
             prewarm_claimed = None
@@ -1500,7 +1548,8 @@ async def query_stream(request: Request, body: QueryBody):
         )
         headers["Authorization"] = f"Bearer {creds.token}"
 
-    _add_sandbox_auth_header(
+    await _run_blocking_modal_call(
+        _add_sandbox_auth_header,
         headers=headers,
         request_path="/query_stream",
         sandbox_id=sb.object_id if sb else None,
@@ -1538,9 +1587,18 @@ async def query_stream(request: Request, body: QueryBody):
 
         # Trigger snapshot after stream completes
         if settings.enable_session_snapshots and captured_session_id:
-            if should_snapshot_session(captured_session_id, settings.snapshot_min_interval_seconds):
+            should_snapshot = await _run_blocking_modal_call(
+                should_snapshot_session,
+                captured_session_id,
+                settings.snapshot_min_interval_seconds,
+            )
+            if should_snapshot:
                 try:
-                    snapshot_session_state.spawn(captured_session_id, sb.object_id)
+                    await _spawn_modal_function(
+                        snapshot_session_state,
+                        captured_session_id,
+                        sb.object_id,
+                    )
                     _logger.debug(
                         "Spawned session snapshot after stream",
                         extra={"session_id": captured_session_id},
@@ -1561,7 +1619,8 @@ async def query_stream(request: Request, body: QueryBody):
 async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
     """Enqueue a background job and return its id."""
     try:
-        job_id = enqueue_job(
+        job_id = await _run_blocking_modal_call(
+            enqueue_job,
             body.question,
             job_id=body.job_id,
             tenant_id=body.tenant_id,
@@ -1581,7 +1640,7 @@ async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
 async def job_status(request: Request, job_id: str) -> JobStatusResponse:
     """Fetch job status and result (if available)."""
     job_id = _normalize_job_id_or_400(job_id)
-    status = get_job_status(job_id)
+    status = await _run_blocking_modal_call(get_job_status, job_id)
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     _enforce_job_actor_scope(request, status)
@@ -1592,8 +1651,8 @@ async def job_status(request: Request, job_id: str) -> JobStatusResponse:
 async def job_artifacts(request: Request, job_id: str) -> ArtifactListResponse:
     """List artifacts generated by a job."""
     job_id = _normalize_job_id_or_400(job_id)
-    status = get_job_status(job_id)
-    _reload_persist_volume()
+    status = await _run_blocking_modal_call(get_job_status, job_id)
+    await _run_blocking_modal_call(_reload_persist_volume)
     if not status:
         manifest = _build_artifact_manifest(job_id)
         if not manifest.files:
@@ -1609,10 +1668,10 @@ async def download_job_artifact(request: Request, job_id: str, artifact_path: st
     """Download a specific job artifact."""
     job_id = _normalize_job_id_or_400(job_id)
     _verify_artifact_access_token(request, job_id=job_id, artifact_path=artifact_path)
-    status = get_job_status(job_id)
+    status = await _run_blocking_modal_call(get_job_status, job_id)
     if status:
         _enforce_job_actor_scope(request, status)
-    _reload_persist_volume()
+    await _run_blocking_modal_call(_reload_persist_volume)
     resolved = _resolve_artifact_path(job_id, artifact_path)
     if not resolved or not resolved.exists() or not resolved.is_file():
         detail = "Artifact not found" if status else "Job not found"
@@ -1637,10 +1696,15 @@ async def revoke_artifact_token(token_id: str, reason: str | None = None) -> dic
     normalized = token_id.strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="token_id is required")
-    ARTIFACT_ACCESS_REVOKED[normalized] = {
-        "revoked_at": int(time.time()),
-        "reason": reason or "manual",
-    }
+    await _run_blocking_modal_call(
+        _set_store_value,
+        ARTIFACT_ACCESS_REVOKED,
+        normalized,
+        {
+            "revoked_at": int(time.time()),
+            "reason": reason or "manual",
+        },
+    )
     return {"ok": True, "token_id": normalized, "revoked": True}
 
 
@@ -1648,7 +1712,7 @@ async def revoke_artifact_token(token_id: str, reason: str | None = None) -> dic
 async def cancel_job_request(job_id: str) -> JobStatusResponse:
     """Cancel a queued job."""
     job_id = _normalize_job_id_or_400(job_id)
-    status = cancel_job(job_id)
+    status = await _run_blocking_modal_call(cancel_job, job_id)
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
@@ -1661,7 +1725,12 @@ async def create_schedule_request(
     """Create a new one-off or recurring schedule."""
     user_id, tenant_id = _request_actor_context(request)
     try:
-        schedule = create_schedule(body, user_id=user_id, tenant_id=tenant_id)
+        schedule = await _run_blocking_modal_call(
+            create_schedule,
+            body,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
     except ScheduleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ScheduleResponse(**schedule)
@@ -1675,7 +1744,8 @@ async def list_schedules_request(
 ) -> ScheduleListResponse:
     """List schedules for the authenticated actor scope."""
     user_id, tenant_id = _request_actor_context(request)
-    schedules = list_schedules(
+    schedules = await _run_blocking_modal_call(
+        list_schedules,
         user_id=user_id,
         tenant_id=tenant_id,
         enabled=enabled,
@@ -1687,7 +1757,7 @@ async def list_schedules_request(
 @web_app.post("/schedules/dispatch")
 async def dispatch_schedules_request() -> dict[str, int]:
     """Dispatch due schedules on demand (safe for dev E2E while using modal serve)."""
-    result = dispatch_due_schedules()
+    result = await _run_blocking_modal_call(dispatch_due_schedules)
     _logger.info("schedule.dispatch.manual", extra=result)
     return result
 
@@ -1697,7 +1767,12 @@ async def get_schedule_request(schedule_id: str, request: Request) -> ScheduleRe
     """Fetch a single schedule."""
     schedule_id = _normalize_schedule_id_or_400(schedule_id)
     user_id, tenant_id = _request_actor_context(request)
-    schedule = get_schedule(schedule_id, user_id=user_id, tenant_id=tenant_id)
+    schedule = await _run_blocking_modal_call(
+        get_schedule,
+        schedule_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return ScheduleResponse(**schedule)
@@ -1711,7 +1786,13 @@ async def update_schedule_request(
     schedule_id = _normalize_schedule_id_or_400(schedule_id)
     user_id, tenant_id = _request_actor_context(request)
     try:
-        schedule = update_schedule(schedule_id, body, user_id=user_id, tenant_id=tenant_id)
+        schedule = await _run_blocking_modal_call(
+            update_schedule,
+            schedule_id,
+            body,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
     except ScheduleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Schedule not found") from exc
     except (InvalidScheduleIdError, ScheduleError) as exc:
@@ -1724,7 +1805,12 @@ async def delete_schedule_request(schedule_id: str, request: Request) -> Schedul
     """Delete an existing schedule."""
     schedule_id = _normalize_schedule_id_or_400(schedule_id)
     user_id, tenant_id = _request_actor_context(request)
-    deleted = delete_schedule(schedule_id, user_id=user_id, tenant_id=tenant_id)
+    deleted = await _run_blocking_modal_call(
+        delete_schedule,
+        schedule_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return ScheduleDeleteResponse(schedule_id=schedule_id, deleted=True)
@@ -1874,7 +1960,7 @@ async def workspace_retention_status_endpoint() -> WorkspaceRetentionStatusRespo
     Returns:
         WorkspaceRetentionStatusResponse with retention statistics
     """
-    status = get_workspace_retention_status()
+    status = await _run_blocking_modal_call(get_workspace_retention_status)
     return WorkspaceRetentionStatusResponse(**status)
 
 
@@ -1896,7 +1982,8 @@ async def workspace_cleanup_endpoint(
     Returns:
         WorkspaceCleanupResponse with cleanup statistics
     """
-    return _cleanup_expired_workspaces(
+    return await _run_blocking_modal_call(
+        _cleanup_expired_workspaces,
         older_than_days=body.older_than_days,
         status_filter=body.status_filter,
         dry_run=body.dry_run,
@@ -1933,7 +2020,11 @@ async def stats_endpoint(
         ```
     """
     period_hours = min(max(period_hours, 1), 720)  # Clamp to valid range
-    return get_stats(period_hours=period_hours, include_time_series=include_time_series)
+    return await _run_blocking_modal_call(
+        get_stats,
+        period_hours=period_hours,
+        include_time_series=include_time_series,
+    )
 
 
 @web_app.get("/pool/status")
@@ -1960,7 +2051,7 @@ async def pool_status_endpoint():
             "message": "Warm pool is disabled",
         }
 
-    pool_status = get_warm_pool_status()
+    pool_status = await _run_blocking_modal_call(get_warm_pool_status)
     entries = pool_status.get("entries", [])
     missing_scoped_secret_count = 0
     for entry in entries:
@@ -1997,7 +2088,7 @@ async def get_image_version_endpoint():
         curl 'https://<org>--modal-backend-http-app-dev.modal.run/image/version'
         ```
     """
-    stored_version = get_current_image_version()
+    stored_version = await _run_blocking_modal_call(get_current_image_version)
     return {
         "ok": True,
         "version_id": _IMAGE_VERSION_ID,
@@ -2058,7 +2149,8 @@ async def prewarm_sandbox(body: WarmRequest) -> WarmResponse:
     warm_id = generate_warm_id()
 
     # Register the pre-warm request
-    entry = register_prewarm(
+    entry = await _run_blocking_modal_call(
+        register_prewarm,
         warm_id=warm_id,
         sandbox_type=body.sandbox_type,
         session_id=body.session_id,
@@ -2067,7 +2159,7 @@ async def prewarm_sandbox(body: WarmRequest) -> WarmResponse:
 
     # Spawn background task to warm the sandbox
     # This runs async and updates the pre-warm entry when ready
-    prewarm_agent_sdk_sandbox.spawn(warm_id, body.session_id)
+    await _spawn_modal_function(prewarm_agent_sdk_sandbox, warm_id, body.session_id)
 
     _logger.info(
         "Pre-warm request registered",
@@ -2103,7 +2195,7 @@ async def get_prewarm_status_by_id(warm_id: str):
         curl 'https://<org>--modal-backend-http-app.modal.run/warm/abc-123'
         ```
     """
-    entry = get_prewarm(warm_id)
+    entry = await _run_blocking_modal_call(get_prewarm, warm_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Pre-warm not found or expired")
     return {"ok": True, **entry}
@@ -2132,7 +2224,7 @@ async def prewarm_status_endpoint() -> WarmStatusResponse:
             timeout_seconds=_settings.prewarm_timeout_seconds,
         )
 
-    status = get_prewarm_status()
+    status = await _run_blocking_modal_call(get_prewarm_status)
     return WarmStatusResponse(
         enabled=True,
         total=status["total"],
@@ -2198,9 +2290,10 @@ async def stop_session(
     requested_by = body.requested_by if body else None
 
     # Always set cancellation in persistent store (for graceful mode).
-    existing = get_session_cancellation(session_id)
+    existing = await _run_blocking_modal_call(get_session_cancellation, session_id)
     if not existing:
-        entry = cancel_session(
+        entry = await _run_blocking_modal_call(
+            cancel_session,
             session_id=session_id,
             requested_by=requested_by,
             reason=reason,
@@ -2215,7 +2308,8 @@ async def stop_session(
         try:
             sb, service_url = await get_or_start_background_sandbox_aio(session_id=session_id)
             headers: dict[str, str] = {}
-            _add_sandbox_auth_header(
+            await _run_blocking_modal_call(
+                _add_sandbox_auth_header,
                 headers=headers,
                 request_path=f"/session/{session_id}/stop",
                 sandbox_id=sb.object_id,
@@ -2293,7 +2387,7 @@ async def get_session_stop_status(session_id: str) -> SessionStopResponse:
             message="Session cancellation is disabled in settings",
         )
 
-    entry = get_session_cancellation(session_id)
+    entry = await _run_blocking_modal_call(get_session_cancellation, session_id)
     if not entry:
         return SessionStopResponse(
             ok=True,
@@ -2336,7 +2430,7 @@ async def get_cancellation_status_endpoint() -> SessionCancellationStatusRespons
             expiry_seconds=_settings.cancellation_expiry_seconds,
         )
 
-    status = get_cancellation_status()
+    status = await _run_blocking_modal_call(get_cancellation_status)
     return SessionCancellationStatusResponse(
         enabled=True,
         total=status["total"],
@@ -2375,7 +2469,7 @@ async def get_session_metadata_endpoint(session_id: str) -> SessionMetadataRespo
             message="Multiplayer sessions are disabled",
         )
 
-    metadata = get_session_metadata(session_id)
+    metadata = await _run_blocking_modal_call(get_session_metadata, session_id)
     if not metadata:
         return SessionMetadataResponse(
             ok=False,
@@ -2384,7 +2478,7 @@ async def get_session_metadata_endpoint(session_id: str) -> SessionMetadataRespo
         )
 
     # Check for snapshot presence
-    snapshot = get_session_snapshot(session_id)
+    snapshot = await _run_blocking_modal_call(get_session_snapshot, session_id)
 
     return SessionMetadataResponse(
         ok=True,
@@ -2422,7 +2516,7 @@ async def get_session_users_endpoint(session_id: str) -> SessionUsersResponse:
             message="Multiplayer sessions are disabled",
         )
 
-    users = get_session_users(session_id)
+    users = await _run_blocking_modal_call(get_session_users, session_id)
     if not users:
         return SessionUsersResponse(
             ok=False,
@@ -2467,13 +2561,22 @@ async def share_session_endpoint(
         )
 
     # Check if session exists, auto-create if not
-    metadata = get_session_metadata(session_id)
+    metadata = await _run_blocking_modal_call(get_session_metadata, session_id)
     if not metadata:
         # Create session metadata with requester as owner
-        metadata = create_session_metadata(session_id, owner_id=body.requested_by)
+        metadata = await _run_blocking_modal_call(
+            create_session_metadata,
+            session_id,
+            owner_id=body.requested_by,
+        )
 
     # Authorize the user
-    result = authorize_session_user(session_id, body.user_id, authorized_by=body.requested_by)
+    result = await _run_blocking_modal_call(
+        authorize_session_user,
+        session_id,
+        body.user_id,
+        authorized_by=body.requested_by,
+    )
     if not result:
         return SessionShareResponse(
             ok=False,
@@ -2516,7 +2619,12 @@ async def unshare_session_endpoint(
             message="Multiplayer sessions are disabled",
         )
 
-    result = revoke_session_user(session_id, body.user_id, revoked_by=body.requested_by)
+    result = await _run_blocking_modal_call(
+        revoke_session_user,
+        session_id,
+        body.user_id,
+        revoked_by=body.requested_by,
+    )
     if not result:
         return SessionUnshareResponse(
             ok=False,
@@ -2564,8 +2672,13 @@ async def get_session_history_endpoint(
             message="Multiplayer sessions are disabled",
         )
 
-    total_count = get_session_message_count(session_id)
-    messages = get_session_history(session_id, limit=limit, offset=offset)
+    total_count = await _run_blocking_modal_call(get_session_message_count, session_id)
+    messages = await _run_blocking_modal_call(
+        get_session_history,
+        session_id,
+        limit=limit,
+        offset=offset,
+    )
 
     # Convert to schema objects
     message_entries = [
@@ -2614,7 +2727,7 @@ async def get_multiplayer_status_endpoint() -> MultiplayerStatusResponse:
             max_history_per_session=_settings.max_message_history_per_session,
         )
 
-    status = get_multiplayer_status()
+    status = await _run_blocking_modal_call(get_multiplayer_status)
     return MultiplayerStatusResponse(
         enabled=True,
         total_sessions=status["total_sessions"],
@@ -2960,6 +3073,41 @@ async def _wait_for_service_or_raise_readiness_timeout_aio(
         ) from exc
 
 
+def _sandbox_terminate_supports_wait() -> bool:
+    """Return True if modal.Sandbox.terminate accepts wait."""
+    try:
+        return "wait" in inspect.signature(modal.Sandbox.terminate).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _terminate_sandbox(
+    sandbox: modal.Sandbox,
+    *,
+    wait_for_exit: bool = False,
+) -> None:
+    if wait_for_exit and _sandbox_terminate_supports_wait():
+        sandbox.terminate(wait=True)
+        return
+    sandbox.terminate()
+
+
+async def _terminate_sandbox_async(
+    sandbox: modal.Sandbox,
+    *,
+    wait_for_exit: bool = False,
+) -> None:
+    terminate_aio = getattr(getattr(sandbox, "terminate", None), "aio", None)
+    if callable(terminate_aio):
+        if wait_for_exit and _sandbox_terminate_supports_wait():
+            await terminate_aio(wait=True)
+            return
+        await terminate_aio()
+        return
+
+    await _run_blocking_modal_call(_terminate_sandbox, sandbox, wait_for_exit=wait_for_exit)
+
+
 def _terminate_sandbox_best_effort(
     sandbox: modal.Sandbox | None,
     *,
@@ -2969,7 +3117,7 @@ def _terminate_sandbox_best_effort(
         return
     sandbox_id = getattr(sandbox, "object_id", None)
     try:
-        sandbox.terminate()
+        _terminate_sandbox(sandbox)
     except (modal_exc.NotFoundError, modal_exc.SandboxTerminatedError):
         return
     except Exception:
@@ -2989,7 +3137,7 @@ async def _terminate_sandbox_best_effort_aio(
         return
     sandbox_id = getattr(sandbox, "object_id", None)
     try:
-        await sandbox.terminate.aio()
+        await _terminate_sandbox_async(sandbox)
     except (modal_exc.NotFoundError, modal_exc.SandboxTerminatedError):
         return
     except Exception:
@@ -3041,7 +3189,7 @@ async def _handle_readiness_timeout_async(
 
     if timeout_exc.from_warm_pool and timeout_exc.sandbox_id:
         try:
-            remove_from_pool(timeout_exc.sandbox_id)
+            await _run_blocking_modal_call(remove_from_pool, timeout_exc.sandbox_id)
         except Exception:
             _logger.warning(
                 "Failed to remove timed-out sandbox from warm pool (async)",
@@ -3861,8 +4009,8 @@ async def get_or_start_background_sandbox_aio(
 
             # Attempt global reuse by name across workers/processes.
             try:
-                modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
-                sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
+                await modal.App.lookup.aio(SANDBOX_APP_NAME, create_if_missing=True)
+                sb = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
                 deadline = anyio.current_time() + 30
                 url = None
                 while anyio.current_time() < deadline:
@@ -3881,9 +4029,14 @@ async def get_or_start_background_sandbox_aio(
                         startup_attempt=startup_attempt,
                         recycle_allowed=False,
                     )
-                    reused_secret = _resolve_sandbox_session_secret(
+                    lookup_secret = await _run_blocking_modal_call(
+                        _lookup_sandbox_session_secret,
                         sandbox_id=sb.object_id,
-                        secret=_lookup_sandbox_session_secret(sandbox_id=sb.object_id),
+                    )
+                    reused_secret = await _run_blocking_modal_call(
+                        _resolve_sandbox_session_secret,
+                        sandbox_id=sb.object_id,
+                        secret=lookup_secret,
                     )
                     if not reused_secret:
                         _logger.warning(
@@ -3904,7 +4057,7 @@ async def get_or_start_background_sandbox_aio(
             use_warm_pool = _settings.enable_warm_pool
 
             if session_id and _settings.enable_session_snapshots:
-                snapshot = get_session_snapshot(session_id)
+                snapshot = await _run_blocking_modal_call(get_session_snapshot, session_id)
                 if snapshot and snapshot.get("image_id"):
                     try:
                         snapshot_image = modal.Image.from_id(snapshot["image_id"])
@@ -3930,13 +4083,16 @@ async def get_or_start_background_sandbox_aio(
             # Try to claim from warm pool (if enabled and no snapshot)
             if use_warm_pool:
                 try:
-                    claimed = claim_warm_sandbox(session_id=session_id)
+                    claimed = await _run_blocking_modal_call(
+                        claim_warm_sandbox,
+                        session_id=session_id,
+                    )
                     if claimed:
                         sandbox_id = claimed.get("sandbox_id")
                         sandbox_name = claimed.get("sandbox_name")
                         if sandbox_id:
                             try:
-                                pool_sb = modal.Sandbox.from_id(sandbox_id)
+                                pool_sb = await modal.Sandbox.from_id.aio(sandbox_id)
                                 if await pool_sb.poll.aio() is None:
                                     tunnels = await pool_sb.tunnels.aio()
                                     if SERVICE_PORT in tunnels and getattr(
@@ -3971,10 +4127,11 @@ async def get_or_start_background_sandbox_aio(
                                             }
                                         )
                                         try:
-                                            replenish_warm_pool.spawn()
+                                            await _spawn_modal_function(replenish_warm_pool)
                                         except Exception:
                                             pass  # Non-critical
-                                        claimed_secret = _resolve_sandbox_session_secret(
+                                        claimed_secret = await _run_blocking_modal_call(
+                                            _resolve_sandbox_session_secret,
                                             sandbox_id=sandbox_id,
                                             secret=claimed.get("sandbox_session_secret"),
                                         )
@@ -3989,19 +4146,24 @@ async def get_or_start_background_sandbox_aio(
                                                 detail="Warm pool sandbox missing scoped session secret",
                                             )
                                         try:
-                                            SESSIONS[SANDBOX_NAME] = {
-                                                "id": sandbox_id,
-                                                "url": pool_url,
-                                                "volume": PERSIST_VOL_NAME,
-                                                "created_at": int(time.time()),
-                                                "tags": {
-                                                    "role": "service",
-                                                    "app": "modal-backend",
-                                                    "port": str(SERVICE_PORT),
+                                            await _run_blocking_modal_call(
+                                                _set_store_value,
+                                                SESSIONS,
+                                                SANDBOX_NAME,
+                                                {
+                                                    "id": sandbox_id,
+                                                    "url": pool_url,
+                                                    "volume": PERSIST_VOL_NAME,
+                                                    "created_at": int(time.time()),
+                                                    "tags": {
+                                                        "role": "service",
+                                                        "app": "modal-backend",
+                                                        "port": str(SERVICE_PORT),
+                                                    },
+                                                    "status": "running",
+                                                    "sandbox_session_secret": claimed_secret,
                                                 },
-                                                "status": "running",
-                                                "sandbox_session_secret": claimed_secret,
-                                            }
+                                            )
                                         except Exception:
                                             _logger.warning(
                                                 "Failed to persist claimed sandbox session secret metadata (async)",
@@ -4017,7 +4179,7 @@ async def get_or_start_background_sandbox_aio(
                                     exc_info=True,
                                     extra={"sandbox_id": sandbox_id},
                                 )
-                                remove_from_pool(sandbox_id)
+                                await _run_blocking_modal_call(remove_from_pool, sandbox_id)
                 except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
                     raise
                 except Exception:
@@ -4027,8 +4189,8 @@ async def get_or_start_background_sandbox_aio(
                     )
 
             # Create with persistent volume.
-            svc_vol = _get_persist_volume()
-            sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+            svc_vol = await _run_blocking_modal_call(_get_persist_volume)
+            sandbox_app = await modal.App.lookup.aio(SANDBOX_APP_NAME, create_if_missing=True)
             sandbox_session_secret = _generate_sandbox_session_secret()
             attached_existing = False
             try:
@@ -4055,11 +4217,13 @@ async def get_or_start_background_sandbox_aio(
             except modal_exc.AlreadyExistsError:
                 attached_existing = True
                 sandbox = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
-                sandbox_session_secret = _lookup_sandbox_session_secret(
-                    sandbox_id=sandbox.object_id
+                sandbox_session_secret = await _run_blocking_modal_call(
+                    _lookup_sandbox_session_secret,
+                    sandbox_id=sandbox.object_id,
                 )
 
-            sandbox_session_secret = _resolve_sandbox_session_secret(
+            sandbox_session_secret = await _run_blocking_modal_call(
+                _resolve_sandbox_session_secret,
                 sandbox_id=sandbox.object_id if sandbox else None,
                 secret=sandbox_session_secret,
             )
@@ -4127,7 +4291,12 @@ async def get_or_start_background_sandbox_aio(
                 if restored_from_snapshot and session_id:
                     session_metadata["restored_from_session"] = session_id
                     session_metadata["restored_from_snapshot"] = True
-                SESSIONS[SANDBOX_NAME] = session_metadata
+                await _run_blocking_modal_call(
+                    _set_store_value,
+                    SESSIONS,
+                    SANDBOX_NAME,
+                    session_metadata,
+                )
             except Exception:
                 _logger.warning(
                     "Failed to persist session metadata to Modal Dict (async)",
@@ -4709,7 +4878,7 @@ def terminate_service_sandbox() -> dict:
     """
     try:
         sb, _ = get_or_start_background_sandbox()
-        sb.terminate()
+        _terminate_sandbox(sb, wait_for_exit=True)
         _clear_background_sandbox_state(expected_sandbox_id=getattr(sb, "object_id", None))
         return {"ok": True, "message": "Sandbox terminated, writes flushed to volume"}
     except modal_exc.NotFoundError as e:
@@ -4880,4 +5049,4 @@ def main():
     for line in p.stderr:
         print(line, end="")
 
-    sb.terminate()
+    _terminate_sandbox(sb, wait_for_exit=True)

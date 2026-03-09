@@ -9,9 +9,17 @@ import pytest
 from fastapi import HTTPException
 
 import modal_backend.main as main
-from modal_backend.models import SessionStopRequest
+from modal_backend.models import QueryBody, SessionStopRequest
 from modal_backend.security.cloudflare_auth import INTERNAL_AUTH_HEADER, SANDBOX_SESSION_AUTH_HEADER
 from modal_backend.settings.settings import Settings
+
+
+class _AsyncOnlyMethod:
+    def __init__(self, impl) -> None:
+        self.aio = impl
+
+    def __call__(self, *args, **kwargs):
+        raise AssertionError("sync Modal interface should not be called in async flow")
 
 
 def test_add_sandbox_auth_header_requires_scoped_secret(monkeypatch) -> None:
@@ -295,7 +303,7 @@ class _FakeSyncSandbox:
     def poll(self):
         return None
 
-    def terminate(self) -> None:
+    def terminate(self, *, wait: bool = False) -> None:
         self.terminated = True
 
     def set_tags(self, _tags: dict[str, str]) -> None:
@@ -317,7 +325,7 @@ class _FakeAsyncSandbox:
     async def _poll_aio(self):
         return None
 
-    async def _terminate_aio(self) -> None:
+    async def _terminate_aio(self, *, wait: bool = False) -> None:
         self.terminated = True
 
 
@@ -413,7 +421,7 @@ def test_get_or_start_background_sandbox_retries_once_after_readiness_timeout(mo
     ) -> None:
         attempts["count"] += 1
         if attempts["count"] == 1:
-            raise main._SandboxReadinessTimeout(
+            raise main._SandboxReadinessTimeoutError(
                 sandbox=sandbox,
                 service_url=service_url,
                 phase=phase,
@@ -462,7 +470,7 @@ def test_get_or_start_background_sandbox_fails_after_second_timeout(monkeypatch)
         from_warm_pool: bool = False,
     ) -> None:
         attempts["count"] += 1
-        raise main._SandboxReadinessTimeout(
+        raise main._SandboxReadinessTimeoutError(
             sandbox=sandbox,
             service_url=service_url,
             phase=phase,
@@ -493,8 +501,15 @@ def test_get_or_start_background_sandbox_aio_retries_once_after_timeout(monkeypa
             service_timeout=1,
         ),
     )
-    monkeypatch.setattr(main.modal.App, "lookup", lambda *args, **kwargs: object())
-    monkeypatch.setattr(main.modal.Sandbox, "from_name", lambda *args, **kwargs: sandbox)
+
+    async def _lookup_aio(*args, **kwargs):
+        return object()
+
+    async def _from_name_aio(*args, **kwargs):
+        return sandbox
+
+    monkeypatch.setattr(main.modal.App, "lookup", _AsyncOnlyMethod(_lookup_aio))
+    monkeypatch.setattr(main.modal.Sandbox, "from_name", _AsyncOnlyMethod(_from_name_aio))
     monkeypatch.setattr(main, "_lookup_sandbox_session_secret", lambda **_kwargs: "reuse-secret")
 
     attempts = {"count": 0}
@@ -511,7 +526,7 @@ def test_get_or_start_background_sandbox_aio_retries_once_after_timeout(monkeypa
     ) -> None:
         attempts["count"] += 1
         if attempts["count"] == 1:
-            raise main._SandboxReadinessTimeout(
+            raise main._SandboxReadinessTimeoutError(
                 sandbox=sandbox,
                 service_url=service_url,
                 phase=phase,
@@ -640,12 +655,21 @@ def test_async_warm_pool_claim_uses_poll_aio(monkeypatch) -> None:
             service_timeout=1,
         ),
     )
-    monkeypatch.setattr(main.modal.App, "lookup", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        main.modal.Sandbox,
-        "from_name",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("skip-reuse-by-name")),
-    )
+
+    async def _lookup_aio(*args, **kwargs):
+        return object()
+
+    async def _from_name_aio(*args, **kwargs):
+        raise RuntimeError("skip-reuse-by-name")
+
+    async def _from_id_aio(_sandbox_id):
+        return sandbox
+
+    async def _spawn_aio(*args):
+        return None
+
+    monkeypatch.setattr(main.modal.App, "lookup", _AsyncOnlyMethod(_lookup_aio))
+    monkeypatch.setattr(main.modal.Sandbox, "from_name", _AsyncOnlyMethod(_from_name_aio))
     monkeypatch.setattr(
         main,
         "claim_warm_sandbox",
@@ -655,8 +679,12 @@ def test_async_warm_pool_claim_uses_poll_aio(monkeypatch) -> None:
             "sandbox_session_secret": "warm-secret",
         },
     )
-    monkeypatch.setattr(main.modal.Sandbox, "from_id", lambda _sandbox_id: sandbox)
-    monkeypatch.setattr(main, "replenish_warm_pool", SimpleNamespace(spawn=lambda: None))
+    monkeypatch.setattr(main.modal.Sandbox, "from_id", _AsyncOnlyMethod(_from_id_aio))
+    monkeypatch.setattr(
+        main,
+        "replenish_warm_pool",
+        SimpleNamespace(spawn=SimpleNamespace(aio=_spawn_aio)),
+    )
 
     async def _fake_wait_async(**_kwargs):
         return None
@@ -668,6 +696,421 @@ def test_async_warm_pool_claim_uses_poll_aio(monkeypatch) -> None:
     assert returned_sb is sandbox
     assert returned_url == "https://sandbox.warm.async"
     assert sandbox.poll_aio_calls == 1
+
+
+def test_terminate_sandbox_uses_wait_when_supported(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    class _WaitSandbox:
+        def terminate(self, *, wait: bool = False) -> None:
+            calls.append(wait)
+
+    monkeypatch.setattr(main, "_sandbox_terminate_supports_wait", lambda: True)
+
+    main._terminate_sandbox(_WaitSandbox(), wait_for_exit=True)
+
+    assert calls == [True]
+
+
+def test_terminate_sandbox_async_uses_wait_when_supported(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    class _WaitSandbox:
+        def __init__(self) -> None:
+            self.terminate = SimpleNamespace(aio=self._terminate_aio)
+
+        async def _terminate_aio(self, *, wait: bool = False) -> None:
+            calls.append(wait)
+
+    monkeypatch.setattr(main, "_sandbox_terminate_supports_wait", lambda: True)
+
+    async def _run() -> None:
+        await main._terminate_sandbox_async(_WaitSandbox(), wait_for_exit=True)
+
+    anyio.run(_run)
+
+    assert calls == [True]
+
+
+def test_terminate_service_sandbox_waits_for_exit(monkeypatch) -> None:
+    sandbox = _FakeSyncSandbox("sb-term", "https://sandbox.term")
+    captured: list[bool] = []
+
+    monkeypatch.setattr(
+        main, "get_or_start_background_sandbox", lambda: (sandbox, "https://sandbox")
+    )
+    monkeypatch.setattr(main, "_clear_background_sandbox_state", lambda **_kwargs: True)
+
+    def _fake_terminate(_sandbox, *, wait_for_exit: bool = False) -> None:
+        captured.append(wait_for_exit)
+
+    monkeypatch.setattr(main, "_terminate_sandbox", _fake_terminate)
+
+    result = main.terminate_service_sandbox.local()
+
+    assert result["ok"] is True
+    assert captured == [True]
+
+
+def test_query_proxy_prewarm_uses_async_from_id_without_fallback(monkeypatch) -> None:
+    calls = {"from_id": 0, "fallback": 0}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"ok": True, "session_id": "sess-prewarm", "messages": ["ok"]}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict | None = None, timeout=None):
+            assert url == "https://prewarm.internal/query"
+            assert headers is not None
+            return _FakeResponse()
+
+    async def _from_id_aio(_sandbox_id):
+        calls["from_id"] += 1
+        return SimpleNamespace(object_id="sb-prewarm")
+
+    async def _fake_wait_async(**_kwargs):
+        return None
+
+    async def _fallback(**_kwargs):
+        calls["fallback"] += 1
+        return SimpleNamespace(object_id="sb-fallback"), "https://fallback.internal"
+
+    monkeypatch.setattr(
+        main,
+        "_settings",
+        Settings(
+            internal_auth_secret="internal-secret",
+            enable_prewarm=True,
+            enable_session_snapshots=False,
+            service_timeout=1,
+        ),
+    )
+    monkeypatch.setattr(main, "Settings", lambda: main._settings)
+    monkeypatch.setattr(
+        main,
+        "claim_prewarm",
+        lambda warm_id, claimed_by: {
+            "claimed": True,
+            "sandbox_id": "sb-prewarm",
+            "sandbox_url": "https://prewarm.internal",
+            "sandbox_session_secret": "prewarm-secret",
+            "status": "claimed",
+            "claimed_by": claimed_by,
+            "warm_id": warm_id,
+        },
+    )
+    monkeypatch.setattr(main.modal.Sandbox, "from_id", _AsyncOnlyMethod(_from_id_aio))
+    monkeypatch.setattr(main, "_wait_for_service_or_raise_readiness_timeout_aio", _fake_wait_async)
+    monkeypatch.setattr(main, "get_or_start_background_sandbox_aio", _fallback)
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    request = SimpleNamespace(
+        headers={"X-Session-History-Authority": "durable-object"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    body = QueryBody(question="ping", session_id="sess-prewarm", warm_id="warm-123")
+
+    result = anyio.run(main.query_proxy, request, body)
+
+    assert result["ok"] is True
+    assert calls["from_id"] == 1
+    assert calls["fallback"] == 0
+
+
+def test_query_proxy_prewarm_timeout_marks_failed_and_falls_back(monkeypatch) -> None:
+    captured_reasons: list[str] = []
+    fallback_calls = {"count": 0}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"ok": True, "session_id": "sess-fallback", "messages": ["ok"]}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict | None = None, timeout=None):
+            assert url == "https://fallback.internal/query"
+            return _FakeResponse()
+
+    async def _from_id_aio(_sandbox_id):
+        return SimpleNamespace(object_id="sb-prewarm-timeout")
+
+    async def _fake_wait_async(**kwargs):
+        raise main._SandboxReadinessTimeoutError(
+            sandbox=kwargs["sandbox"],
+            service_url=kwargs["service_url"],
+            phase=kwargs["phase"],
+            startup_attempt=kwargs["startup_attempt"],
+            recycle_allowed=kwargs["recycle_allowed"],
+        )
+
+    async def _handle_timeout(_timeout):
+        return None
+
+    async def _fallback(**_kwargs):
+        fallback_calls["count"] += 1
+        return SimpleNamespace(object_id="sb-fallback"), "https://fallback.internal"
+
+    monkeypatch.setattr(
+        main,
+        "_settings",
+        Settings(
+            internal_auth_secret="internal-secret",
+            enable_prewarm=True,
+            enable_session_snapshots=False,
+            service_timeout=1,
+        ),
+    )
+    monkeypatch.setattr(main, "Settings", lambda: main._settings)
+    monkeypatch.setattr(
+        main,
+        "claim_prewarm",
+        lambda warm_id, claimed_by: {
+            "claimed": True,
+            "sandbox_id": "sb-prewarm-timeout",
+            "sandbox_url": "https://prewarm.internal",
+            "sandbox_session_secret": "prewarm-secret",
+            "status": "claimed",
+            "claimed_by": claimed_by,
+            "warm_id": warm_id,
+        },
+    )
+    monkeypatch.setattr(main.modal.Sandbox, "from_id", _AsyncOnlyMethod(_from_id_aio))
+    monkeypatch.setattr(main, "_wait_for_service_or_raise_readiness_timeout_aio", _fake_wait_async)
+    monkeypatch.setattr(main, "_handle_readiness_timeout_async", _handle_timeout)
+    monkeypatch.setattr(
+        main, "mark_prewarm_failed", lambda warm_id, reason: captured_reasons.append(reason)
+    )
+    monkeypatch.setattr(main, "get_or_start_background_sandbox_aio", _fallback)
+    monkeypatch.setattr(main, "_add_sandbox_auth_header", lambda **_kwargs: None)
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    request = SimpleNamespace(
+        headers={"X-Session-History-Authority": "durable-object"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    body = QueryBody(question="ping", session_id="sess-prewarm", warm_id="warm-timeout")
+
+    result = anyio.run(main.query_proxy, request, body)
+
+    assert result["ok"] is True
+    assert fallback_calls["count"] == 1
+    assert captured_reasons and "Readiness timeout" in captured_reasons[0]
+
+
+def test_query_stream_prewarm_uses_async_from_id_without_fallback(monkeypatch) -> None:
+    calls = {"from_id": 0, "fallback": 0}
+
+    class _FakeStreamResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b'event: done\ndata: {"session_id":"sess-stream"}\n\n'
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def stream(self, method: str, url: str, json: dict, headers: dict | None = None):
+            assert method == "POST"
+            assert url == "https://prewarm.internal/query_stream"
+            assert headers is not None
+            return _FakeStreamResponse()
+
+    async def _from_id_aio(_sandbox_id):
+        calls["from_id"] += 1
+        return SimpleNamespace(object_id="sb-prewarm-stream")
+
+    async def _fake_wait_async(**_kwargs):
+        return None
+
+    async def _fallback(**_kwargs):
+        calls["fallback"] += 1
+        return SimpleNamespace(object_id="sb-fallback-stream"), "https://fallback.internal"
+
+    monkeypatch.setattr(
+        main,
+        "_settings",
+        Settings(
+            internal_auth_secret="internal-secret",
+            enable_prewarm=True,
+            enable_session_snapshots=False,
+            service_timeout=1,
+        ),
+    )
+    monkeypatch.setattr(main, "Settings", lambda: main._settings)
+    monkeypatch.setattr(
+        main,
+        "claim_prewarm",
+        lambda warm_id, claimed_by: {
+            "claimed": True,
+            "sandbox_id": "sb-prewarm-stream",
+            "sandbox_url": "https://prewarm.internal",
+            "sandbox_session_secret": "prewarm-secret",
+            "status": "claimed",
+            "claimed_by": claimed_by,
+            "warm_id": warm_id,
+        },
+    )
+    monkeypatch.setattr(main.modal.Sandbox, "from_id", _AsyncOnlyMethod(_from_id_aio))
+    monkeypatch.setattr(main, "_wait_for_service_or_raise_readiness_timeout_aio", _fake_wait_async)
+    monkeypatch.setattr(main, "get_or_start_background_sandbox_aio", _fallback)
+    monkeypatch.setattr(main, "_add_sandbox_auth_header", lambda **_kwargs: None)
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async def _run() -> list[bytes]:
+        request = SimpleNamespace(
+            headers={"X-Session-History-Authority": "durable-object"},
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        body = QueryBody(question="ping", session_id="sess-prewarm", warm_id="warm-stream")
+        response = await main.query_stream(request, body)
+        return [chunk async for chunk in response.body_iterator]
+
+    chunks = anyio.run(_run)
+
+    assert chunks == [b'event: done\ndata: {"session_id":"sess-stream"}\n\n']
+    assert calls["from_id"] == 1
+    assert calls["fallback"] == 0
+
+
+def test_query_stream_prewarm_timeout_marks_failed_and_falls_back(monkeypatch) -> None:
+    captured_reasons: list[str] = []
+    fallback_calls = {"count": 0}
+
+    class _FakeStreamResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b'event: done\ndata: {"session_id":"sess-stream"}\n\n'
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def stream(self, method: str, url: str, json: dict, headers: dict | None = None):
+            assert method == "POST"
+            assert url == "https://fallback.internal/query_stream"
+            return _FakeStreamResponse()
+
+    async def _from_id_aio(_sandbox_id):
+        return SimpleNamespace(object_id="sb-prewarm-stream")
+
+    async def _fake_wait_async(**kwargs):
+        raise main._SandboxReadinessTimeoutError(
+            sandbox=kwargs["sandbox"],
+            service_url=kwargs["service_url"],
+            phase=kwargs["phase"],
+            startup_attempt=kwargs["startup_attempt"],
+            recycle_allowed=kwargs["recycle_allowed"],
+        )
+
+    async def _handle_timeout(_timeout):
+        return None
+
+    async def _fallback(**_kwargs):
+        fallback_calls["count"] += 1
+        return SimpleNamespace(object_id="sb-fallback-stream"), "https://fallback.internal"
+
+    monkeypatch.setattr(
+        main,
+        "_settings",
+        Settings(
+            internal_auth_secret="internal-secret",
+            enable_prewarm=True,
+            enable_session_snapshots=False,
+            service_timeout=1,
+        ),
+    )
+    monkeypatch.setattr(main, "Settings", lambda: main._settings)
+    monkeypatch.setattr(
+        main,
+        "claim_prewarm",
+        lambda warm_id, claimed_by: {
+            "claimed": True,
+            "sandbox_id": "sb-prewarm-stream",
+            "sandbox_url": "https://prewarm.internal",
+            "sandbox_session_secret": "prewarm-secret",
+            "status": "claimed",
+            "claimed_by": claimed_by,
+            "warm_id": warm_id,
+        },
+    )
+    monkeypatch.setattr(main.modal.Sandbox, "from_id", _AsyncOnlyMethod(_from_id_aio))
+    monkeypatch.setattr(main, "_wait_for_service_or_raise_readiness_timeout_aio", _fake_wait_async)
+    monkeypatch.setattr(main, "_handle_readiness_timeout_async", _handle_timeout)
+    monkeypatch.setattr(
+        main, "mark_prewarm_failed", lambda warm_id, reason: captured_reasons.append(reason)
+    )
+    monkeypatch.setattr(main, "get_or_start_background_sandbox_aio", _fallback)
+    monkeypatch.setattr(main, "_add_sandbox_auth_header", lambda **_kwargs: None)
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async def _run() -> list[bytes]:
+        request = SimpleNamespace(
+            headers={"X-Session-History-Authority": "durable-object"},
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        body = QueryBody(question="ping", session_id="sess-prewarm", warm_id="warm-stream")
+        response = await main.query_stream(request, body)
+        return [chunk async for chunk in response.body_iterator]
+
+    chunks = anyio.run(_run)
+
+    assert chunks
+    assert fallback_calls["count"] == 1
+    assert captured_reasons and "Readiness timeout" in captured_reasons[0]
 
 
 def test_tunnel_discovery_failure_retries_then_fails(monkeypatch) -> None:
