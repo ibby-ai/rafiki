@@ -24,8 +24,12 @@ Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
 
 - [ ] Run `wrangler login` and authenticate
 - [ ] Update `wrangler.jsonc`:
-  - [ ] Update `MODAL_API_BASE_URL` to your Modal backend URL
-  - [ ] Set `ENVIRONMENT` to "development" or "production"
+  - [ ] Keep top-level `vars.MODAL_API_BASE_URL` pointed at the production Modal backend URL
+  - [ ] Keep top-level `vars.ENVIRONMENT` set to `"production"`
+  - [ ] Keep local/dev values under `env.development`
+  - [ ] Duplicate the non-inheritable Durable Object, KV, and rate-limit bindings in `env.development`
+  - [ ] Preserve explicit Durable Object `script_name` values (`rafiki-control-plane-development`) in `env.development`
+  - [ ] Do not repoint the top-level Worker vars to the dev Modal target
 
 ### KV Namespace Setup
 
@@ -47,18 +51,14 @@ Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
 - [ ] Set Cloudflare secrets:
 
   ```bash
-  wrangler secret put MODAL_TOKEN_ID
-  # Enter your Modal token ID
-
-  wrangler secret put MODAL_TOKEN_SECRET
-  # Enter your Modal token secret
-
   wrangler secret put INTERNAL_AUTH_SECRET
   # Enter the internal auth secret (generated above)
 
   wrangler secret put SESSION_SIGNING_SECRET
   # Enter the session signing secret (generated above)
   ```
+
+- [ ] Note: the canonical Worker `/health`, `/query`, `/query_stream`, queue, and state path does not consume `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`; keep those out of the baseline checklist unless a non-canonical route explicitly requires them.
 
 - [ ] Save secrets securely (password manager)
 
@@ -103,6 +103,7 @@ Canonical E2E test flow: `docs/references/runbooks/cloudflare-modal-e2e.md`
 ### Production Deployment
 
 - [ ] Run `npm run deploy`
+- [ ] Confirm the checked-in top-level `wrangler.jsonc` vars still point at the production Modal URL before deploying
 - [ ] Wait for deployment to complete (~1-2 minutes)
 - [ ] Note the deployed URL (e.g., `your-worker.workers.dev`)
 - [ ] Verify deployment: `curl https://your-worker.workers.dev/health`

@@ -73,16 +73,35 @@ npm run fix
 
 #### 1. Set Environment Variables
 
-Edit `wrangler.jsonc`:
+Keep the top-level Worker config production-safe and put local/dev values under `env.development`:
 
 ```jsonc
 {
   "vars": {
-    "MODAL_API_BASE_URL": "https://your-org--modal-backend-http-app-dev.modal.run",
-    "ENVIRONMENT": "development"
+    "MODAL_API_BASE_URL": "https://your-org--modal-backend-http-app.modal.run",
+    "ENVIRONMENT": "production"
+  },
+  "env": {
+    "development": {
+      "vars": {
+        "MODAL_API_BASE_URL": "https://your-org--modal-backend-http-app-dev.modal.run",
+        "ENVIRONMENT": "development"
+      }
+    }
   }
 }
 ```
+
+Notes:
+- `npm run dev` expands to `wrangler dev --env development`.
+- Plain `npm run deploy` publishes the canonical public Worker with the top-level
+  production Modal target.
+- Named Wrangler environments do not inherit bindings automatically; keep the
+  `development` environment's Durable Object, KV, and rate-limit bindings in
+  sync with the checked-in `wrangler.jsonc` contract.
+- The checked-in `development` environment uses explicit Durable Object
+  `script_name` values (`rafiki-control-plane-development`) so local/dev state
+  does not reuse the canonical public Worker objects.
 
 #### 2. Create Secrets
 
@@ -139,7 +158,7 @@ wscat -c "ws://localhost:8787/ws?user_id=test-user&token=<session_token>"
 ### Deployment
 
 ```bash
-# Deploy to production
+# Canonical public Worker deploy for proof / production ingress repair
 npm run deploy
 
 # Monitor logs
@@ -340,6 +359,7 @@ Modal validates tokens using the shared secret in `X-Internal-Auth`.
 - Query requests: DO → Modal `/query`
 - Job submissions: DO → Modal `/submit`
 - Artifacts: Worker → Modal `/jobs/{id}/artifacts`
+- Internal rollout/status checks: trusted operator calls Modal `/service_info` (signed `X-Internal-Auth`) to inspect active generation, draining services, and rollout lock state.
 
 ### 3. SSE → WebSocket Bridge
 
@@ -433,7 +453,7 @@ k6 run load-test.js
 **Fix**:
 
 ```bash
-wrangler deploy
+npm run deploy
 ```
 
 #### 2. "WebSocket connection failed"

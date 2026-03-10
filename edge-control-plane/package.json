@@ -4,9 +4,11 @@
   "description": "Cloudflare Worker + Durable Objects control plane for Rafiki",
   "main": "src/index.ts",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --env development",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
+    "deploy:development": "wrangler deploy --env development",
+    "tail:development": "wrangler tail --env development",
     "types": "wrangler types",
     "check": "ultracite check",
     "fix": "ultracite fix",
