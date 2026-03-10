@@ -21,6 +21,12 @@ cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 source .venv/bin/activate
 ```
 
+Worker environment contract:
+
+- `edge-control-plane/wrangler.jsonc` top-level vars are production-safe for the canonical public Worker.
+- Local Worker development uses `cd edge-control-plane && npm run dev`, which expands to `wrangler dev --env development`.
+- The checked-in `development` environment uses explicit Durable Object script names (`rafiki-control-plane-development`) so local/dev object state stays isolated from the canonical public Worker.
+
 Version contract:
 
 - The repo dependency floor is `modal>=1.3.5`.
@@ -87,6 +93,10 @@ If startup fails, verify:
   - Controller sandbox executes agent runs and streams SSE events.
 - **Session Memory**: OpenAI `SQLiteSession` with persisted session IDs and optional fork behavior.
 - **Readiness Hardening**: gateway startup waits on controller `/health_check`, logs bounded diagnostics on timeout, performs one recycle+retry, and fails deterministically after a second timeout.
+- **Active-Pointer Rollout Authority**:
+  - requests consult shared rollout state before reusing per-worker controller caches.
+  - replacement controller `B` is created privately, must pass `/health_check` plus scoped-secret metadata plus a synthetic direct `/query`, and is promoted only after those gates pass.
+  - previous controller `A` becomes `draining` after promotion, serves only in-flight work, and terminates after leases reach zero or the drain timeout expires.
 - **TD-003 `/query` Live E2E Closure**:
   - sandbox runtime now receives Modal auth secret on sandbox surface when enabled.
   - gateway `/query` error propagation now preserves concrete upstream errors.

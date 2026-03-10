@@ -1,0 +1,1721 @@
+{
+  "generated_at": "2026-03-10T12:58:09+1030",
+  "scope": "controller-rollout-cutover-safety-deployed-spawned-drain",
+  "deployment": {
+    "git_head": "63f83b6c64deede1be759b15fe3570460eb30f4c",
+    "git_short": "63f83b6",
+    "dirty_worktree": true,
+    "modal_app_id": "ap-NLl3xzI88msREbDi5ocPnR",
+    "modal_app_name": "modal-backend",
+    "modal_app_version": "v3",
+    "modal_base_url": "https://saidiibrahim--modal-backend-http-app.modal.run",
+    "modal_client_version": "1.3.5",
+    "deployed_by": "saidiibrahim"
+  },
+  "command_log": [
+    "uv run modal deploy -m modal_backend.main",
+    "uv run python - <<'PY' > /tmp/rafiki_modal_cutovers_final.json  # uses modal.Function.from_name('modal-backend', 'terminate_service_sandbox').remote() for two consecutive cutovers, fetches /service_info + /pool/status, and resolves modal.FunctionCall.from_id(drain_call_id).get() + get_call_graph()",
+    "uv run modal app logs ap-NLl3xzI88msREbDi5ocPnR --timestamps",
+    "curl -sS https://rafiki-control-plane.ibrahim-aka-ajax.workers.dev/health",
+    "cd edge-control-plane && ./node_modules/.bin/wrangler whoami",
+    "cd edge-control-plane && ./node_modules/.bin/wrangler deployments list --name rafiki-control-plane",
+    "cd edge-control-plane && ./node_modules/.bin/wrangler dev --port 8787 --local-protocol http --var MODAL_API_BASE_URL:https://saidiibrahim--modal-backend-http-app.modal.run --show-interactive-dev-session=false",
+    "curl http://localhost:8787/health",
+    "curl -X POST 'http://localhost:8787/query?token=<urlencoded token>' -H 'Content-Type: application/json' -d '{\"question\":\"Return exactly: e2e-ok\",\"session_id\":\"sess-deployed-001\"}'",
+    "node - <<'NODE'  # ws://localhost:8787/query_stream?session_id=sess-deployed-001&token=<urlencoded token>",
+    "curl -X POST 'http://localhost:8787/session/sess-deployed-001/queue?token=<urlencoded token>' -H 'Content-Type: application/json' -d '{\"question\":\"queued follow-up\",\"session_id\":\"sess-deployed-001\"}'",
+    "curl 'http://localhost:8787/session/sess-deployed-001/queue?token=<urlencoded token>'",
+    "curl 'http://localhost:8787/session/sess-deployed-001/state?token=<urlencoded token>'",
+    "uv run python -m pytest tests/test_controller_rollout.py",
+    "uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'",
+    "uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py",
+    "npm --prefix edge-control-plane run check",
+    "cd edge-control-plane && ./node_modules/.bin/tsc --noEmit",
+    "npm --prefix edge-control-plane run test:integration"
+  ],
+  "cutovers": [
+    {
+      "name": "C1",
+      "pre_service_info": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 4,
+            "status": "active",
+            "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+            "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+            "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+            "image_version": "5c02a33c6b83",
+            "promoted_at": 1773108666,
+            "last_verified_readiness_at": 1773108666,
+            "updated_at": 1773108666
+          },
+          "services": [
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "active",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108667,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108781
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108781
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108781
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108781
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "pre_pool_status": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 1,
+          "warm": 1,
+          "claimed": 0,
+          "entries": [
+            {
+              "sandbox_id": "sb-BowecGpApll8RIavfQefmV",
+              "sandbox_name": "pool-cfa8a608",
+              "image_version": "47ef5ad3e668",
+              "status": "warm",
+              "created_at": 1773108624,
+              "claimed_at": null,
+              "claimed_by": null,
+              "has_scoped_secret": true
+            }
+          ]
+        }
+      },
+      "triggered_at": 1773108782,
+      "rollout_result": {
+        "ok": true,
+        "reason": "terminate_service_sandbox",
+        "active_generation": 5,
+        "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+        "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+        "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+        "image_version": "093d6835c629",
+        "last_verified_readiness_at": 1773108825,
+        "promoted_at": 1773108825,
+        "rollback_target_sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+        "drain_status": {
+          "ok": true,
+          "status": "scheduled",
+          "mode": "spawned",
+          "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+          "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+          "scheduled_at": 1773108825
+        }
+      },
+      "post_service_info_immediate": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 5,
+            "status": "active",
+            "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+            "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+            "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+            "image_version": "093d6835c629",
+            "promoted_at": 1773108825,
+            "last_verified_readiness_at": 1773108825,
+            "updated_at": 1773108825,
+            "rollback_target_generation": 4,
+            "rollback_target_sandbox_id": "sb-uruft7bleFoufrQlWlV7oL"
+          },
+          "services": [
+            {
+              "generation": 5,
+              "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+              "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+              "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+              "status": "active",
+              "image_version": "093d6835c629",
+              "created_at": 1773108821,
+              "updated_at": 1773108825,
+              "source": "created",
+              "promotion_started_at": 1773108821,
+              "last_verified_readiness_at": 1773108825,
+              "promoted_at": 1773108825,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108827
+              }
+            },
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "draining",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108825,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108825,
+              "drain_deadline_at": 1773109125,
+              "replaced_by_generation": 5,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "drain_scheduled_at": 1773108825,
+              "drain_expected_generation": 4,
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108827
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108827
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108827
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108827
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "post_pool_status_immediate": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 0,
+          "warm": 0,
+          "claimed": 0,
+          "entries": []
+        }
+      },
+      "drain_get_result": {
+        "ok": true,
+        "status": "terminated",
+        "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+        "drain_timeout_reached": false,
+        "inflight": {
+          "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+          "total": 0,
+          "query": 0,
+          "query_stream": 0,
+          "updated_at": 1773108836
+        },
+        "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS"
+      },
+      "drain_call_graph": "[InputInfo(input_id='in-01KKAR9TFC8EW6V98BGZWS84C2', function_call_id='fc-01KKAR9TF1SJG3GJPTASPEW7GT', task_id='', status=<InputStatus.SUCCESS: 1>, function_name='main.terminate_service_sandbox', module_name='modal_backend', children=[InputInfo(input_id='in-01KKARB3BQZZGYSMRM0AKQY807', function_call_id='fc-01KKARB3BD5WP2F0F3Y1CNW5RS', task_id='', status=<InputStatus.PENDING: 0>, function_name='main.drain_controller_sandbox', module_name='modal_backend', children=[])])]",
+      "post_service_info_final": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 5,
+            "status": "active",
+            "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+            "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+            "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+            "image_version": "093d6835c629",
+            "promoted_at": 1773108825,
+            "last_verified_readiness_at": 1773108825,
+            "updated_at": 1773108825
+          },
+          "services": [
+            {
+              "generation": 5,
+              "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+              "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+              "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+              "status": "active",
+              "image_version": "093d6835c629",
+              "created_at": 1773108821,
+              "updated_at": 1773108825,
+              "source": "created",
+              "promotion_started_at": 1773108821,
+              "last_verified_readiness_at": 1773108825,
+              "promoted_at": 1773108825,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108840
+              }
+            },
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108838,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108825,
+              "drain_deadline_at": 1773109125,
+              "replaced_by_generation": 5,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "drain_scheduled_at": 1773108825,
+              "drain_expected_generation": 4,
+              "terminated_at": 1773108838,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108836
+              },
+              "expected_generation": 4,
+              "drain_execution_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108840
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108840
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108840
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108840
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "post_pool_status_final": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 0,
+          "warm": 0,
+          "claimed": 0,
+          "entries": []
+        }
+      }
+    },
+    {
+      "name": "C2",
+      "pre_service_info": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 5,
+            "status": "active",
+            "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+            "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+            "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+            "image_version": "093d6835c629",
+            "promoted_at": 1773108825,
+            "last_verified_readiness_at": 1773108825,
+            "updated_at": 1773108825
+          },
+          "services": [
+            {
+              "generation": 5,
+              "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+              "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+              "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+              "status": "active",
+              "image_version": "093d6835c629",
+              "created_at": 1773108821,
+              "updated_at": 1773108825,
+              "source": "created",
+              "promotion_started_at": 1773108821,
+              "last_verified_readiness_at": 1773108825,
+              "promoted_at": 1773108825,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108841
+              }
+            },
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108838,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108825,
+              "drain_deadline_at": 1773109125,
+              "replaced_by_generation": 5,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "drain_scheduled_at": 1773108825,
+              "drain_expected_generation": 4,
+              "terminated_at": 1773108838,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108836
+              },
+              "expected_generation": 4,
+              "drain_execution_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108841
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108841
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108841
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108841
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "pre_pool_status": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 0,
+          "warm": 0,
+          "claimed": 0,
+          "entries": []
+        }
+      },
+      "triggered_at": 1773108842,
+      "rollout_result": {
+        "ok": true,
+        "reason": "terminate_service_sandbox",
+        "active_generation": 6,
+        "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+        "sandbox_name": "svc-runner-8001-gen-0006-8e39a920",
+        "service_url": "https://ta-01kkarbnecpe6ggy6wtdssd9ym-8001-q7m4wihoeg24steo88n657crr.w.modal.host",
+        "image_version": "093d6835c629",
+        "last_verified_readiness_at": 1773108852,
+        "promoted_at": 1773108852,
+        "rollback_target_sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+        "drain_status": {
+          "ok": true,
+          "status": "scheduled",
+          "mode": "spawned",
+          "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+          "drain_call_id": "fc-01KKARBXQ65FQXXSSDKBAB1NQM",
+          "scheduled_at": 1773108852
+        }
+      },
+      "post_service_info_immediate": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 6,
+            "status": "active",
+            "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+            "sandbox_name": "svc-runner-8001-gen-0006-8e39a920",
+            "service_url": "https://ta-01kkarbnecpe6ggy6wtdssd9ym-8001-q7m4wihoeg24steo88n657crr.w.modal.host",
+            "image_version": "093d6835c629",
+            "promoted_at": 1773108852,
+            "last_verified_readiness_at": 1773108852,
+            "updated_at": 1773108852,
+            "rollback_target_generation": 5,
+            "rollback_target_sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx"
+          },
+          "services": [
+            {
+              "generation": 6,
+              "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+              "sandbox_name": "svc-runner-8001-gen-0006-8e39a920",
+              "service_url": "https://ta-01kkarbnecpe6ggy6wtdssd9ym-8001-q7m4wihoeg24steo88n657crr.w.modal.host",
+              "status": "active",
+              "image_version": "093d6835c629",
+              "created_at": 1773108849,
+              "updated_at": 1773108852,
+              "source": "created",
+              "promotion_started_at": 1773108849,
+              "last_verified_readiness_at": 1773108852,
+              "promoted_at": 1773108852,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108853
+              }
+            },
+            {
+              "generation": 5,
+              "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+              "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+              "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+              "status": "draining",
+              "image_version": "093d6835c629",
+              "created_at": 1773108821,
+              "updated_at": 1773108852,
+              "source": "created",
+              "promotion_started_at": 1773108821,
+              "last_verified_readiness_at": 1773108825,
+              "promoted_at": 1773108825,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108852,
+              "drain_deadline_at": 1773109152,
+              "replaced_by_generation": 6,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARBXQ65FQXXSSDKBAB1NQM",
+              "drain_scheduled_at": 1773108852,
+              "drain_expected_generation": 5,
+              "inflight": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108853
+              }
+            },
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108838,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108825,
+              "drain_deadline_at": 1773109125,
+              "replaced_by_generation": 5,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "drain_scheduled_at": 1773108825,
+              "drain_expected_generation": 4,
+              "terminated_at": 1773108838,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108836
+              },
+              "expected_generation": 4,
+              "drain_execution_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108853
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108853
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108854
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108854
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "post_pool_status_immediate": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 0,
+          "warm": 0,
+          "claimed": 0,
+          "entries": []
+        }
+      },
+      "drain_get_result": {
+        "ok": true,
+        "status": "terminated",
+        "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+        "drain_timeout_reached": false,
+        "inflight": {
+          "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+          "total": 0,
+          "query": 0,
+          "query_stream": 0,
+          "updated_at": 1773108852
+        },
+        "drain_call_id": "fc-01KKARBXQ65FQXXSSDKBAB1NQM"
+      },
+      "drain_call_graph": "[InputInfo(input_id='in-01KKARBMA1VNK0FHFNC9AFPCMM', function_call_id='fc-01KKARBM9RM9YYYPEMXNRP0WMC', task_id='', status=<InputStatus.SUCCESS: 1>, function_name='main.terminate_service_sandbox', module_name='modal_backend', children=[InputInfo(input_id='in-01KKARBXQDPYGKF34N68N5QNGP', function_call_id='fc-01KKARBXQ65FQXXSSDKBAB1NQM', task_id='', status=<InputStatus.PENDING: 0>, function_name='main.drain_controller_sandbox', module_name='modal_backend', children=[])])]",
+      "post_service_info_final": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "active": {
+            "active_generation": 6,
+            "status": "active",
+            "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+            "sandbox_name": "svc-runner-8001-gen-0006-8e39a920",
+            "service_url": "https://ta-01kkarbnecpe6ggy6wtdssd9ym-8001-q7m4wihoeg24steo88n657crr.w.modal.host",
+            "image_version": "093d6835c629",
+            "promoted_at": 1773108852,
+            "last_verified_readiness_at": 1773108852,
+            "updated_at": 1773108852
+          },
+          "services": [
+            {
+              "generation": 6,
+              "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+              "sandbox_name": "svc-runner-8001-gen-0006-8e39a920",
+              "service_url": "https://ta-01kkarbnecpe6ggy6wtdssd9ym-8001-q7m4wihoeg24steo88n657crr.w.modal.host",
+              "status": "active",
+              "image_version": "093d6835c629",
+              "created_at": 1773108849,
+              "updated_at": 1773108852,
+              "source": "created",
+              "promotion_started_at": 1773108849,
+              "last_verified_readiness_at": 1773108852,
+              "promoted_at": 1773108852,
+              "promotion_reason": "terminate_service_sandbox",
+              "inflight": {
+                "sandbox_id": "sb-SkXxi5piI8iQNlGtCM8yTF",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108855
+              }
+            },
+            {
+              "generation": 5,
+              "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+              "sandbox_name": "svc-runner-8001-gen-0005-02ce696b",
+              "service_url": "https://ta-01kkarapcjq4231x2r68fw3hfr-8001-cs8hlscubx64j8ase692sq3jo.w.modal.host",
+              "status": "terminated",
+              "image_version": "093d6835c629",
+              "created_at": 1773108821,
+              "updated_at": 1773108854,
+              "source": "created",
+              "promotion_started_at": 1773108821,
+              "last_verified_readiness_at": 1773108825,
+              "promoted_at": 1773108825,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108852,
+              "drain_deadline_at": 1773109152,
+              "replaced_by_generation": 6,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARBXQ65FQXXSSDKBAB1NQM",
+              "drain_scheduled_at": 1773108852,
+              "drain_expected_generation": 5,
+              "terminated_at": 1773108854,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108852
+              },
+              "expected_generation": 5,
+              "drain_execution_call_id": "fc-01KKARBXQ65FQXXSSDKBAB1NQM",
+              "inflight": {
+                "sandbox_id": "sb-iuS26ACoWiJ4iKWiwXxQEx",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108855
+              }
+            },
+            {
+              "generation": 4,
+              "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+              "sandbox_name": "svc-runner-8001-gen-0004-292dbb44",
+              "service_url": "https://ta-01kkar5rxa50pp3swpx14chxpw-8001-yywge9vp3i4gdb0vigq3au40g.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108663,
+              "updated_at": 1773108838,
+              "source": "created",
+              "promotion_started_at": 1773108663,
+              "last_verified_readiness_at": 1773108666,
+              "promoted_at": 1773108666,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108825,
+              "drain_deadline_at": 1773109125,
+              "replaced_by_generation": 5,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "drain_scheduled_at": 1773108825,
+              "drain_expected_generation": 4,
+              "terminated_at": 1773108838,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108836
+              },
+              "expected_generation": 4,
+              "drain_execution_call_id": "fc-01KKARB3BD5WP2F0F3Y1CNW5RS",
+              "inflight": {
+                "sandbox_id": "sb-uruft7bleFoufrQlWlV7oL",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108855
+              }
+            },
+            {
+              "generation": 3,
+              "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+              "sandbox_name": "svc-runner-8001-gen-0003-a0ea01d2",
+              "service_url": "https://ta-01kkar50jfmvbm36qc7bnpzcq8-8001-hthis0nxine5isvrli0pev57i.w.modal.host",
+              "status": "terminated",
+              "image_version": "5c02a33c6b83",
+              "created_at": 1773108634,
+              "updated_at": 1773108669,
+              "source": "created",
+              "promotion_started_at": 1773108634,
+              "last_verified_readiness_at": 1773108638,
+              "promoted_at": 1773108638,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108666,
+              "drain_deadline_at": 1773108966,
+              "replaced_by_generation": 4,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "drain_scheduled_at": 1773108667,
+              "drain_expected_generation": 3,
+              "terminated_at": 1773108668,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108667
+              },
+              "expected_generation": 3,
+              "drain_execution_call_id": "fc-01KKAR68WH7PP28ZA5HR8HJEP7",
+              "inflight": {
+                "sandbox_id": "sb-UbJkB4Qbfki7JVVddKzVu8",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108855
+              }
+            },
+            {
+              "generation": 2,
+              "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+              "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+              "service_url": "https://ta-01kk8xqwz1jxg9gj3ryhs4dc3w-8001-pbm8qrvs6hdwydzw8iehmy5fw.w.modal.host",
+              "status": "terminated",
+              "image_version": "dd91efc55bef",
+              "created_at": 1773047387,
+              "updated_at": 1773108644,
+              "source": "created",
+              "promotion_started_at": 1773047387,
+              "last_verified_readiness_at": 1773047392,
+              "promoted_at": 1773047393,
+              "promotion_reason": "terminate_service_sandbox",
+              "drain_started_at": 1773108638,
+              "drain_deadline_at": 1773108938,
+              "replaced_by_generation": 3,
+              "drain_mode": "spawned",
+              "drain_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "drain_scheduled_at": 1773108638,
+              "drain_expected_generation": 2,
+              "terminated_at": 1773108644,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108644
+              },
+              "expected_generation": 2,
+              "drain_execution_call_id": "fc-01KKAR5CY9FZSX79XG9J9GW1SQ",
+              "inflight": {
+                "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108855
+              }
+            },
+            {
+              "generation": 1,
+              "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+              "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+              "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+              "status": "terminated",
+              "image_version": "15b37645f42b",
+              "created_at": 1773047322,
+              "updated_at": 1773047400,
+              "source": "created",
+              "last_verified_readiness_at": 1773047322,
+              "promotion_started_at": 1773047322,
+              "promoted_at": 1773047322,
+              "drain_started_at": 1773047393,
+              "drain_deadline_at": 1773047693,
+              "replaced_by_generation": 2,
+              "terminated_at": 1773047400,
+              "drain_timeout_reached": false,
+              "inflight_at_termination": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773047397
+              },
+              "expected_generation": 1,
+              "inflight": {
+                "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+                "total": 0,
+                "query": 0,
+                "query_stream": 0,
+                "updated_at": 1773108856
+              }
+            }
+          ],
+          "rollout_lock": null
+        }
+      },
+      "post_pool_status_final": {
+        "status_code": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "ok": true,
+          "enabled": true,
+          "target_size": 2,
+          "refresh_interval_seconds": 300,
+          "sandbox_max_age_seconds": 3600,
+          "missing_scoped_secret_count": 0,
+          "scoped_secret_transition_stable": true,
+          "total": 0,
+          "warm": 0,
+          "claimed": 0,
+          "entries": []
+        }
+      }
+    }
+  ],
+  "modal_app_log_excerpts": [
+    "2026-03-10 12:43:45+10:30 controller_drain.scheduled drain_call_id=fc-01KKARB3BD5WP2F0F3Y1CNW5RS sandbox_id=sb-uruft7bleFoufrQlWlV7oL expected_generation=4 drain_deadline_at=1773109125",
+    "2026-03-10 12:43:56+10:30 controller_drain.start drain_call_id=fc-01KKARB3BD5WP2F0F3Y1CNW5RS sandbox_id=sb-uruft7bleFoufrQlWlV7oL expected_generation=4 drain_deadline_at=1773109125",
+    "2026-03-10 12:43:58+10:30 controller_drain.complete drain_call_id=fc-01KKARB3BD5WP2F0F3Y1CNW5RS sandbox_id=sb-uruft7bleFoufrQlWlV7oL timed_out=False inflight_total=0",
+    "2026-03-10 12:44:12+10:30 controller_drain.scheduled drain_call_id=fc-01KKARBXQ65FQXXSSDKBAB1NQM sandbox_id=sb-iuS26ACoWiJ4iKWiwXxQEx expected_generation=5 drain_deadline_at=1773109152",
+    "2026-03-10 12:44:12+10:30 controller_drain.start drain_call_id=fc-01KKARBXQ65FQXXSSDKBAB1NQM sandbox_id=sb-iuS26ACoWiJ4iKWiwXxQEx expected_generation=5 drain_deadline_at=1773109152",
+    "2026-03-10 12:44:14+10:30 controller_drain.complete drain_call_id=fc-01KKARBXQ65FQXXSSDKBAB1NQM sandbox_id=sb-iuS26ACoWiJ4iKWiwXxQEx timed_out=False inflight_total=0"
+  ],
+  "local_worker_against_deployed_modal": {
+    "note": "Local wrangler dev was pointed at the deployed Modal base because the public Cloudflare Worker deployment is absent from the authenticated account.",
+    "health": {
+      "ok": true,
+      "service": "rafiki-control-plane"
+    },
+    "query": {
+      "ok": true,
+      "session_id": "sess-deployed-001",
+      "messages": [
+        {
+          "type": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "e2e-ok"
+            }
+          ],
+          "model": "gpt-4.1",
+          "parent_tool_use_id": null,
+          "error": null,
+          "session_id": "sess-deployed-001",
+          "trace_id": "9b86ccbe-ef37-4438-ba15-dd332c5e4b55"
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "duration_ms": 1395,
+          "duration_api_ms": null,
+          "is_error": false,
+          "num_turns": 1,
+          "session_id": "sess-deployed-001",
+          "trace_id": "9b86ccbe-ef37-4438-ba15-dd332c5e4b55",
+          "openai_trace_id": "resp_006aea8a9a1aedc70069af7f90071c81a1925e7e368c218c33",
+          "total_cost_usd": null,
+          "usage": {
+            "requests": 1,
+            "input_tokens": 902,
+            "output_tokens": 6,
+            "total_tokens": 908
+          },
+          "result": "e2e-ok",
+          "structured_output": null
+        }
+      ]
+    },
+    "query_stream": {
+      "ok": true,
+      "events": [
+        "connection_ack",
+        "session_update",
+        "query_start",
+        "assistant_message",
+        "execution_state",
+        "query_complete"
+      ],
+      "payload": {
+        "type": "query_complete",
+        "session_id": "sess-deployed-001",
+        "timestamp": 1773109154669,
+        "data": {
+          "messages": [
+            {
+              "type": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "stream-e2e-ok"
+                }
+              ],
+              "model": "gpt-4.1",
+              "parent_tool_use_id": null,
+              "error": null,
+              "session_id": "sess-deployed-001",
+              "trace_id": "fcb5dc41-f14f-4177-b03e-0da4558e7093"
+            },
+            {
+              "type": "result",
+              "subtype": "success",
+              "duration_ms": 2105,
+              "duration_api_ms": null,
+              "is_error": false,
+              "num_turns": 1,
+              "session_id": "sess-deployed-001",
+              "trace_id": "fcb5dc41-f14f-4177-b03e-0da4558e7093",
+              "openai_trace_id": "resp_006aea8a9a1aedc70069af7fa1007081a1ad18edc9e72336ef",
+              "total_cost_usd": null,
+              "usage": {
+                "requests": 1,
+                "input_tokens": 992,
+                "output_tokens": 7,
+                "total_tokens": 999
+              },
+              "result": "stream-e2e-ok",
+              "structured_output": null
+            }
+          ],
+          "duration_ms": 2105,
+          "summary": {
+            "text": "stream-e2e-ok",
+            "is_complete": true,
+            "subtype": "success",
+            "duration_ms": 2105,
+            "is_error": false,
+            "num_turns": 1,
+            "session_id": "sess-deployed-001",
+            "openai_trace_id": "resp_006aea8a9a1aedc70069af7fa1007081a1ad18edc9e72336ef",
+            "usage": {
+              "requests": 1,
+              "input_tokens": 992,
+              "output_tokens": 7,
+              "total_tokens": 999
+            },
+            "result": "stream-e2e-ok",
+            "trace_id": "fcb5dc41-f14f-4177-b03e-0da4558e7093"
+          }
+        }
+      }
+    },
+    "queue_post": {
+      "ok": true,
+      "queued": true,
+      "session_id": "sess-deployed-001",
+      "prompt_id": "36e5620d-b4bd-43c1-97b9-ec32d45ad4ed",
+      "queue_size": 2,
+      "max_queue_size": 10,
+      "expires_at": 1773112734096
+    },
+    "queue_get": {
+      "ok": true,
+      "session_id": "sess-deployed-001",
+      "is_executing": false,
+      "queue_size": 2,
+      "prompts": [
+        {
+          "prompt_id": "d2092022-b034-4608-a933-2cf7657c5c63",
+          "question": "queued follow-up",
+          "queued_at": 1773109021832,
+          "expires_at": 1773112621832,
+          "position": 1
+        },
+        {
+          "prompt_id": "36e5620d-b4bd-43c1-97b9-ec32d45ad4ed",
+          "question": "queued follow-up",
+          "queued_at": 1773109134096,
+          "expires_at": 1773112734096,
+          "position": 2
+        }
+      ],
+      "max_queue_size": 10
+    },
+    "state": {
+      "ok": true,
+      "state": {
+        "session_id": "sess-deployed-001",
+        "user_id": "e2e-user",
+        "tenant_id": "e2e-tenant",
+        "created_at": 1773108938517,
+        "last_active_at": 1773109143685,
+        "status": "idle"
+      }
+    }
+  },
+  "public_worker_blocker": {
+    "wrangler_whoami": {
+      "account_name": "Ibrahim.aka.ajax@gmail.com's Account",
+      "account_id": "b08d54b822741dbf8e864503b50604a1",
+      "email": "ibrahim.aka.ajax@gmail.com"
+    },
+    "deployments_list_error": "A request to the Cloudflare API (/accounts/b08d54b822741dbf8e864503b50604a1/workers/scripts/rafiki-control-plane/deployments) failed. This Worker does not exist on your account. [code: 10007]",
+    "direct_public_health_probe": {
+      "url": "https://rafiki-control-plane.ibrahim-aka-ajax.workers.dev/health",
+      "status": 404,
+      "body": "error code: 1042",
+      "note": "This URL was inferred from other local Workers projects under the same Cloudflare account subdomain and is not a canonical repo-recorded worker URL."
+    }
+  },
+  "regression_validation": [
+    {
+      "command": "uv run python -m pytest tests/test_controller_rollout.py",
+      "result": "PASS",
+      "details": "37 passed"
+    },
+    {
+      "command": "uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'",
+      "result": "PASS",
+      "details": "12 passed, 16 deselected"
+    },
+    {
+      "command": "uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py",
+      "result": "PASS",
+      "details": "27 passed"
+    },
+    {
+      "command": "npm --prefix edge-control-plane run check",
+      "result": "PASS",
+      "details": "ultracite clean"
+    },
+    {
+      "command": "cd edge-control-plane && ./node_modules/.bin/tsc --noEmit",
+      "result": "PASS",
+      "details": "no output"
+    },
+    {
+      "command": "npm --prefix edge-control-plane run test:integration",
+      "result": "PASS",
+      "details": "3 passed"
+    }
+  ],
+  "pass_fail_matrix": [
+    {
+      "criterion": 1,
+      "status": "PASS",
+      "detail": "Both deployed cutovers returned drain_status.mode=spawned."
+    },
+    {
+      "criterion": 2,
+      "status": "PASS",
+      "detail": "Scheduled drain call ids matched FunctionCall.get results, call graphs, service metadata, and app-log excerpts."
+    },
+    {
+      "criterion": 3,
+      "status": "PASS",
+      "detail": "Each cutover shows old A as active pre-cutover, draining in immediate post snapshot, and terminated in final post snapshot."
+    },
+    {
+      "criterion": 4,
+      "status": "PASS",
+      "detail": "Both terminated services recorded drain_timeout_reached=false and inflight_at_termination.total=0."
+    },
+    {
+      "criterion": 5,
+      "status": "PASS",
+      "detail": "Immediate post snapshots show rollback_target_* on the active pointer; final snapshots show those fields cleared after drain completion."
+    },
+    {
+      "criterion": 6,
+      "status": "FAIL_BLOCKER",
+      "detail": "Public Cloudflare Worker deployment is absent from the authenticated account, so first public Worker /query could not be executed."
+    },
+    {
+      "criterion": 7,
+      "status": "PASS_WITH_LIMIT",
+      "detail": "query_stream, queue, and state checks passed through local wrangler dev wired to the deployed Modal base; public worker variant remains blocked with criterion 6."
+    },
+    {
+      "criterion": 8,
+      "status": "PASS",
+      "detail": "/service_info and /pool/status raw outputs showed no sandbox_session_secret or synthetic session secret leakage."
+    },
+    {
+      "criterion": 9,
+      "status": "PASS",
+      "detail": "All required local regression suites and edge checks passed."
+    }
+  ]
+}

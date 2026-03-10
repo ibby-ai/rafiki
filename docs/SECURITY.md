@@ -72,3 +72,28 @@
 
 ### Residual Security Risk
 - `modal-auth-secret` is now available inside sandbox runtime when enabled; credential scope/rotation hygiene remains important. Keep secret-rotation and sandbox-recycle steps coupled in operations runbooks.
+
+## 2026-03-10 Security Update - Controller Rollout Cutover Safety
+
+### Security-Relevant Outcomes
+- Scoped sandbox auth remains strict during rollout: no internal-auth fallback reintroduced for sandbox endpoints.
+- Rollout observability (`/service_info`, `/pool/status`) redacts scoped sandbox secret material.
+- Function-vs-sandbox secret-surface split remains unchanged.
+- Fresh-request admission now verifies `/query`, `/query_stream`, and queued job dispatch against the authoritative active-pointer generation at lease start, so stale prewarm claims cannot route fresh traffic onto draining controllers.
+- Guarded generation-transition commit prevents stale writers from re-pointing active traffic after overlapping rollouts or stale-lock recovery.
+
+### Verification Evidence
+- `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py` -> pass (`27 passed`)
+- `uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'` -> pass (`12 passed`)
+- `uv run python -m pytest tests/test_controller_rollout.py` -> pass (`37 passed`)
+- Generated proof artifact: `docs/generated/controller-rollout-cutover-safety-proof-2026-03-10T13-48-41-1030.json`
+- Live rollout observability checks:
+  - Cloudflare Worker secret repair configured `INTERNAL_AUTH_SECRET` and `SESSION_SIGNING_SECRET` before the public proof wave; deployed Modal `/service_info` accepted the same internal-auth value used on the Worker.
+  - `/service_info` and `/pool/status` returned rollout status without `sandbox_session_secret` or synthetic-session secret material.
+  - deployed cutover `1 -> 2` persisted `drain_call_id=fc-01KKAV7J9BHCF70NNHFZEFF2AQ` and terminated the replaced service without exposing scoped secret material.
+  - deployed cutover `2 -> 3` persisted `drain_call_id=fc-01KKAV8YCS28RD8F8YQH464TT2` and terminated the replaced service without exposing scoped secret material.
+  - both cutovers correlated schedule -> execution -> completion via `drain_execution_call_id` and `controller_drain.scheduled/start/complete` app-log lines without leaking scoped secret values.
+  - both first public post-cutover Worker `/query` calls returned `HTTP 200` on the first try without reintroducing legacy fallback auth.
+
+### Residual Security Risk
+- `modal-auth-secret` remains a high-value secret on the sandbox surface when enabled; rotation and sandbox recycle still need to stay coupled operationally.

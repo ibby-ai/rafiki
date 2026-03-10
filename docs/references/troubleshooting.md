@@ -12,9 +12,9 @@ Before diving into specific issues, run these checks:
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 source .venv/bin/activate
 
-# Derive baseline URLs from checked-in Worker config
-export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
-export DEV_URL="$MODAL_API_BASE_URL"
+# Local Worker dev now uses edge-control-plane/wrangler.jsonc -> env.development
+export DEV_URL="https://saidiibrahim--modal-backend-http-app-dev.modal.run"
+export MODAL_API_BASE_URL="$DEV_URL"
 export WORKER_URL="http://localhost:8787"
 
 # 1. Verify Modal is configured
@@ -197,7 +197,11 @@ curl -sS -X POST "$DEV_URL/query" \
 2. Ensure sandbox secret surface includes `modal-auth-secret` when `ENABLE_MODAL_AUTH_SECRET=true`.
 3. Recycle the service sandbox and clear stale metadata if needed:
    ```bash
+   # deployed app path
    modal run -m modal_backend.main::terminate_service_sandbox
+
+   # local modal serve path
+   uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
    ```
 4. Re-run Worker `/query` smoke.
 
@@ -212,7 +216,11 @@ curl -sS -X POST "$DEV_URL/query" \
 1. Use a writable session DB path fallback (`/tmp/openai_agents_sessions.sqlite3`) when runtime detects unwritable configured path.
 2. Recycle the active sandbox so startup path checks run again:
    ```bash
+   # deployed app path
    modal run -m modal_backend.main::terminate_service_sandbox
+
+   # local modal serve path
+   uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
    ```
 3. Re-run `/query` and confirm `200` response.
 
@@ -245,7 +253,12 @@ curl -sS -X POST "$DEV_URL/query" \
 
 4. **Terminate and restart**:
    ```bash
+   # deployed app path
    modal run -m modal_backend.main::terminate_service_sandbox
+
+   # local modal serve path
+   uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
+
    modal serve -m modal_backend.main
    ```
 
@@ -302,11 +315,10 @@ sandbox_memory: int = 4096  # Increase from 2048
    modal serve -m modal_backend.main
    ```
 
-2. **Use a gateway ping** to keep the sandbox warm:
+2. **Use an operator-controlled warmup** to keep the controller warm:
    ```bash
-   # Run every 5 minutes via cron or external service
-   # /service_info triggers sandbox discovery (internal-only)
-   curl "${DEV_URL}/service_info" -H "X-Internal-Auth: <internal-token>"
+   # /service_info is rollout status only; it does not create or warm a controller.
+   uv run python -c "from modal_backend.main import get_or_start_background_sandbox; print(get_or_start_background_sandbox())"
    ```
 
 3. **Accept cold starts** if traffic is sporadic (saves costs)
@@ -324,12 +336,15 @@ sandbox_memory: int = 4096  # Increase from 2048
 **Workaround:**
 1. Stop both dev servers.
 2. Restart `modal serve -m modal_backend.main`.
-3. Restart `wrangler dev` for the Cloudflare worker.
+3. Restart `npm run dev` (equivalent to `wrangler dev --env development`) for the Cloudflare worker.
 
 If the issue persists, terminate and recreate the background sandbox:
 ```bash
+# deployed app path
 modal run -m modal_backend.main::terminate_service_sandbox
-modal serve -m modal_backend.main
+
+# local modal serve path (avoids webhook app stop/label steal)
+uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
 ```
 
 ---
@@ -365,7 +380,12 @@ curl -X POST "${WORKER_URL}/query" \
   -d '{"question":"Write hello to /data/test.txt"}'
 
 # Restart the sandbox
+# deployed app path
 modal run -m modal_backend.main::terminate_service_sandbox
+
+# local modal serve path
+uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
+
 modal serve -m modal_backend.main
 
 # Check if file exists
@@ -478,7 +498,7 @@ _allowed_tools = [
   GET  /health_check   # Service health (internal-only, controller)
    POST /query          # Agent query
    POST /query_stream   # Streaming query
-   GET  /service_info   # Sandbox information
+   GET  /service_info   # Rollout status (active pointer, services, lock)
    ```
 
 3. **Use the correct URL** from `modal serve` output
@@ -498,7 +518,12 @@ _allowed_tools = [
 
 2. **Restart the service**:
    ```bash
+   # deployed app path
    modal run -m modal_backend.main::terminate_service_sandbox
+
+   # local modal serve path
+   uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
+
    modal serve -m modal_backend.main
    ```
 

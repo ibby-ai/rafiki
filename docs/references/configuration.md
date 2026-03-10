@@ -91,6 +91,9 @@ Relevant settings/env keys introduced for hardening:
 - `ARTIFACT_ACCESS_REVOCATION_STORE_NAME` (default `artifact-access-revocations`)
 - `SANDBOX_DROP_PRIVILEGES`, `SANDBOX_RUNTIME_UID`, `SANDBOX_RUNTIME_GID`, `SANDBOX_WRITABLE_ROOTS`
 - `SERVICE_TIMEOUT` (default `60`, minimum `1`) for sandbox readiness probes (`/health_check`)
+- `CONTROLLER_ROLLOUT_STORE_NAME` (default `controller-rollout-store`) authoritative active-pointer + rollout lifecycle store
+- `CONTROLLER_ROLLOUT_LOCK_MAX_AGE_SECONDS` (default `900`) stale-rollout lock recovery threshold and stale generation-transition claim reclamation window
+- `CONTROLLER_DRAIN_TIMEOUT_SECONDS` (default `300`) max drain wait before forced termination fallback
 - Legacy sandbox fallback controls are removed; scoped sandbox auth is mandatory.
 
 ## Rotation and Remediation (Scoped Sandbox/Auth + Artifact)
@@ -114,6 +117,30 @@ Remediation steps:
 1. Recycle/recreate affected sandboxes until scoped secrets are present.
 2. Re-run `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_sandbox_auth_header.py`.
 3. Re-run Cloudflare/Modal `/query` + `/query_stream` smoke from runbook.
+
+### Controlled rollout trigger notes
+
+- `terminate_service_sandbox` now defaults to safe A->B rollout behavior (create/verify/promote/drain) rather than immediate teardown.
+- Emergency hard terminate remains available via `terminate_service_sandbox(immediate=True)` and should be reserved for break-glass scenarios.
+- `GET /service_info` is rollout/status observability only; it does not create, warm, or verify a controller.
+- Promotion commit is fail-closed:
+  - the promoting writer must still own the rollout lock
+  - the active pointer must still report the expected previous generation before the pointer flips
+  - overlapping or stale writers that miss either condition abort and cannot overwrite the active pointer
+- Fresh request admission is fail-closed:
+  - request leases are created only if the target sandbox still matches the active pointer generation
+  - stale prewarm claims are marked failed and rerouted before forwarding
+- If the active pointer is missing and the rollout registry contains multiple `active` services, routing/bootstrap recovery fails closed until the ambiguity is resolved.
+- If the active pointer is missing and registry recovery finds one `active` service that then fails `attach_active_pointer` readiness, the recovered service is marked `failed`, the pointer is cleared, and a clean bootstrap begins.
+- For local `modal serve` validation, trigger safe rollout with:
+  - `uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"`
+  Use `modal run -m modal_backend.main::terminate_service_sandbox` only against deployed/webhook-backed app runs.
+- In local `modal serve` validation, `drain_controller_sandbox.spawn()` can be unavailable; `drain_status.mode=inline` is acceptable when the result still reports `status=terminated` and `drain_timeout_reached=false`.
+- Local `modal serve` cannot directly prove hydrated spawned-drain behavior because `drain_controller_sandbox.spawn()` is not hydrated there; require deterministic parity-harness evidence alongside the inline live fallback.
+- Required regression gates for rollout changes:
+  - `uv run python -m pytest tests/test_controller_rollout.py`
+  - `uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'`
+  - `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py`
 
 ### Artifact token rollback
 
@@ -145,6 +172,21 @@ Notes:
   does not consume `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` for that canonical E2E request path.
 - If future Worker routes adopt explicit Modal workspace auth, document those separately instead
   of treating them as part of the baseline E2E contract.
+- `edge-control-plane/wrangler.jsonc` keeps the canonical public Worker production-safe at the top
+  level and isolates local/operator values under `env.development`.
+- `npm run dev` expands to `wrangler dev --env development`; that env keeps explicit Durable Object
+  `script_name` values (`rafiki-control-plane-development`) so local/dev object state stays
+  isolated from the canonical public Worker.
+- Keep shared local secrets in `edge-control-plane/.dev.vars` unless you intentionally want an
+  env-specific file. Adding `.dev.vars.development` causes Wrangler to stop loading the generic
+  `.dev.vars` for that environment.
+- Canonical public-worker proof or production ingress repair now uses the checked-in production
+  defaults directly:
+
+```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane
+npm run deploy
+```
 
 ### Required Modal-side configuration
 
@@ -159,8 +201,8 @@ Notes:
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
 
-export MODAL_API_BASE_URL="$(rg -o '\"MODAL_API_BASE_URL\": \"[^\"]+\"' edge-control-plane/wrangler.jsonc | sed -E 's/.*: \"([^\"]+)\"/\1/')"
-export DEV_URL="$MODAL_API_BASE_URL"
+export DEV_URL="https://saidiibrahim--modal-backend-http-app-dev.modal.run"
+export MODAL_API_BASE_URL="$DEV_URL"
 export WORKER_URL="http://localhost:8787"
 ```
 

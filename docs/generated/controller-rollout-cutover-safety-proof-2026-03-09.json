@@ -1,0 +1,158 @@
+{
+  "generated_at": "2026-03-09T19:42:59+10:30",
+  "scope": "controller-rollout-cutover-safety",
+  "validation": [
+    {
+      "command": "uv run python -m pytest tests/test_controller_rollout.py",
+      "result": "PASS",
+      "details": "33 passed"
+    },
+    {
+      "command": "uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'",
+      "result": "PASS",
+      "details": "12 passed"
+    },
+    {
+      "command": "uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py",
+      "result": "PASS",
+      "details": "27 passed"
+    },
+    {
+      "command": "npm --prefix edge-control-plane run check",
+      "result": "PASS",
+      "details": "ultracite check clean"
+    },
+    {
+      "command": "cd edge-control-plane && ./node_modules/.bin/tsc --noEmit",
+      "result": "PASS",
+      "details": "no output"
+    },
+    {
+      "command": "npm --prefix edge-control-plane run test:integration",
+      "result": "PASS",
+      "details": "3 passed"
+    }
+  ],
+  "bootstrap_recovery": {
+    "stale_recovered_service_replay": {
+      "command": "uv run python - <<'PY' ... clear rollout store, seed terminated sandbox sb-CM9UmFjHr7LMoi5kpCijL3 as active, then call get_or_start_background_sandbox() ... PY",
+      "result": "PASS",
+      "before_active": null,
+      "after_active": {
+        "active_generation": 1,
+        "sandbox_id": "sb-DnzRPHPm3OSRmSs2vYptOZ",
+        "sandbox_name": "svc-runner-8001-gen-0001-d8898cbb",
+        "service_url": "https://ta-01kk8xkn03c5k93gk1rhk6e85h-8001-80ovojaqia3vidtskxka1zzbc.w.modal.host",
+        "image_version": "01760cf36f76",
+        "promoted_at": 1773047244,
+        "last_verified_readiness_at": 1773047244
+      },
+      "stale_service": {
+        "sandbox_id": "sb-CM9UmFjHr7LMoi5kpCijL3",
+        "status": "failed",
+        "failure_reason": "_SandboxReadinessTimeoutError: Sandbox readiness timeout (phase=attach_active_pointer, sandbox_id=sb-CM9UmFjHr7LMoi5kpCijL3, attempt=1)"
+      }
+    },
+    "tight_timeout_probe": {
+      "command": "uv run python - <<'PY' ... set service_timeout=3, clear rollout store, then call get_or_start_background_sandbox() from empty state ... PY",
+      "result": "EXPECTED_FAIL_LIMIT",
+      "error": "Background sandbox startup failed after 2 attempts"
+    },
+    "empty_pointer_replay": {
+      "command": "uv run python - <<'PY' ... clear rollout store, call get_or_start_background_sandbox(), print before_active/after_active ... PY",
+      "result": "PASS",
+      "before_active": null,
+      "after_active": {
+        "active_generation": 1,
+        "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+        "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+        "service_url": "https://ta-01kk8xp18rkde8emce21eaxpyf-8001-lrxk0mfeh3y87fzb7wrwe59pd.w.modal.host",
+        "image_version": "15b37645f42b",
+        "promoted_at": 1773047322,
+        "last_verified_readiness_at": 1773047322
+      }
+    }
+  },
+  "cutover_replay": {
+    "pre_cutover_service_info": {
+      "active_generation": 1,
+      "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+      "sandbox_name": "svc-runner-8001-gen-0001-b0d631b6",
+      "last_verified_readiness_at": 1773047322
+    },
+    "rollout_result": {
+      "ok": true,
+      "active_generation": 2,
+      "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+      "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+      "last_verified_readiness_at": 1773047392,
+      "drain_status": {
+        "mode": "inline",
+        "ok": true,
+        "sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t",
+        "status": "terminated",
+        "drain_timeout_reached": false
+      }
+    },
+    "post_cutover_service_info": {
+      "active_generation": 2,
+      "sandbox_id": "sb-IiLZoEm7isfh1XPElHMnX2",
+      "sandbox_name": "svc-runner-8001-gen-0002-3754b2fb",
+      "last_verified_readiness_at": 1773047392,
+      "terminated_previous_sandbox_id": "sb-SSgJAg9fZqBTFQFAjosr6t"
+    },
+    "first_public_query": {
+      "command": "curl -sS -o <tmp> -w '%{http_code}' -X POST http://localhost:8787/query ...",
+      "status_code": 200,
+      "result_text": "e2e-ok"
+    },
+    "query_stream": {
+      "command": "node - <<'NODE' ... new WebSocket('ws://localhost:8787/query_stream?...') ... NODE",
+      "event_types": [
+        "connection_ack",
+        "session_update",
+        "query_start",
+        "assistant_message",
+        "execution_state",
+        "query_complete"
+      ]
+    },
+    "queue_state": {
+      "queue_post": {
+        "ok": true,
+        "queue_size": 1,
+        "prompt_id": "6d8f6682-90c9-4b3f-b779-05c3e2f22867"
+      },
+      "queue_get": {
+        "ok": true,
+        "queue_size": 1
+      },
+      "state_get": {
+        "ok": true,
+        "session_id": "sess-e2e-001",
+        "status": "idle"
+      }
+    }
+  },
+  "local_harnesses": {
+    "overlap_commit_replay": {
+      "command": "uv run python - <<'PY' ... threaded _persist_active_controller_pointer overlap harness ... PY",
+      "result": "PASS",
+      "winner": "sb-two",
+      "loser_error": "Controller promotion commit slot is already owned by another rollout (expected_generation=1, operation_id=rollout-two, candidate_sandbox_id=sb-two)",
+      "pointer_writes": 1
+    },
+    "drain_parity_replay": {
+      "command": "uv run python - <<'PY' ... spawned-vs-inline drain parity harness ... PY",
+      "result": "PASS",
+      "spawned_mode": "scheduled",
+      "spawned_terminal_status": "terminated",
+      "inline_terminal_status": "terminated",
+      "drain_timeout_reached": false
+    }
+  },
+  "proof_limits": [
+    "Local modal serve cannot hydrate drain_controller_sandbox.spawn() directly; live local proof therefore observes inline fallback and relies on deterministic parity harnesses for spawned-path equivalence.",
+    "Bootstrap remains fail-closed after two readiness timeouts; the tightened 3-second timeout probe reproduced that boundary without contradicting the successful default-timeout empty bootstrap replay."
+  ]
+}

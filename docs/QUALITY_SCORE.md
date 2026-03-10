@@ -1,7 +1,7 @@
 # QUALITY SCORE
 
 ## Metadata
-- Review date (YYYY-MM-DD): 2026-03-02
+- Review date (YYYY-MM-DD): 2026-03-10
 - Owner: Platform Engineering
 - Scope: Repository knowledge system, architecture docs, and execution plan governance
 
@@ -119,3 +119,60 @@
 | Architecture clarity | 5 | 5 | Runtime docs now capture the Modal 1.3.5 async-interface contract and explicit teardown semantics. |
 | Operational references | 5 | 5 | Operator docs now pin the repo Modal floor and the repo-local Python validation command shape. |
 | Security/reliability governance | 5 | 5 | Reliability evidence now includes warning-sensitive async regression coverage for the upgraded SDK. |
+
+## Re-Score (2026-03-10) - Controller Rollout Cutover Safety
+
+### Change Wave Scope
+- Product spec: `docs/product-specs/controller-rollout-cutover-safety.md`
+- ExecPlan: `docs/exec-plans/completed/controller-rollout-cutover-safety/PLAN_controller-rollout-cutover-safety.md`
+- Runtime/test/docs updates for authoritative active-pointer rollout, guarded generation-transition commit, lease-start admission, private readiness gates, request-lease drain accounting, and serve-safe cutover validation
+
+### Evidence Snapshot
+- `uv run python -m pytest tests/test_controller_rollout.py` -> passed (`37 passed`)
+- `uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'` -> passed (`12 passed`)
+- `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py` -> passed (`27 passed`)
+- `npm --prefix edge-control-plane run check` -> passed
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> passed
+- `npm --prefix edge-control-plane run test:integration` -> passed (`3 passed`)
+- Deterministic harnesses still cover stale recovered-service bootstrap, empty-pointer bootstrap, and concrete overlap rejection.
+- Deployed spawned-drain proof now correlates schedule -> execution -> completion for two consecutive public-ingress cutovers with persisted drain call ids and Modal app logs.
+- Generated proof artifact: `docs/generated/controller-rollout-cutover-safety-proof-2026-03-10T13-48-41-1030.json`
+- Documentation surfaces updated together across product spec, active plan, architecture, configuration, troubleshooting, and canonical E2E runbook
+- Live deployed cutover proof now passes end-to-end through the canonical public Worker:
+  - public Worker repair configured `INTERNAL_AUTH_SECRET` and `SESSION_SIGNING_SECRET`, redeployed `rafiki-control-plane`, and returned `/health` `200` at `https://rafiki-control-plane.ibrahim-aka-ajax.workers.dev`.
+  - the deployed Modal surface initially had `active: null`, so A was primed once through the deployed internal `/query` path before pre-cutover public ingress proof.
+  - deployed cutover `1 -> 2` scheduled spawned drain `fc-01KKAV7J9BHCF70NNHFZEFF2AQ` for `sb-bPtHWeXLDnPjPelePXo3Yw`; the first public Worker `/query` after cutover returned `HTTP 200` on the first try, and `/query_stream`, queue, and state checks passed.
+  - deployed cutover `2 -> 3` scheduled spawned drain `fc-01KKAV8YCS28RD8F8YQH464TT2` for `sb-flJnocn5fMxdPxld6aUmdE`; the first public Worker `/query` after cutover returned `HTTP 200` on the first try, and `/query_stream`, queue, and state checks passed.
+  - both cutovers recorded `drain_timeout_reached=false`, `inflight_at_termination.total=0`, and matching `drain_execution_call_id`.
+  - this proof wave still records `dirty_worktree=true`, so clean-commit reproducibility remains a separate signoff limitation.
+
+### Score Impact
+| Dimension | Previous | New | Rationale |
+|---|---|---|---|
+| Product intent clarity | 4 | 5 | Dedicated rollout product spec now defines promotion gates, rollback order, drain rules, and first-query success criteria. |
+| Architecture clarity | 5 | 5 | Design docs now encode active-pointer authority, guarded generation-transition commit, no fixed-name routing authority, and lease-based drain accounting. |
+| Operational references | 5 | 5 | Runbook/config/troubleshooting now distinguish deployed vs local cutover trigger paths, inline-drain fallback semantics, and the exact cutover proof sequence. |
+| Security/reliability governance | 5 | 5 | Governance docs now include changed-surface regression gates, live cutover proof, and explicit stale-writer/prewarm fail-closed guarantees. |
+
+## Follow-up (2026-03-10) - Cloudflare Deploy Target Hardening
+
+### Change Wave Scope
+- Worker config/scripts/docs updates that remove the manual production `--var` override requirement for `rafiki-control-plane`
+
+### Evidence Snapshot
+- top-level `edge-control-plane/wrangler.jsonc` is now production-safe for the canonical public Worker
+- `env.development` carries the local/dev Modal target plus explicit Durable Object script names for isolated dev state
+- `npm run dev` now expands to `wrangler dev --env development`
+- `cd edge-control-plane && ./node_modules/.bin/wrangler deploy --dry-run` -> passed
+- `cd edge-control-plane && ./node_modules/.bin/wrangler deploy --dry-run --env development` -> passed
+- `npm --prefix edge-control-plane run check` -> passed
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> passed
+- `npm --prefix edge-control-plane run test:integration` -> passed (`3 passed`)
+
+### Score Impact
+| Dimension | Previous | New | Rationale |
+|---|---|---|---|
+| Product intent clarity | 5 | 5 | Product-facing rollout intent did not change. |
+| Architecture clarity | 5 | 5 | Worker environment separation is clearer, but overall architecture score is unchanged. |
+| Operational references | 5 | 5 | Production deploys no longer depend on ad hoc CLI overrides; docs now encode the safer default directly. |
+| Security/reliability governance | 5 | 5 | The P3 operator-footgun is closed in config/scripts/docs, with validation evidence captured in the same wave. |

@@ -73,7 +73,7 @@
 - Repo dependency/lock state now targets `modal 1.3.5`, removing drift from the previously locked `1.3.0.post1`.
 - Async request/startup flows now use Modal `.aio` interfaces for sandbox/app lookups and function spawns, eliminating blocking Modal calls in the validated ingress/runtime paths.
 - Async HTTP endpoints that still rely on sync Modal-backed helpers (job/schedule/prewarm/session metadata stores) now run those helpers off the event loop via `anyio.to_thread`.
-- Explicit teardown paths now use `terminate(wait=True)` when supported, making `terminate_service_sandbox` and the local entrypoint wait for sandbox shutdown before assuming persistence/cleanup is complete.
+- Explicit teardown paths now use `terminate(wait=True)` when supported. `terminate_service_sandbox(immediate=True)` remains the hard-stop path; the default `terminate_service_sandbox()` behavior is now safe rollout/promotion rather than immediate teardown.
 
 ### Validation Evidence
 - `uv run python -m pytest tests/test_sandbox_auth_header.py tests/test_query_proxy_error_normalization.py` -> pass (`28 passed`)
@@ -84,3 +84,60 @@
 
 ### Residual Reliability Risk
 - The canonical Cloudflare <-> Modal live E2E runbook was not rerun in this upgrade wave, so real network/runtime behavior beyond the targeted local validation matrix remains an explicit follow-up if release confidence requires a full end-to-end replay.
+
+## 2026-03-10 Reliability Update - Controller Rollout Cutover Safety
+
+### Delivered Reliability Controls
+- Request routing now uses shared active-pointer generation state as authority, with worker-local cache treated as non-authoritative.
+- Promotion path creates/verifies replacement controller privately before pointer flip.
+- Pointer promotion is now a guarded generation transition:
+  - stale writers fail closed if rollout-lock ownership is lost
+  - stale writers fail closed if the active generation already advanced
+- Promotion lifecycle records active/promoting/draining/terminated states and tracks rollback target metadata.
+- Fresh request admission for `/query`, `/query_stream`, and queued job dispatch now happens at lease start, so stale prewarm claims cannot land on draining controllers after promotion.
+- Pointer recovery fails closed when the active pointer is missing and the rollout registry contains multiple `active` services.
+- Pointer recovery also fails closed when a recovered single `active` controller cannot satisfy `attach_active_pointer` readiness: that service is marked `failed`, the pointer is cleared, and bootstrap starts a clean replacement controller.
+- Draining controller termination waits for in-flight lease quiescence or bounded timeout.
+
+### Validation Evidence
+- `uv run python -m pytest tests/test_controller_rollout.py` -> pass (`37 passed`)
+- `uv run python -m pytest tests/test_sandbox_auth_header.py -k 'prewarm or stop_session or get_or_start_background_sandbox'` -> pass (`12 passed`)
+- `uv run python -m pytest tests/test_internal_auth_middleware.py tests/test_settings_openai.py` -> pass (`27 passed`)
+- `npm --prefix edge-control-plane run check` -> pass
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> pass
+- `npm --prefix edge-control-plane run test:integration` -> pass (`3 passed`)
+- Generated proof artifact: `docs/generated/controller-rollout-cutover-safety-proof-2026-03-10T13-48-41-1030.json`
+- Fresh local bootstrap replays still passed:
+  - stale recovered-service replay seeded terminated sandbox `sb-CM9UmFjHr7LMoi5kpCijL3`; recovery failed closed at `attach_active_pointer`, marked that service `failed`, and bootstrapped clean controller `sb-DnzRPHPm3OSRmSs2vYptOZ`.
+  - empty-pointer replay bootstrapped generation `1` controller `sb-SSgJAg9fZqBTFQFAjosr6t` from `before_active: null` under the default timeout.
+- Deployed spawned-drain proof now passes through the canonical public Worker:
+  - the Worker repair path configured `INTERNAL_AUTH_SECRET` and `SESSION_SIGNING_SECRET`, redeployed `rafiki-control-plane` against `https://saidiibrahim--modal-backend-http-app.modal.run`, and returned `/health` `200`.
+  - deployed cutover `1 -> 2` returned `drain_status.mode=spawned`, `drain_call_id=fc-01KKAV7J9BHCF70NNHFZEFF2AQ`, immediate old-service `status="draining"`, final old-service `status="terminated"`, and first public post-cutover `/query` `HTTP 200` on the first try.
+  - deployed cutover `2 -> 3` returned `drain_status.mode=spawned`, `drain_call_id=fc-01KKAV8YCS28RD8F8YQH464TT2`, immediate old-service `status="draining"`, final old-service `status="terminated"`, and first public post-cutover `/query` `HTTP 200` on the first try.
+  - both cutovers persisted matching `drain_execution_call_id`, recorded `drain_timeout_reached=false`, `inflight_at_termination.total=0`, and emitted matching `controller_drain.scheduled/start/complete` log lines.
+  - public Worker `/query_stream`, queue, and state checks passed after both cutovers.
+  - the generated proof artifact still records `dirty_worktree=true`; runtime behavior is proven, but clean-commit reproducibility remains a separate signoff limitation.
+
+### Residual Reliability Risk
+- Local `modal serve` validation can be disrupted if cutover is triggered via `modal run` (webhook app stop/label steal), so serve-safe trigger path is now required in runbook.
+- Direct live proof of hydrated `drain_controller_sandbox.spawn()` remains unavailable under `modal serve`; deployed spawned-drain proof now exists and must continue to use the deployed public Worker plus deployed Modal function path.
+- The deployed proof packet was captured from a dirty worktree (`dirty_worktree=true`), so commit-level reproducibility remains an explicit follow-up even though the runtime behavior evidence is strong.
+- The bootstrap retry boundary remains explicit and fail-closed: if readiness still times out twice, bootstrap returns `Background sandbox startup failed after 2 attempts` rather than trusting an unverified controller.
+
+## 2026-03-10 Reliability Follow-up - Cloudflare Deploy Target Hardening
+
+### Delivered Reliability Controls
+- Plain `wrangler deploy` for `edge-control-plane` is now production-safe by default because top-level `wrangler.jsonc` vars point at the production Modal gateway.
+- Local Worker development moved to `wrangler dev --env development`, preventing local/operator sessions from mutating the canonical public Worker deploy target by accident.
+- `env.development` now duplicates the non-inheritable Worker bindings needed for local dev and uses explicit Durable Object script names (`rafiki-control-plane-development`) so dev DO state stays isolated from the canonical public Worker.
+- Reference docs now describe the new default deploy contract and the local secret-loading caveat for `.dev.vars.development`.
+
+### Validation Evidence
+- `cd edge-control-plane && ./node_modules/.bin/wrangler deploy --dry-run` -> pass
+- `cd edge-control-plane && ./node_modules/.bin/wrangler deploy --dry-run --env development` -> pass
+- `npm --prefix edge-control-plane run check` -> pass
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> pass
+- `npm --prefix edge-control-plane run test:integration` -> pass (`3 passed`)
+
+### Residual Reliability Risk
+- `env.development` currently reuses the checked-in KV and rate-limit binding IDs; local `wrangler dev` remains safe, but a remote deploy of the development environment should get dedicated non-production bindings before it is treated as an isolated shared environment.

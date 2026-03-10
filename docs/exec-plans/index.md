@@ -8,9 +8,9 @@
 - Historical or superseded plan artifacts may remain under `completed/` for audit continuity, but should not appear in the active list.
 
 ## Active Plans
-- None currently.
 
 ## Completed Plans
+- [Controller Rollout Cutover Safety](./completed/controller-rollout-cutover-safety/PLAN_controller-rollout-cutover-safety.md)
 - [Modal SDK 1.3.5 Upgrade](./completed/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md)
 - [Phase 3 Cloudflare-First Cutover](./completed/phase-3-cloudflare-first/PLAN_phase-3-cloudflare-first.md)
 - [OpenAI Agents Hardening](./completed/openai-agents-hardening/PLAN_openai-agents-hardening.md)

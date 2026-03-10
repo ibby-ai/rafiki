@@ -110,7 +110,7 @@ These endpoints exist on the Modal gateway, but client traffic should use the Cl
 | Jobs | `GET /jobs/{job_id}/artifacts` | List job artifacts |
 | Jobs | `GET /jobs/{job_id}/artifacts/{path}` | Download artifact |
 | Jobs | `DELETE /jobs/{job_id}` | Cancel a queued job |
-| Info | `GET /service_info` | Sandbox info |
+| Info | `GET /service_info` | Rollout status (active pointer + service lifecycle) |
 
 **Why it's lightweight:**
 - Doesn't run the OpenAI Agents SDK directly
@@ -158,6 +158,9 @@ These endpoints exist on the Modal gateway, but client traffic should use the Cl
 - Uses `_base_openai_agents_image` with OpenAI Agents SDK
 - Volume: `svc-runner-8001-vol` mounted at `/data`
 - Timeout: 24h max, 10min idle
+- Cutover authority: shared active pointer (`controller-rollout-store`) with generation-aware worker cache refresh
+- Promotion: private B warmup + readiness verification + atomic pointer flip + explicit A drain
+- Drain accounting: per-request leases, not mutable shared counters
 
 **Endpoints:**
 - `GET /health_check` - Liveness/readiness probe

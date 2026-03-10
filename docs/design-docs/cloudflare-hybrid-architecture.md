@@ -232,7 +232,12 @@ execution_state (key, value, updated_at)
 
 **Responsibilities:**
 
-- Create/discover sandboxes by name
+- Maintain authoritative active controller pointer + generation in shared rollout state
+- Route by shared pointer rather than fixed service name reuse
+- Create/claim replacement controller privately while active controller remains online
+- Promote only after readiness gates pass (health + scoped secret metadata + synthetic direct query)
+- Drive explicit drain lifecycle for previous active controller
+- Track drain readiness via per-request controller leases
 - Generate encrypted tunnel URLs
 - Health check monitoring
 - Warm pool management (optional)
@@ -240,7 +245,8 @@ execution_state (key, value, updated_at)
 
 **Key Functions:**
 
-- `get_or_start_background_sandbox()` - Get/create sandbox
+- `get_or_start_background_sandbox()` - Pointer-first get/attach active sandbox
+- `rollout_service_sandbox()` / `terminate_service_sandbox()` - Safe A->B rollout trigger
 - `claim_warm_sandbox()` - Claim from pre-warm pool
 - `sandbox.tunnels()` - Discover tunnel URLs
 - `sandbox.poll()` - Check sandbox status

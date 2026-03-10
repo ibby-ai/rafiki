@@ -29,6 +29,54 @@ Gateway readiness behavior (`modal_backend/main.py`):
 - performs one recycle+retry on readiness timeout
 - fails deterministically after the second startup failure (`Background sandbox startup failed after 2 attempts`)
 
+## Rollout and Cutover Model
+
+Controller cutover is managed with a dedicated rollout state store (`controller-rollout-store`) and generation-based active pointer:
+
+- `active_pointer` is authoritative for normal request routing (`sandbox_id`, `service_url`, `active_generation`, promotion timestamps, verification timestamps).
+- Normal routing no longer reattaches by fixed service name; fixed-name lookup is not an authority source for cutover.
+- Worker-local globals (`SANDBOX`, `SERVICE_URL`) are treated as caches only; request entry refreshes from shared pointer generation.
+- Replacement controller B is prepared privately (warm pool claim or fresh create) while A remains active.
+- Promotion linearization point is the guarded pointer commit from generation `G` to `G+1`.
+  - commit requires rollout-lock ownership to still belong to the promoting operation
+  - commit requires the active pointer to still report generation `G` (and the expected prior sandbox when known)
+  - stale writers fail closed instead of overwriting a newer active pointer
+- Promotion readiness gates are mandatory:
+  - B `/health_check` returns `200`
+  - scoped sandbox secret metadata exists
+  - synthetic direct controller `/query` succeeds using dedicated synthetic session id
+- Promotion order is rollback-safe:
+  - verify B
+  - flip active pointer to B
+  - mark A `draining`
+  - terminate A only after in-flight requests drain or timeout
+- Bootstrap registration uses the same guarded pointer commit and marks bootstrap losers failed before cleanup if another writer won first.
+- If the active pointer is missing and the service registry contains multiple `active` services, pointer recovery fails closed rather than silently choosing one.
+- If pointer recovery finds exactly one `active` service but that recovered controller cannot satisfy `attach_active_pointer` readiness, the registry entry is marked `failed`, the recovered pointer is cleared, and bootstrap starts a clean generation `1` controller instead of trusting ambiguous recovered state.
+
+Drain lifecycle states:
+
+- `active` -> serving new traffic
+- `draining` -> no new admissions; existing in-flight work allowed to finish
+  - in-flight accounting uses per-request leases keyed by `request_id`
+  - fresh request admission for `/query`, `/query_stream`, and queued job dispatch happens when the lease is created, not when a prewarm claim is first checked
+  - prewarm claims must still match the active pointer generation at lease start or the gateway reroutes/fails closed
+  - stop/cancel routing during drain consults lease-derived session routes
+- `terminated` -> sandbox stopped; metadata retained for audit/debug
+- Local `modal serve` still cannot hydrate `drain_controller_sandbox.spawn()` directly, so live local cutover proof may use `drain_status.mode=inline` only for local validation.
+- Deployed cutover proof must show the hydrated spawned path: `drain_status.mode=spawned`, persisted `drain_call_id`, persisted `drain_execution_call_id`, and app-log audit lines `controller_drain.scheduled`, `controller_drain.start`, and `controller_drain.complete`.
+- The 2026-03-10 public-worker-first deployed proof packet is archived at `docs/generated/controller-rollout-cutover-safety-proof-2026-03-10T13-48-41-1030.json`.
+
+## Practical Meaning
+
+This rollout model exists to make deploys and controller replacement operationally boring.
+
+- If a user sends the next chat message during deploy, the request should go to a verified B and succeed on the first try. The user should not become the startup probe.
+- If A is still finishing a streaming response, that work can drain on A while new requests begin on B. The handoff should not cut the stream mid-response.
+- If a queued job or follow-up prompt is dispatched during cutover, lease-start admission should route it to the authoritative active generation instead of a draining controller.
+- If an operator recycles production to recover from a bad state or rotate secrets, the first public request after the recycle should still work. That is why the proof requires the first public Worker `/query` after cutover to return `200` on the first try.
+- In short: A handles "already in progress" work, B handles "new work," and the public ingress layer should not expose the seam between them.
+
 ## Endpoints
 
 ### `GET /health_check`
