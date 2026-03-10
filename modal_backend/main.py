@@ -50,6 +50,27 @@ from fastapi.responses import FileResponse, JSONResponse
 from modal import exception as modal_exc
 from starlette.responses import StreamingResponse
 
+from modal_backend.controller_rollout import (
+    acquire_promotion_commit,
+    acquire_rollout_lock,
+    build_public_rollout_status,
+    clear_active_controller_pointer,
+    finish_controller_request,
+    get_active_controller_pointer,
+    get_controller_inflight,
+    get_controller_request_admission,
+    get_controller_service,
+    list_controller_services,
+    list_session_controller_routes,
+    promotion_commit_owned_by,
+    release_promotion_commit,
+    release_rollout_lock,
+    rollout_lock_owned_by,
+    set_active_controller_pointer,
+    start_controller_request,
+    update_controller_service,
+    upsert_controller_service,
+)
 from modal_backend.instructions.prompts import DEFAULT_QUESTION
 from modal_backend.jobs import (
     JOB_QUEUE,
@@ -96,6 +117,7 @@ from modal_backend.jobs import (
     normalize_job_id,
     register_prewarm,
     register_warm_sandbox,
+    release_warm_sandbox,
     remove_from_pool,
     resolve_job_artifact,
     revoke_session_user,
@@ -186,6 +208,11 @@ _logger = logging.getLogger(__name__)
 _SANDBOX_SESSION_SECRET_CACHE: dict[str, str] = {}
 _SANDBOX_SESSION_SECRET_CACHE_MAX_ENTRIES = 64
 
+
+class _RolloutCommitRejectedError(RuntimeError):
+    """Raised when a rollout writer loses the right to commit a promotion."""
+
+
 web_app = FastAPI()
 web_app.middleware("http")(internal_auth_middleware)
 
@@ -260,6 +287,14 @@ def _lookup_sandbox_session_secret(
         if isinstance(cached_value, str) and cached_value.strip():
             return cached_value.strip()
 
+        service = get_controller_service(sandbox_id)
+        if isinstance(service, dict):
+            value = service.get("sandbox_session_secret")
+            if isinstance(value, str) and value.strip():
+                normalized = value.strip()
+                _remember_sandbox_session_secret(sandbox_id=sandbox_id, secret=normalized)
+                return normalized
+
         try:
             metadata = SESSIONS.get(SANDBOX_NAME)
         except Exception:
@@ -299,6 +334,13 @@ def _resolve_sandbox_session_secret(
     normalized_id = (sandbox_id or "").strip()
     if not normalized_id:
         return None
+
+    service = get_controller_service(normalized_id)
+    if isinstance(service, dict):
+        existing = str(service.get("sandbox_session_secret") or "").strip()
+        if existing:
+            _remember_sandbox_session_secret(sandbox_id=normalized_id, secret=existing)
+            return existing
 
     try:
         metadata = SESSIONS.get(SANDBOX_NAME)
@@ -366,6 +408,216 @@ async def _spawn_modal_function(function, /, *args):
 
 def _set_store_value(store, key, value) -> None:
     store[key] = value
+
+
+def _current_image_version_id() -> str:
+    if _settings.enable_image_version_tracking:
+        try:
+            current = get_current_image_version()
+        except Exception:
+            current = None
+        if isinstance(current, dict):
+            version_id = str(current.get("version_id") or "").strip()
+            if version_id:
+                return version_id
+    return _IMAGE_VERSION_ID
+
+
+async def _current_image_version_id_aio() -> str:
+    if _settings.enable_image_version_tracking:
+        try:
+            current = await _run_blocking_modal_call(get_current_image_version)
+        except Exception:
+            current = None
+        if isinstance(current, dict):
+            version_id = str(current.get("version_id") or "").strip()
+            if version_id:
+                return version_id
+    return _IMAGE_VERSION_ID
+
+
+def _controller_service_name(generation: int) -> str:
+    suffix = pysecrets.token_hex(4)
+    return f"{SANDBOX_NAME}-gen-{generation:04d}-{suffix}"
+
+
+def _controller_request_id(prefix: str) -> str:
+    return f"{prefix}-{pysecrets.token_hex(8)}"
+
+
+def _build_controller_service_record(
+    *,
+    generation: int,
+    sandbox_id: str,
+    sandbox_name: str | None,
+    service_url: str,
+    status: str,
+    sandbox_session_secret: str | None,
+    image_version: str | None = None,
+    source: str | None = None,
+    created_at: int | None = None,
+    last_verified_readiness_at: int | None = None,
+    promotion_started_at: int | None = None,
+    promoted_at: int | None = None,
+    drain_started_at: int | None = None,
+    drain_deadline_at: int | None = None,
+    restored_from_session: str | None = None,
+    restored_from_snapshot: bool = False,
+    failure_reason: str | None = None,
+) -> dict[str, object]:
+    now = int(time.time())
+    record: dict[str, object] = {
+        "generation": generation,
+        "sandbox_id": sandbox_id,
+        "sandbox_name": sandbox_name,
+        "service_url": service_url,
+        "status": status,
+        "image_version": image_version or _current_image_version_id(),
+        "created_at": created_at or now,
+        "updated_at": now,
+        "source": source or "created",
+    }
+    if sandbox_session_secret:
+        record["sandbox_session_secret"] = sandbox_session_secret
+    if last_verified_readiness_at is not None:
+        record["last_verified_readiness_at"] = last_verified_readiness_at
+    if promotion_started_at is not None:
+        record["promotion_started_at"] = promotion_started_at
+    if promoted_at is not None:
+        record["promoted_at"] = promoted_at
+    if drain_started_at is not None:
+        record["drain_started_at"] = drain_started_at
+    if drain_deadline_at is not None:
+        record["drain_deadline_at"] = drain_deadline_at
+    if restored_from_session:
+        record["restored_from_session"] = restored_from_session
+        record["restored_from_snapshot"] = restored_from_snapshot
+    if failure_reason:
+        record["failure_reason"] = failure_reason
+    return record
+
+
+def _persist_active_controller_pointer(
+    *,
+    generation: int,
+    sandbox_id: str,
+    sandbox_name: str | None,
+    service_url: str,
+    image_version: str | None,
+    last_verified_readiness_at: int,
+    promoted_at: int,
+    rollback_target: dict[str, object] | None = None,
+    rollout_operation_id: str | None = None,
+    expected_previous_generation: int | None = None,
+    expected_previous_sandbox_id: str | None = None,
+) -> dict[str, object]:
+    pointer: dict[str, object] = {
+        "active_generation": generation,
+        "status": "active",
+        "sandbox_id": sandbox_id,
+        "sandbox_name": sandbox_name,
+        "service_url": service_url,
+        "image_version": image_version or _current_image_version_id(),
+        "promoted_at": promoted_at,
+        "last_verified_readiness_at": last_verified_readiness_at,
+        "updated_at": int(time.time()),
+    }
+    if rollback_target:
+        pointer["rollback_target_generation"] = rollback_target.get("generation")
+        pointer["rollback_target_sandbox_id"] = rollback_target.get("sandbox_id")
+    if rollout_operation_id is None:
+        set_active_controller_pointer(pointer)
+        return pointer
+
+    if expected_previous_generation is None:
+        raise ValueError("expected_previous_generation is required for guarded pointer commits")
+
+    commit = acquire_promotion_commit(
+        expected_generation=expected_previous_generation,
+        target_generation=generation,
+        operation_id=rollout_operation_id,
+        candidate_sandbox_id=sandbox_id,
+    )
+    if not commit.get("acquired"):
+        current_entry = commit.get("entry") or {}
+        raise _RolloutCommitRejectedError(
+            "Controller promotion commit slot is already owned by another rollout "
+            f"(expected_generation={expected_previous_generation}, "
+            f"operation_id={current_entry.get('operation_id')}, "
+            f"candidate_sandbox_id={current_entry.get('candidate_sandbox_id')})"
+        )
+
+    try:
+        if not rollout_lock_owned_by(rollout_operation_id):
+            raise _RolloutCommitRejectedError(
+                "Controller promotion lost rollout lock ownership before pointer commit"
+            )
+        if not promotion_commit_owned_by(
+            expected_generation=expected_previous_generation,
+            operation_id=rollout_operation_id,
+            candidate_sandbox_id=sandbox_id,
+        ):
+            raise _RolloutCommitRejectedError(
+                "Controller promotion lost generation-transition ownership before pointer commit"
+            )
+
+        current_pointer = get_active_controller_pointer()
+        current_generation = (
+            int(current_pointer.get("active_generation") or 0) if current_pointer else 0
+        )
+        if current_generation != expected_previous_generation:
+            raise _RolloutCommitRejectedError(
+                "Controller promotion observed an unexpected active generation before pointer commit "
+                f"(expected={expected_previous_generation}, actual={current_generation})"
+            )
+        if expected_previous_sandbox_id is not None:
+            current_sandbox_id = (
+                str(current_pointer.get("sandbox_id") or "").strip() if current_pointer else ""
+            )
+            if current_sandbox_id != expected_previous_sandbox_id:
+                raise _RolloutCommitRejectedError(
+                    "Controller promotion observed an unexpected active sandbox before pointer commit "
+                    f"(expected={expected_previous_sandbox_id}, actual={current_sandbox_id or 'none'})"
+                )
+
+        set_active_controller_pointer(pointer)
+        return pointer
+    finally:
+        release_promotion_commit(
+            expected_generation=expected_previous_generation,
+            operation_id=rollout_operation_id,
+        )
+
+
+def _record_controller_service_legacy_metadata(
+    *,
+    sandbox_id: str,
+    service_url: str,
+    sandbox_session_secret: str | None,
+    restored_from_session: str | None = None,
+    restored_from_snapshot: bool = False,
+) -> None:
+    try:
+        session_metadata: dict[str, object] = {
+            "id": sandbox_id,
+            "url": service_url,
+            "volume": PERSIST_VOL_NAME,
+            "created_at": int(time.time()),
+            "tags": {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)},
+            "status": "running",
+        }
+        if sandbox_session_secret:
+            session_metadata["sandbox_session_secret"] = sandbox_session_secret
+        if restored_from_session:
+            session_metadata["restored_from_session"] = restored_from_session
+            session_metadata["restored_from_snapshot"] = restored_from_snapshot
+        SESSIONS[SANDBOX_NAME] = session_metadata
+    except modal_exc.Error as e:
+        logging.getLogger(__name__).warning(
+            "Failed to persist legacy session metadata to Modal Dict: %s", e
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("Unexpected error persisting legacy session metadata")
 
 
 def _normalize_query_upstream_error(raw_body: str) -> dict[str, object]:
@@ -555,6 +807,18 @@ def _function_call_id(call: object) -> str | None:
                 continue
             return str_val
     return None
+
+
+def _current_modal_function_call_id() -> str | None:
+    """Best-effort access to the current Modal function call id."""
+    try:
+        value = modal.current_function_call_id()
+    except Exception:
+        return None
+    if not value:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _function_resource_kwargs() -> dict[str, object]:
@@ -1351,6 +1615,17 @@ async def query_proxy(request: Request, body: QueryBody):
             )
             prewarm_claimed = None  # Clear so we don't try to use it
 
+    if prewarm_claimed and not await _prewarm_target_is_admissible_aio(
+        prewarm_claimed.get("sandbox_id")
+    ):
+        if body.warm_id:
+            await _run_blocking_modal_call(
+                mark_prewarm_failed,
+                body.warm_id,
+                "Pre-warm target is no longer the active controller",
+            )
+        prewarm_claimed = None
+
     sb = None
     url = None
     if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
@@ -1391,74 +1666,95 @@ async def query_proxy(request: Request, body: QueryBody):
     if sb is None or url is None:
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
-    # Optional: per-request connect token (verified in sandbox service)
-    headers: dict[str, str] = {}
-    if settings.enforce_connect_token:
-        creds = await sb.create_connect_token.aio(
-            user_metadata={"ip": request.client.host or "unknown"}
-        )
-        headers["Authorization"] = f"Bearer {creds.token}"
-
-    await _run_blocking_modal_call(
-        _add_sandbox_auth_header,
-        headers=headers,
-        request_path="/query",
-        sandbox_id=sb.object_id if sb else None,
+    request_id = _controller_request_id("query")
+    sb, url, prewarm_claimed = await _admit_fresh_controller_request_aio(
+        sandbox=sb,
+        service_url=url,
         session_id=resolved_session_id,
+        request_kind="query",
+        request_id=request_id,
         prewarm_claimed=prewarm_claimed,
+        warm_id=body.warm_id,
     )
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
-        r = await client.post(
-            f"{url.rstrip('/')}/query",
-            json=body.model_dump(),
-            headers=headers,
-            timeout=httpx.Timeout(120.0, connect=30.0),
-        )
-        try:
-            r.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            error_payload = _normalize_query_upstream_error(exc.response.text or "")
-            _logger.error(
-                "Background sandbox /query failed",
-                extra={
-                    "status_code": exc.response.status_code,
-                    "error": error_payload.get("error"),
-                    "request_id": error_payload.get("request_id"),
-                    "error_type": error_payload.get("error_type"),
-                },
+    try:
+        # Optional: per-request connect token (verified in sandbox service)
+        headers: dict[str, str] = {}
+        if settings.enforce_connect_token:
+            creds = await sb.create_connect_token.aio(
+                user_metadata={"ip": request.client.host or "unknown"}
             )
-            return JSONResponse(
-                status_code=exc.response.status_code,
-                content=error_payload,
-            )
-        result = r.json()
+            headers["Authorization"] = f"Bearer {creds.token}"
 
-    # Trigger session snapshot asynchronously after successful query
-    # This captures filesystem state for session restoration on resume
-    if settings.enable_session_snapshots:
-        result_session_id = result.get("session_id")
-        should_snapshot = False
-        if result_session_id:
-            should_snapshot = await _run_blocking_modal_call(
-                should_snapshot_session,
-                result_session_id,
-                settings.snapshot_min_interval_seconds,
+        await _run_blocking_modal_call(
+            _add_sandbox_auth_header,
+            headers=headers,
+            request_path="/query",
+            sandbox_id=sb.object_id if sb else None,
+            session_id=resolved_session_id,
+            prewarm_claimed=prewarm_claimed,
+        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+            r = await client.post(
+                f"{url.rstrip('/')}/query",
+                json=body.model_dump(),
+                headers=headers,
+                timeout=httpx.Timeout(120.0, connect=30.0),
             )
-        if result_session_id and should_snapshot:
             try:
-                # Fire-and-forget: spawn snapshot in background
-                await _spawn_modal_function(snapshot_session_state, result_session_id, sb.object_id)
-                _logger.debug(
-                    "Spawned session snapshot",
-                    extra={"session_id": result_session_id},
+                r.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                error_payload = _normalize_query_upstream_error(exc.response.text or "")
+                _logger.error(
+                    "Background sandbox /query failed",
+                    extra={
+                        "status_code": exc.response.status_code,
+                        "error": error_payload.get("error"),
+                        "request_id": error_payload.get("request_id"),
+                        "error_type": error_payload.get("error_type"),
+                    },
                 )
-            except Exception:
-                _logger.warning(
-                    "Failed to spawn session snapshot",
-                    exc_info=True,
-                    extra={"session_id": result_session_id},
+                return JSONResponse(
+                    status_code=exc.response.status_code,
+                    content=error_payload,
                 )
+            result = r.json()
+
+        # Trigger session snapshot asynchronously after successful query
+        # This captures filesystem state for session restoration on resume
+        if settings.enable_session_snapshots:
+            result_session_id = result.get("session_id")
+            should_snapshot = False
+            if result_session_id:
+                should_snapshot = await _run_blocking_modal_call(
+                    should_snapshot_session,
+                    result_session_id,
+                    settings.snapshot_min_interval_seconds,
+                )
+            if result_session_id and should_snapshot:
+                try:
+                    # Fire-and-forget: spawn snapshot in background
+                    await _spawn_modal_function(
+                        snapshot_session_state, result_session_id, sb.object_id
+                    )
+                    _logger.debug(
+                        "Spawned session snapshot",
+                        extra={"session_id": result_session_id},
+                    )
+                except Exception:
+                    _logger.warning(
+                        "Failed to spawn session snapshot",
+                        exc_info=True,
+                        extra={"session_id": result_session_id},
+                    )
+    finally:
+        await _run_blocking_modal_call(
+            finish_controller_request,
+            sandbox_id=sb.object_id,
+            request_id=request_id,
+            session_id=resolved_session_id,
+            request_kind="query",
+        )
 
     return result
 
@@ -1501,6 +1797,17 @@ async def query_stream(request: Request, body: QueryBody):
             )
             prewarm_claimed = None  # Clear so we don't try to use it
 
+    if prewarm_claimed and not await _prewarm_target_is_admissible_aio(
+        prewarm_claimed.get("sandbox_id")
+    ):
+        if body.warm_id:
+            await _run_blocking_modal_call(
+                mark_prewarm_failed,
+                body.warm_id,
+                "Pre-warm target is no longer the active controller",
+            )
+        prewarm_claimed = None
+
     sb = None
     url = None
     if prewarm_claimed and prewarm_claimed.get("sandbox_id") and prewarm_claimed.get("sandbox_url"):
@@ -1541,74 +1848,104 @@ async def query_stream(request: Request, body: QueryBody):
     if sb is None or url is None:
         sb, url = await get_or_start_background_sandbox_aio(session_id=resolved_session_id)
 
-    headers: dict[str, str] = {}
-    if settings.enforce_connect_token:
-        creds = await sb.create_connect_token.aio(
-            user_metadata={"ip": request.client.host or "unknown"}
-        )
-        headers["Authorization"] = f"Bearer {creds.token}"
-
-    await _run_blocking_modal_call(
-        _add_sandbox_auth_header,
-        headers=headers,
-        request_path="/query_stream",
-        sandbox_id=sb.object_id if sb else None,
+    stream_request_id = _controller_request_id("query-stream")
+    sb, url, prewarm_claimed = await _admit_fresh_controller_request_aio(
+        sandbox=sb,
+        service_url=url,
         session_id=resolved_session_id,
+        request_kind="query_stream",
+        request_id=stream_request_id,
         prewarm_claimed=prewarm_claimed,
+        warm_id=body.warm_id,
     )
+
+    async def _finish_stream_request() -> None:
+        await _run_blocking_modal_call(
+            finish_controller_request,
+            sandbox_id=sb.object_id,
+            request_id=stream_request_id,
+            session_id=resolved_session_id,
+            request_kind="query_stream",
+        )
+
+    headers: dict[str, str] = {}
+    try:
+        if settings.enforce_connect_token:
+            creds = await sb.create_connect_token.aio(
+                user_metadata={"ip": request.client.host or "unknown"}
+            )
+            headers["Authorization"] = f"Bearer {creds.token}"
+
+        await _run_blocking_modal_call(
+            _add_sandbox_auth_header,
+            headers=headers,
+            request_path="/query_stream",
+            sandbox_id=sb.object_id if sb else None,
+            session_id=resolved_session_id,
+            prewarm_claimed=prewarm_claimed,
+        )
+    except Exception:
+        await _finish_stream_request()
+        raise
 
     # Track session_id from stream for post-completion snapshot
     captured_session_id: str | None = None
 
     async def sse_proxy():
         nonlocal captured_session_id
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST", f"{url.rstrip('/')}/query_stream", json=body.model_dump(), headers=headers
-            ) as response:
-                response.raise_for_status()
-                buffer = ""
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-                    # Parse SSE to capture session_id from "done" event
-                    # Format: "event: done\ndata: {...}\n\n"
-                    try:
-                        buffer += chunk.decode("utf-8", errors="ignore")
-                        if "event: done" in buffer:
-                            # Extract session_id from the done event data
-                            for line in buffer.split("\n"):
-                                if line.startswith("data:") and "session_id" in line:
-                                    data_str = line[5:].strip()
-                                    data = json.loads(data_str)
-                                    captured_session_id = data.get("session_id")
-                                    break
-                    except Exception:
-                        pass  # Best effort parsing, don't fail stream
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST",
+                    f"{url.rstrip('/')}/query_stream",
+                    json=body.model_dump(),
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    buffer = ""
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                        # Parse SSE to capture session_id from "done" event
+                        # Format: "event: done\ndata: {...}\n\n"
+                        try:
+                            buffer += chunk.decode("utf-8", errors="ignore")
+                            if "event: done" in buffer:
+                                # Extract session_id from the done event data
+                                for line in buffer.split("\n"):
+                                    if line.startswith("data:") and "session_id" in line:
+                                        data_str = line[5:].strip()
+                                        data = json.loads(data_str)
+                                        captured_session_id = data.get("session_id")
+                                        break
+                        except Exception:
+                            pass  # Best effort parsing, don't fail stream
 
-        # Trigger snapshot after stream completes
-        if settings.enable_session_snapshots and captured_session_id:
-            should_snapshot = await _run_blocking_modal_call(
-                should_snapshot_session,
-                captured_session_id,
-                settings.snapshot_min_interval_seconds,
-            )
-            if should_snapshot:
-                try:
-                    await _spawn_modal_function(
-                        snapshot_session_state,
-                        captured_session_id,
-                        sb.object_id,
-                    )
-                    _logger.debug(
-                        "Spawned session snapshot after stream",
-                        extra={"session_id": captured_session_id},
-                    )
-                except Exception:
-                    _logger.warning(
-                        "Failed to spawn session snapshot after stream",
-                        exc_info=True,
-                        extra={"session_id": captured_session_id},
-                    )
+            # Trigger snapshot after stream completes
+            if settings.enable_session_snapshots and captured_session_id:
+                should_snapshot = await _run_blocking_modal_call(
+                    should_snapshot_session,
+                    captured_session_id,
+                    settings.snapshot_min_interval_seconds,
+                )
+                if should_snapshot:
+                    try:
+                        await _spawn_modal_function(
+                            snapshot_session_state,
+                            captured_session_id,
+                            sb.object_id,
+                        )
+                        _logger.debug(
+                            "Spawned session snapshot after stream",
+                            extra={"session_id": captured_session_id},
+                        )
+                    except Exception:
+                        _logger.warning(
+                            "Failed to spawn session snapshot after stream",
+                            exc_info=True,
+                            extra={"session_id": captured_session_id},
+                        )
+        finally:
+            await _finish_stream_request()
 
     return StreamingResponse(
         sse_proxy(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
@@ -1992,9 +2329,15 @@ async def workspace_cleanup_endpoint(
 
 @web_app.get("/service_info")
 async def service_info():
-    """Get information about the background sandbox service."""
-    sb, url = await get_or_start_background_sandbox_aio()
-    return {"url": url, "sandbox_id": sb.object_id}
+    """Get rollout-aware information about the background sandbox service."""
+    rollout_status = await _run_blocking_modal_call(build_public_rollout_status)
+    active = rollout_status.get("active")
+    return {
+        "ok": bool(active),
+        "active": active,
+        "services": rollout_status.get("services", []),
+        "rollout_lock": rollout_status.get("rollout_lock"),
+    }
 
 
 @web_app.get("/stats")
@@ -2054,10 +2397,15 @@ async def pool_status_endpoint():
     pool_status = await _run_blocking_modal_call(get_warm_pool_status)
     entries = pool_status.get("entries", [])
     missing_scoped_secret_count = 0
+    sanitized_entries: list[dict[str, object]] = []
     for entry in entries:
         secret = entry.get("sandbox_session_secret")
         if not isinstance(secret, str) or not secret.strip():
             missing_scoped_secret_count += 1
+        sanitized_entry = dict(entry)
+        sanitized_entry["has_scoped_secret"] = bool(isinstance(secret, str) and secret.strip())
+        sanitized_entry.pop("sandbox_session_secret", None)
+        sanitized_entries.append(sanitized_entry)
 
     return {
         "ok": True,
@@ -2067,7 +2415,10 @@ async def pool_status_endpoint():
         "sandbox_max_age_seconds": _settings.warm_pool_sandbox_max_age,
         "missing_scoped_secret_count": missing_scoped_secret_count,
         "scoped_secret_transition_stable": missing_scoped_secret_count == 0,
-        **pool_status,
+        "total": pool_status.get("total", 0),
+        "warm": pool_status.get("warm", 0),
+        "claimed": pool_status.get("claimed", 0),
+        "entries": sanitized_entries,
     }
 
 
@@ -2306,7 +2657,7 @@ async def stop_session(
     controller_error: str | None = None
     if mode == "immediate":
         try:
-            sb, service_url = await get_or_start_background_sandbox_aio(session_id=session_id)
+            sb, service_url = await _resolve_controller_route_for_session_aio(session_id)
             headers: dict[str, str] = {}
             await _run_blocking_modal_call(
                 _add_sandbox_auth_header,
@@ -2853,6 +3204,7 @@ SANDBOX_APP_NAME = "sandbox-manager-app"
 # =============================================================================
 SANDBOX: modal.Sandbox | None = None
 SERVICE_URL: str | None = None
+SANDBOX_GENERATION: int | None = None
 _SANDBOX_STATE_LOCK = Lock()
 _SANDBOX_STARTUP_MAX_ATTEMPTS = 2
 
@@ -2911,30 +3263,43 @@ class _SandboxStartupRetryableError(RuntimeError):
         )
 
 
+class _StaleActiveControllerPointerError(RuntimeError):
+    """Raised when the shared active pointer references an unreachable controller."""
+
+
 def _get_background_sandbox_state() -> tuple[modal.Sandbox | None, str | None]:
     """Read sandbox globals under lock for consistency."""
     with _SANDBOX_STATE_LOCK:
         return SANDBOX, SERVICE_URL
 
 
+def _get_background_sandbox_generation() -> int | None:
+    """Read the cached controller generation under lock."""
+    with _SANDBOX_STATE_LOCK:
+        return SANDBOX_GENERATION
+
+
 def _set_background_sandbox_state(
     sandbox: modal.Sandbox | None,
     service_url: str | None,
+    *,
+    generation: int | None = None,
 ) -> None:
     """Set sandbox globals under lock for consistency."""
-    global SANDBOX, SERVICE_URL
+    global SANDBOX, SERVICE_URL, SANDBOX_GENERATION
     with _SANDBOX_STATE_LOCK:
         previous_id = getattr(SANDBOX, "object_id", None) if SANDBOX else None
         next_id = getattr(sandbox, "object_id", None) if sandbox else None
         SANDBOX = sandbox
         SERVICE_URL = service_url
+        SANDBOX_GENERATION = generation
         if previous_id and previous_id != next_id:
             _forget_sandbox_session_secret(sandbox_id=previous_id)
 
 
 def _clear_background_sandbox_state(*, expected_sandbox_id: str | None = None) -> bool:
     """Clear sandbox globals, optionally guarded by expected sandbox id."""
-    global SANDBOX, SERVICE_URL
+    global SANDBOX, SERVICE_URL, SANDBOX_GENERATION
     with _SANDBOX_STATE_LOCK:
         current_id = getattr(SANDBOX, "object_id", None) if SANDBOX else None
         if expected_sandbox_id and current_id and current_id != expected_sandbox_id:
@@ -2942,6 +3307,7 @@ def _clear_background_sandbox_state(*, expected_sandbox_id: str | None = None) -
         _forget_sandbox_session_secret(sandbox_id=current_id)
         SANDBOX = None
         SERVICE_URL = None
+        SANDBOX_GENERATION = None
         return True
 
 
@@ -3257,11 +3623,20 @@ def cleanup_sessions():
     by attempting to fetch its tunnel URLs. Updates SESSIONS status accordingly.
     """
     try:
-        # Ensure sandbox-manager-app exists (required for from_name to work)
-        modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
-        sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
+        pointer = _ensure_active_pointer_from_registry()
+        sandbox_id = str(pointer.get("sandbox_id") or "").strip() if pointer else ""
+        if not sandbox_id:
+            SESSIONS[SANDBOX_NAME] = {"status": "missing"}
+            return
+        sb = modal.Sandbox.from_id(sandbox_id)
         _ = sb.tunnels()  # Will raise NotFoundError if sandbox is gone
-        SESSIONS[SANDBOX_NAME] = {**SESSIONS.get(SANDBOX_NAME, {}), "status": "running"}
+        SESSIONS[SANDBOX_NAME] = {
+            **SESSIONS.get(SANDBOX_NAME, {}),
+            "status": "running",
+            "id": sandbox_id,
+            "url": pointer.get("service_url") if pointer else None,
+            "generation": pointer.get("active_generation") if pointer else None,
+        }
     except modal_exc.NotFoundError:
         SESSIONS[SANDBOX_NAME] = {"status": "missing"}
     except Exception:
@@ -3360,6 +3735,7 @@ def _create_warm_sandbox_sync() -> tuple[modal.Sandbox, str, str] | None:
         sandbox_id,
         pool_name,
         sandbox_session_secret=sandbox_session_secret,
+        image_version=_current_image_version_id(),
     )
     _logger.info(
         "Created warm pool sandbox",
@@ -3568,6 +3944,298 @@ def on_deploy_invalidate_pools():
     }
 
 
+def _wait_for_active_controller_pointer(timeout_seconds: int = 30) -> dict[str, object] | None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        pointer = get_active_controller_pointer()
+        if pointer:
+            return pointer
+        time.sleep(0.5)
+    return get_active_controller_pointer()
+
+
+async def _wait_for_active_controller_pointer_aio(
+    timeout_seconds: int = 30,
+) -> dict[str, object] | None:
+    deadline = anyio.current_time() + timeout_seconds
+    while anyio.current_time() < deadline:
+        pointer = await _run_blocking_modal_call(get_active_controller_pointer)
+        if pointer:
+            return pointer
+        await anyio.sleep(0.5)
+    return await _run_blocking_modal_call(get_active_controller_pointer)
+
+
+def _ensure_active_pointer_from_registry() -> dict[str, object] | None:
+    pointer = get_active_controller_pointer()
+    if pointer:
+        return pointer
+
+    active_services = list_controller_services(statuses=("active",))
+    if not active_services:
+        return None
+    if len(active_services) > 1:
+        raise RuntimeError(
+            "Controller service registry is ambiguous; multiple active services exist while the active pointer is missing"
+        )
+
+    active_service = active_services[0]
+
+    promoted_at = int(
+        active_service.get("promoted_at")
+        or active_service.get("last_verified_readiness_at")
+        or active_service.get("created_at")
+        or time.time()
+    )
+    return _persist_active_controller_pointer(
+        generation=int(active_service.get("generation") or 1),
+        sandbox_id=str(active_service.get("sandbox_id")),
+        sandbox_name=str(active_service.get("sandbox_name") or "") or None,
+        service_url=str(active_service.get("service_url")),
+        image_version=str(active_service.get("image_version") or "") or None,
+        last_verified_readiness_at=int(
+            active_service.get("last_verified_readiness_at") or promoted_at
+        ),
+        promoted_at=promoted_at,
+    )
+
+
+async def _ensure_active_pointer_from_registry_aio() -> dict[str, object] | None:
+    return await _run_blocking_modal_call(_ensure_active_pointer_from_registry)
+
+
+def _invalidate_stale_active_controller_pointer(
+    *,
+    pointer: dict[str, object],
+    reason: str,
+) -> None:
+    sandbox_id = str(pointer.get("sandbox_id") or "").strip()
+    if not sandbox_id:
+        return
+
+    current_pointer = get_active_controller_pointer()
+    if current_pointer and str(current_pointer.get("sandbox_id") or "").strip() == sandbox_id:
+        clear_active_controller_pointer()
+
+    update_controller_service(
+        sandbox_id,
+        {
+            "status": "failed",
+            "failure_reason": reason,
+            "failed_at": int(time.time()),
+        },
+    )
+    _clear_background_sandbox_state(expected_sandbox_id=sandbox_id)
+
+
+def _get_or_attach_active_controller_from_pointer(
+    pointer: dict[str, object],
+) -> tuple[modal.Sandbox, str]:
+    generation = int(pointer.get("active_generation") or 0)
+    sandbox_id = str(pointer.get("sandbox_id") or "").strip()
+    service_url = str(pointer.get("service_url") or "").strip()
+    if not sandbox_id or not service_url:
+        raise RuntimeError("Active controller pointer is incomplete")
+
+    cached_sb, cached_url = _get_background_sandbox_state()
+    cached_generation = _get_background_sandbox_generation()
+    if (
+        cached_sb is not None
+        and cached_url
+        and cached_generation == generation
+        and getattr(cached_sb, "object_id", None) == sandbox_id
+    ):
+        return cached_sb, cached_url
+
+    try:
+        sb = modal.Sandbox.from_id(sandbox_id)
+        _wait_for_service_or_raise_readiness_timeout(
+            sandbox=sb,
+            service_url=service_url,
+            timeout_seconds=max(int(_settings.service_timeout), 1),
+            phase="attach_active_pointer",
+            startup_attempt=1,
+            recycle_allowed=False,
+        )
+        service = get_controller_service(sandbox_id)
+        _resolve_sandbox_session_secret(
+            sandbox_id=sandbox_id,
+            secret=str(service.get("sandbox_session_secret") or "").strip()
+            if isinstance(service, dict)
+            else None,
+        )
+        _set_background_sandbox_state(sb, service_url, generation=generation)
+        return sb, service_url
+    except (
+        modal_exc.NotFoundError,
+        modal_exc.SandboxTerminatedError,
+        _SandboxReadinessTimeoutError,
+        _SandboxStartupRetryableError,
+    ) as exc:
+        # Registry-based pointer recovery is intentionally fail-closed: if we cannot
+        # re-attach and prove readiness for the recovered controller, demote it from
+        # active selection and force a clean bootstrap instead of reusing ambiguous state.
+        _invalidate_stale_active_controller_pointer(
+            pointer=pointer,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise _StaleActiveControllerPointerError(
+            f"Active controller pointer is stale for sandbox {sandbox_id}"
+        ) from exc
+
+
+async def _get_or_attach_active_controller_from_pointer_aio(
+    pointer: dict[str, object],
+) -> tuple[modal.Sandbox, str]:
+    generation = int(pointer.get("active_generation") or 0)
+    sandbox_id = str(pointer.get("sandbox_id") or "").strip()
+    service_url = str(pointer.get("service_url") or "").strip()
+    if not sandbox_id or not service_url:
+        raise RuntimeError("Active controller pointer is incomplete")
+
+    cached_sb, cached_url = _get_background_sandbox_state()
+    cached_generation = _get_background_sandbox_generation()
+    if (
+        cached_sb is not None
+        and cached_url
+        and cached_generation == generation
+        and getattr(cached_sb, "object_id", None) == sandbox_id
+    ):
+        return cached_sb, cached_url
+
+    try:
+        sb = await modal.Sandbox.from_id.aio(sandbox_id)
+        await _wait_for_service_or_raise_readiness_timeout_aio(
+            sandbox=sb,
+            service_url=service_url,
+            timeout_seconds=max(int(_settings.service_timeout), 1),
+            phase="attach_active_pointer",
+            startup_attempt=1,
+            recycle_allowed=False,
+        )
+        service = await _run_blocking_modal_call(get_controller_service, sandbox_id)
+        await _run_blocking_modal_call(
+            _resolve_sandbox_session_secret,
+            sandbox_id=sandbox_id,
+            secret=str(service.get("sandbox_session_secret") or "").strip()
+            if isinstance(service, dict)
+            else None,
+        )
+        _set_background_sandbox_state(sb, service_url, generation=generation)
+        return sb, service_url
+    except (
+        modal_exc.NotFoundError,
+        modal_exc.SandboxTerminatedError,
+        _SandboxReadinessTimeoutError,
+        _SandboxStartupRetryableError,
+    ) as exc:
+        await _run_blocking_modal_call(
+            _invalidate_stale_active_controller_pointer,
+            pointer=pointer,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise _StaleActiveControllerPointerError(
+            f"Active controller pointer is stale for sandbox {sandbox_id}"
+        ) from exc
+
+
+def _register_bootstrap_controller_as_active(
+    *,
+    sandbox: modal.Sandbox,
+    service_url: str,
+    sandbox_name: str | None,
+    sandbox_session_secret: str | None,
+    source: str,
+    bootstrap_operation_id: str,
+    restored_from_session: str | None = None,
+    restored_from_snapshot: bool = False,
+    image_version: str | None = None,
+) -> dict[str, object]:
+    pointer = get_active_controller_pointer()
+    if pointer:
+        return pointer
+
+    promoted_at = int(time.time())
+    service_record = _build_controller_service_record(
+        generation=1,
+        sandbox_id=sandbox.object_id,
+        sandbox_name=sandbox_name,
+        service_url=service_url,
+        status="promoting",
+        sandbox_session_secret=sandbox_session_secret,
+        image_version=image_version,
+        source=source,
+        promotion_started_at=promoted_at,
+        last_verified_readiness_at=promoted_at,
+        restored_from_session=restored_from_session,
+        restored_from_snapshot=restored_from_snapshot,
+    )
+    upsert_controller_service(service_record)
+    try:
+        pointer = _persist_active_controller_pointer(
+            generation=1,
+            sandbox_id=sandbox.object_id,
+            sandbox_name=sandbox_name,
+            service_url=service_url,
+            image_version=image_version,
+            last_verified_readiness_at=promoted_at,
+            promoted_at=promoted_at,
+            rollout_operation_id=bootstrap_operation_id,
+            expected_previous_generation=0,
+        )
+    except _RolloutCommitRejectedError as exc:
+        update_controller_service(
+            sandbox.object_id,
+            {
+                "status": "failed",
+                "failed_at": int(time.time()),
+                "failure_reason": str(exc),
+            },
+        )
+        current_pointer = get_active_controller_pointer()
+        if current_pointer:
+            return current_pointer
+        raise
+
+    update_controller_service(
+        sandbox.object_id,
+        {
+            "status": "active",
+            "promoted_at": promoted_at,
+            "last_verified_readiness_at": promoted_at,
+        },
+    )
+    _record_controller_service_legacy_metadata(
+        sandbox_id=sandbox.object_id,
+        service_url=service_url,
+        sandbox_session_secret=sandbox_session_secret,
+        restored_from_session=restored_from_session,
+        restored_from_snapshot=restored_from_snapshot,
+    )
+    return pointer
+
+
+def _cleanup_bootstrap_loser(
+    *,
+    sandbox: modal.Sandbox,
+    claimed_from_pool: bool,
+) -> None:
+    sandbox_id = getattr(sandbox, "object_id", None)
+    if not sandbox_id:
+        return
+    if claimed_from_pool:
+        try:
+            release_warm_sandbox(sandbox_id)
+        except Exception:
+            _logger.warning(
+                "Failed to release bootstrap loser back to warm pool",
+                exc_info=True,
+                extra={"sandbox_id": sandbox_id},
+            )
+        return
+    _terminate_sandbox_best_effort(sandbox, reason="bootstrap_loser")
+
+
 # =============================================================================
 # WORKSPACE RETENTION SCHEDULED TASK
 # =============================================================================
@@ -3650,317 +4318,301 @@ def get_or_start_background_sandbox(
            (handled in the controller)
     """
     timeout_seconds = max(int(_settings.service_timeout), 1)
-
-    for startup_attempt in range(1, _SANDBOX_STARTUP_MAX_ATTEMPTS + 1):
+    pointer = _ensure_active_pointer_from_registry()
+    if pointer:
         try:
-            # STEP 1: Check if we already have a connection in this worker's memory
-            cached_sb, cached_url = _get_background_sandbox_state()
-            if cached_sb is not None and cached_url:
-                return cached_sb, cached_url
+            return _get_or_attach_active_controller_from_pointer(pointer)
+        except _StaleActiveControllerPointerError:
+            pointer = None
 
-            # -----------------------------------------------------------------
-            # STEP 2: Try to find an EXISTING sandbox by name
-            # -----------------------------------------------------------------
+    bootstrap_operation_id = f"bootstrap:{pysecrets.token_hex(8)}"
+    lock = acquire_rollout_lock(bootstrap_operation_id)
+    if not lock.get("acquired"):
+        pointer = _wait_for_active_controller_pointer(timeout_seconds)
+        if pointer:
             try:
-                modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
-                sb = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
-                tunnels = sb.tunnels()
-                if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
-                    service_url = tunnels[SERVICE_PORT].url
-                    _wait_for_service_or_raise_readiness_timeout(
-                        sandbox=sb,
-                        service_url=service_url,
-                        timeout_seconds=timeout_seconds,
-                        phase="reuse_by_name",
-                        startup_attempt=startup_attempt,
-                        recycle_allowed=False,
-                    )
-                    reused_secret = _resolve_sandbox_session_secret(
-                        sandbox_id=sb.object_id,
-                        secret=_lookup_sandbox_session_secret(sandbox_id=sb.object_id),
-                    )
-                    if not reused_secret:
-                        _logger.warning(
-                            "Reused sandbox missing scoped session secret; creating replacement sandbox",
-                            extra={"sandbox_id": sb.object_id},
-                        )
-                    else:
-                        _set_background_sandbox_state(sb, service_url)
-                        return sb, service_url
-            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                raise
-            except Exception:
-                pass  # Sandbox doesn't exist or isn't accessible; we'll create a new one
+                return _get_or_attach_active_controller_from_pointer(pointer)
+            except _StaleActiveControllerPointerError:
+                pointer = None
+        raise RuntimeError("Timed out waiting for active controller bootstrap")
 
-            # -----------------------------------------------------------------
-            # STEP 3: Determine image for new sandbox (snapshot restoration)
-            # -----------------------------------------------------------------
-            sandbox_image = agent_sdk_image
-            restored_from_snapshot = False
-            use_warm_pool = _settings.enable_warm_pool
+    try:
+        pointer = _ensure_active_pointer_from_registry()
+        if pointer:
+            try:
+                return _get_or_attach_active_controller_from_pointer(pointer)
+            except _StaleActiveControllerPointerError:
+                pointer = None
 
-            if session_id and _settings.enable_session_snapshots:
-                snapshot = get_session_snapshot(session_id)
-                if snapshot and snapshot.get("image_id"):
+        for startup_attempt in range(1, _SANDBOX_STARTUP_MAX_ATTEMPTS + 1):
+            try:
+                sandbox_image = agent_sdk_image
+                restored_from_snapshot = False
+                use_warm_pool = _settings.enable_warm_pool
+
+                if session_id and _settings.enable_session_snapshots:
+                    snapshot = get_session_snapshot(session_id)
+                    if snapshot and snapshot.get("image_id"):
+                        try:
+                            snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                            sandbox_image = snapshot_image
+                            restored_from_snapshot = True
+                            use_warm_pool = False
+                            _logger.info(
+                                "Restoring sandbox from session snapshot",
+                                extra={
+                                    "session_id": session_id,
+                                    "snapshot_image_id": snapshot["image_id"],
+                                    "snapshot_created_at": snapshot.get("created_at"),
+                                },
+                            )
+                        except Exception:
+                            _logger.warning(
+                                "Failed to restore from snapshot, using base image",
+                                exc_info=True,
+                                extra={"session_id": session_id, "snapshot": snapshot},
+                            )
+
+                if use_warm_pool:
                     try:
-                        snapshot_image = modal.Image.from_id(snapshot["image_id"])
-                        sandbox_image = snapshot_image
-                        restored_from_snapshot = True
-                        # Don't use warm pool when restoring from snapshot - need specific image
-                        use_warm_pool = False
-                        _logger.info(
-                            "Restoring sandbox from session snapshot",
-                            extra={
-                                "session_id": session_id,
-                                "snapshot_image_id": snapshot["image_id"],
-                                "snapshot_created_at": snapshot.get("created_at"),
-                            },
-                        )
-                    except Exception:
-                        _logger.warning(
-                            "Failed to restore from snapshot, using base image",
-                            exc_info=True,
-                            extra={"session_id": session_id, "snapshot": snapshot},
-                        )
-
-            # -----------------------------------------------------------------
-            # STEP 3.5: Try to claim from warm pool (if enabled and no snapshot)
-            # -----------------------------------------------------------------
-            if use_warm_pool:
-                try:
-                    claimed = claim_warm_sandbox(session_id=session_id)
-                    if claimed:
-                        sandbox_id = claimed.get("sandbox_id")
-                        sandbox_name = claimed.get("sandbox_name")
-                        if sandbox_id:
-                            try:
-                                pool_sb = modal.Sandbox.from_id(sandbox_id)
-                                # Verify sandbox is still running
-                                if pool_sb.poll() is None:
-                                    tunnels = pool_sb.tunnels()
-                                    if SERVICE_PORT in tunnels and getattr(
-                                        tunnels[SERVICE_PORT], "url", None
-                                    ):
-                                        pool_url = tunnels[SERVICE_PORT].url
-                                        _wait_for_service_or_raise_readiness_timeout(
-                                            sandbox=pool_sb,
-                                            service_url=pool_url,
-                                            timeout_seconds=timeout_seconds,
-                                            phase="warm_pool_claim",
-                                            startup_attempt=startup_attempt,
-                                            recycle_allowed=True,
-                                            from_warm_pool=True,
-                                        )
-                                        _set_background_sandbox_state(pool_sb, pool_url)
-                                        _logger.info(
-                                            "Claimed sandbox from warm pool",
-                                            extra={
-                                                "sandbox_id": sandbox_id,
-                                                "sandbox_name": sandbox_name,
-                                                "session_id": session_id,
-                                            },
-                                        )
-                                        # Update tags to reflect active use
-                                        pool_sb.set_tags(
-                                            {
-                                                "pool": "agent_sdk",
-                                                "status": "claimed",
-                                                "role": "service",
-                                                "app": "modal-backend",
-                                                "port": str(SERVICE_PORT),
-                                            }
-                                        )
-                                        # Trigger async pool replenishment
-                                        try:
-                                            replenish_warm_pool.spawn()
-                                        except Exception:
-                                            pass  # Non-critical: pool replenished by maintainer
-                                        claimed_secret = _resolve_sandbox_session_secret(
-                                            sandbox_id=sandbox_id,
-                                            secret=claimed.get("sandbox_session_secret"),
-                                        )
-                                        if not claimed_secret:
-                                            raise _SandboxStartupRetryableError(
+                        claimed = claim_warm_sandbox(session_id=session_id)
+                        if claimed:
+                            sandbox_id = str(claimed.get("sandbox_id") or "").strip()
+                            sandbox_name = str(claimed.get("sandbox_name") or "").strip() or None
+                            claimed_image_version = str(claimed.get("image_version") or "").strip()
+                            target_image_version = _current_image_version_id()
+                            if (
+                                sandbox_id
+                                and claimed_image_version
+                                and target_image_version
+                                and claimed_image_version != target_image_version
+                            ):
+                                remove_from_pool(sandbox_id)
+                                claimed = None
+                                sandbox_id = ""
+                            if sandbox_id:
+                                try:
+                                    pool_sb = modal.Sandbox.from_id(sandbox_id)
+                                    if pool_sb.poll() is None:
+                                        tunnels = pool_sb.tunnels()
+                                        if SERVICE_PORT in tunnels and getattr(
+                                            tunnels[SERVICE_PORT], "url", None
+                                        ):
+                                            pool_url = tunnels[SERVICE_PORT].url
+                                            _wait_for_service_or_raise_readiness_timeout(
                                                 sandbox=pool_sb,
                                                 service_url=pool_url,
-                                                phase="warm_pool_missing_scoped_secret",
+                                                timeout_seconds=timeout_seconds,
+                                                phase="warm_pool_claim",
                                                 startup_attempt=startup_attempt,
                                                 recycle_allowed=True,
                                                 from_warm_pool=True,
-                                                detail="Warm pool sandbox missing scoped session secret",
                                             )
-                                        try:
-                                            SESSIONS[SANDBOX_NAME] = {
-                                                "id": sandbox_id,
-                                                "url": pool_url,
-                                                "volume": PERSIST_VOL_NAME,
-                                                "created_at": int(time.time()),
-                                                "tags": {
+                                            pool_sb.set_tags(
+                                                {
+                                                    "pool": "agent_sdk",
+                                                    "status": "claimed",
                                                     "role": "service",
                                                     "app": "modal-backend",
                                                     "port": str(SERVICE_PORT),
-                                                },
-                                                "status": "running",
-                                                "sandbox_session_secret": claimed_secret,
-                                            }
-                                        except Exception:
-                                            _logger.warning(
-                                                "Failed to persist claimed sandbox session secret metadata",
-                                                exc_info=True,
-                                                extra={"sandbox_id": sandbox_id},
+                                                }
                                             )
-                                        return pool_sb, pool_url
-                            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                                raise
-                            except Exception:
-                                _logger.warning(
-                                    "Failed to use claimed pool sandbox, will create new",
-                                    exc_info=True,
-                                    extra={"sandbox_id": sandbox_id},
-                                )
-                                # Remove the bad entry from pool
-                                remove_from_pool(sandbox_id)
-                except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                    raise
-                except Exception:
-                    _logger.warning(
-                        "Error checking warm pool, will create new sandbox", exc_info=True
+                                            claimed_secret = _resolve_sandbox_session_secret(
+                                                sandbox_id=sandbox_id,
+                                                secret=claimed.get("sandbox_session_secret"),
+                                            )
+                                            if not claimed_secret:
+                                                raise _SandboxStartupRetryableError(
+                                                    sandbox=pool_sb,
+                                                    service_url=pool_url,
+                                                    phase="warm_pool_missing_scoped_secret",
+                                                    startup_attempt=startup_attempt,
+                                                    recycle_allowed=True,
+                                                    from_warm_pool=True,
+                                                    detail="Warm pool sandbox missing scoped session secret",
+                                                )
+                                            pointer = _register_bootstrap_controller_as_active(
+                                                sandbox=pool_sb,
+                                                service_url=pool_url,
+                                                sandbox_name=sandbox_name,
+                                                sandbox_session_secret=claimed_secret,
+                                                source="warm_pool",
+                                                bootstrap_operation_id=bootstrap_operation_id,
+                                                image_version=claimed_image_version
+                                                or target_image_version,
+                                            )
+                                            if (
+                                                str(pointer.get("sandbox_id") or "").strip()
+                                                != pool_sb.object_id
+                                            ):
+                                                _cleanup_bootstrap_loser(
+                                                    sandbox=pool_sb,
+                                                    claimed_from_pool=True,
+                                                )
+                                                return (
+                                                    _get_or_attach_active_controller_from_pointer(
+                                                        pointer
+                                                    )
+                                                )
+                                            remove_from_pool(sandbox_id)
+                                            try:
+                                                replenish_warm_pool.spawn()
+                                            except Exception:
+                                                _logger.warning(
+                                                    "Failed to spawn warm pool replenishment after bootstrap",
+                                                    exc_info=True,
+                                                )
+                                            return _get_or_attach_active_controller_from_pointer(
+                                                pointer
+                                            )
+                                except (
+                                    _SandboxReadinessTimeoutError,
+                                    _SandboxStartupRetryableError,
+                                ):
+                                    raise
+                                except Exception:
+                                    _logger.warning(
+                                        "Failed to use claimed pool sandbox, will create new",
+                                        exc_info=True,
+                                        extra={"sandbox_id": sandbox_id},
+                                    )
+                                    remove_from_pool(sandbox_id)
+                    except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
+                        raise
+                    except Exception:
+                        _logger.warning(
+                            "Error checking warm pool, will create new sandbox",
+                            exc_info=True,
+                        )
+
+                svc_vol = _get_persist_volume()
+                sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+                sandbox_session_secret = _generate_sandbox_session_secret()
+                attached_existing = False
+                sandbox_name = _controller_service_name(1)
+                try:
+                    sandbox = modal.Sandbox.create(
+                        "uvicorn",
+                        "modal_backend.api.controller:app",
+                        "--host",
+                        "0.0.0.0",
+                        "--port",
+                        str(SERVICE_PORT),
+                        app=sandbox_app,
+                        image=sandbox_image,
+                        secrets=sandbox_runtime_secrets,
+                        env=_sandbox_runtime_env(sandbox_session_secret),
+                        workdir="/root/app",
+                        name=sandbox_name,
+                        encrypted_ports=_settings.service_ports,
+                        volumes={"/data": svc_vol},
+                        timeout=_settings.sandbox_timeout,
+                        idle_timeout=_settings.sandbox_idle_timeout,
+                        **_sandbox_resource_kwargs(),
+                        verbose=True,
+                    )
+                except modal_exc.AlreadyExistsError:
+                    attached_existing = True
+                    sandbox = modal.Sandbox.from_name(SANDBOX_APP_NAME, sandbox_name)
+                    sandbox_session_secret = _lookup_sandbox_session_secret(
+                        sandbox_id=sandbox.object_id
                     )
 
-            # -----------------------------------------------------------------
-            # STEP 4: Create a NEW sandbox
-            # -----------------------------------------------------------------
-            svc_vol = _get_persist_volume()
-            sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
-            sandbox_session_secret = _generate_sandbox_session_secret()
-            attached_existing = False
-            try:
-                sandbox = modal.Sandbox.create(
-                    "uvicorn",
-                    "modal_backend.api.controller:app",
-                    "--host",
-                    "0.0.0.0",
-                    "--port",
-                    str(SERVICE_PORT),
-                    app=sandbox_app,
-                    image=sandbox_image,
-                    secrets=sandbox_runtime_secrets,
-                    env=_sandbox_runtime_env(sandbox_session_secret),
-                    workdir="/root/app",
-                    name=SANDBOX_NAME,
-                    encrypted_ports=_settings.service_ports,
-                    volumes={"/data": svc_vol},
-                    timeout=_settings.sandbox_timeout,
-                    idle_timeout=_settings.sandbox_idle_timeout,
-                    **_sandbox_resource_kwargs(),
-                    verbose=True,
+                sandbox_session_secret = _resolve_sandbox_session_secret(
+                    sandbox_id=sandbox.object_id if sandbox else None,
+                    secret=sandbox_session_secret,
                 )
-            except modal_exc.AlreadyExistsError:
-                attached_existing = True
-                sandbox = modal.Sandbox.from_name(SANDBOX_APP_NAME, SANDBOX_NAME)
-                sandbox_session_secret = _lookup_sandbox_session_secret(
-                    sandbox_id=sandbox.object_id
+                if attached_existing and not sandbox_session_secret:
+                    raise _SandboxStartupRetryableError(
+                        sandbox=sandbox,
+                        service_url=None,
+                        phase="attach_missing_scoped_secret",
+                        startup_attempt=startup_attempt,
+                        recycle_allowed=True,
+                        detail="Attached sandbox missing scoped session secret",
+                    )
+
+                _set_background_sandbox_state(sandbox, None, generation=1)
+                _remember_sandbox_session_secret(
+                    sandbox_id=sandbox.object_id if sandbox else None,
+                    secret=sandbox_session_secret,
+                )
+                sandbox.set_tags(
+                    {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)}
                 )
 
-            sandbox_session_secret = _resolve_sandbox_session_secret(
-                sandbox_id=sandbox.object_id if sandbox else None,
-                secret=sandbox_session_secret,
-            )
-            if attached_existing and not sandbox_session_secret:
-                raise _SandboxStartupRetryableError(
+                service_url = None
+                deadline = time.time() + 30
+                while time.time() < deadline:
+                    tunnels = sandbox.tunnels()
+                    if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+                        service_url = tunnels[SERVICE_PORT].url
+                        break
+                    time.sleep(0.5)
+
+                if not service_url:
+                    _clear_background_sandbox_state(expected_sandbox_id=sandbox.object_id)
+                    raise _SandboxStartupRetryableError(
+                        sandbox=sandbox,
+                        service_url=None,
+                        phase="tunnel_discovery",
+                        startup_attempt=startup_attempt,
+                        recycle_allowed=True,
+                        detail="Failed to start background sandbox or get service URL",
+                    )
+
+                _set_background_sandbox_state(
+                    sandbox,
+                    service_url,
+                    generation=1,
+                )
+                _wait_for_service_or_raise_readiness_timeout(
                     sandbox=sandbox,
-                    service_url=None,
-                    phase="attach_missing_scoped_secret",
+                    service_url=service_url,
+                    timeout_seconds=timeout_seconds,
+                    phase="create_or_attach",
                     startup_attempt=startup_attempt,
                     recycle_allowed=True,
-                    detail="Attached sandbox missing scoped session secret",
                 )
-
-            _set_background_sandbox_state(sandbox, None)
-            _remember_sandbox_session_secret(
-                sandbox_id=sandbox.object_id if sandbox else None,
-                secret=sandbox_session_secret,
-            )
-
-            # Optional: set tags after creation (useful for filtering in Modal dashboard)
-            sandbox.set_tags({"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)})
-
-            # Poll tunnels until URL appears
-            service_url = None
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                tunnels = sandbox.tunnels()
-                if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
-                    service_url = tunnels[SERVICE_PORT].url
-                    break
-                time.sleep(0.5)
-
-            if not service_url:
-                _clear_background_sandbox_state(expected_sandbox_id=sandbox.object_id)
-                raise _SandboxStartupRetryableError(
+                pointer = _register_bootstrap_controller_as_active(
                     sandbox=sandbox,
-                    service_url=None,
-                    phase="tunnel_discovery",
-                    startup_attempt=startup_attempt,
-                    recycle_allowed=True,
-                    detail="Failed to start background sandbox or get service URL",
+                    service_url=service_url,
+                    sandbox_name=sandbox_name,
+                    sandbox_session_secret=sandbox_session_secret,
+                    source="snapshot" if restored_from_snapshot else "created",
+                    bootstrap_operation_id=bootstrap_operation_id,
+                    restored_from_session=session_id if restored_from_snapshot else None,
+                    restored_from_snapshot=restored_from_snapshot,
+                    image_version=_current_image_version_id(),
                 )
+                if str(pointer.get("sandbox_id") or "").strip() != sandbox.object_id:
+                    _cleanup_bootstrap_loser(
+                        sandbox=sandbox,
+                        claimed_from_pool=False,
+                    )
+                    return _get_or_attach_active_controller_from_pointer(pointer)
+                return _get_or_attach_active_controller_from_pointer(pointer)
+            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError) as timeout_exc:
+                _handle_readiness_timeout_sync(timeout_exc)
+                if startup_attempt < _SANDBOX_STARTUP_MAX_ATTEMPTS:
+                    _logger.warning(
+                        "Retrying background sandbox startup after retryable failure",
+                        extra={
+                            "startup_attempt": startup_attempt,
+                            "next_attempt": startup_attempt + 1,
+                            "phase": timeout_exc.phase,
+                            "sandbox_id": timeout_exc.sandbox_id,
+                        },
+                    )
+                    continue
+                raise TimeoutError(
+                    "Background sandbox startup failed after "
+                    f"{_SANDBOX_STARTUP_MAX_ATTEMPTS} attempts"
+                ) from timeout_exc
 
-            _set_background_sandbox_state(sandbox, service_url)
-            _wait_for_service_or_raise_readiness_timeout(
-                sandbox=sandbox,
-                service_url=service_url,
-                timeout_seconds=timeout_seconds,
-                phase="create_or_attach",
-                startup_attempt=startup_attempt,
-                recycle_allowed=True,
-            )
-
-            try:
-                session_metadata: dict = {
-                    "id": sandbox.object_id,
-                    "url": service_url,
-                    "volume": PERSIST_VOL_NAME,
-                    "created_at": int(time.time()),
-                    "tags": {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)},
-                    "status": "running",
-                }
-                if sandbox_session_secret:
-                    session_metadata["sandbox_session_secret"] = sandbox_session_secret
-                # Track snapshot restoration for observability
-                if restored_from_snapshot and session_id:
-                    session_metadata["restored_from_session"] = session_id
-                    session_metadata["restored_from_snapshot"] = True
-                SESSIONS[SANDBOX_NAME] = session_metadata
-            except modal_exc.Error as e:
-                logging.getLogger(__name__).warning(
-                    "Failed to persist session metadata to Modal Dict: %s", e
-                )
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Unexpected error persisting session metadata"
-                )
-
-            return sandbox, service_url
-        except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError) as timeout_exc:
-            _handle_readiness_timeout_sync(timeout_exc)
-            if startup_attempt < _SANDBOX_STARTUP_MAX_ATTEMPTS:
-                _logger.warning(
-                    "Retrying background sandbox startup after retryable failure",
-                    extra={
-                        "startup_attempt": startup_attempt,
-                        "next_attempt": startup_attempt + 1,
-                        "phase": timeout_exc.phase,
-                        "sandbox_id": timeout_exc.sandbox_id,
-                    },
-                )
-                continue
-            raise TimeoutError(
-                "Background sandbox startup failed after "
-                f"{_SANDBOX_STARTUP_MAX_ATTEMPTS} attempts"
-            ) from timeout_exc
-
-    raise RuntimeError("Unreachable background sandbox startup state")
+        raise RuntimeError("Unreachable background sandbox startup state")
+    finally:
+        release_rollout_lock(bootstrap_operation_id)
 
 
 async def _wait_for_service_aio(url: str, timeout: int = 60, path: str = "/health_check") -> None:
@@ -4000,330 +4652,1055 @@ async def get_or_start_background_sandbox_aio(
         A pair of `(sandbox, service_url)`.
     """
     timeout_seconds = max(int(_settings.service_timeout), 1)
-
-    for startup_attempt in range(1, _SANDBOX_STARTUP_MAX_ATTEMPTS + 1):
+    pointer = await _ensure_active_pointer_from_registry_aio()
+    if pointer:
         try:
-            cached_sb, cached_url = _get_background_sandbox_state()
-            if cached_sb is not None and cached_url:
-                return cached_sb, cached_url
+            return await _get_or_attach_active_controller_from_pointer_aio(pointer)
+        except _StaleActiveControllerPointerError:
+            pointer = None
 
-            # Attempt global reuse by name across workers/processes.
+    bootstrap_operation_id = f"bootstrap:{pysecrets.token_hex(8)}"
+    lock = await _run_blocking_modal_call(acquire_rollout_lock, bootstrap_operation_id)
+    if not lock.get("acquired"):
+        pointer = await _wait_for_active_controller_pointer_aio(timeout_seconds)
+        if pointer:
             try:
-                await modal.App.lookup.aio(SANDBOX_APP_NAME, create_if_missing=True)
-                sb = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
-                deadline = anyio.current_time() + 30
-                url = None
-                while anyio.current_time() < deadline:
-                    tunnels = await sb.tunnels.aio()
-                    if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
-                        url = tunnels[SERVICE_PORT].url
-                        break
-                    await anyio.sleep(0.5)
+                return await _get_or_attach_active_controller_from_pointer_aio(pointer)
+            except _StaleActiveControllerPointerError:
+                pointer = None
+        raise RuntimeError("Timed out waiting for active controller bootstrap")
 
-                if url:
-                    await _wait_for_service_or_raise_readiness_timeout_aio(
-                        sandbox=sb,
-                        service_url=url,
-                        timeout_seconds=timeout_seconds,
-                        phase="reuse_by_name",
-                        startup_attempt=startup_attempt,
-                        recycle_allowed=False,
-                    )
-                    lookup_secret = await _run_blocking_modal_call(
-                        _lookup_sandbox_session_secret,
-                        sandbox_id=sb.object_id,
-                    )
-                    reused_secret = await _run_blocking_modal_call(
-                        _resolve_sandbox_session_secret,
-                        sandbox_id=sb.object_id,
-                        secret=lookup_secret,
-                    )
-                    if not reused_secret:
-                        _logger.warning(
-                            "Reused sandbox missing scoped session secret; creating replacement sandbox (async)",
-                            extra={"sandbox_id": sb.object_id},
-                        )
-                    else:
-                        _set_background_sandbox_state(sb, url)
-                        return sb, url
-            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                raise
-            except Exception:
-                pass
+    try:
+        pointer = await _ensure_active_pointer_from_registry_aio()
+        if pointer:
+            try:
+                return await _get_or_attach_active_controller_from_pointer_aio(pointer)
+            except _StaleActiveControllerPointerError:
+                pointer = None
 
-            # Determine image for new sandbox (snapshot restoration)
-            sandbox_image = agent_sdk_image
-            restored_from_snapshot = False
-            use_warm_pool = _settings.enable_warm_pool
+        for startup_attempt in range(1, _SANDBOX_STARTUP_MAX_ATTEMPTS + 1):
+            try:
+                sandbox_image = agent_sdk_image
+                restored_from_snapshot = False
+                use_warm_pool = _settings.enable_warm_pool
 
-            if session_id and _settings.enable_session_snapshots:
-                snapshot = await _run_blocking_modal_call(get_session_snapshot, session_id)
-                if snapshot and snapshot.get("image_id"):
+                if session_id and _settings.enable_session_snapshots:
+                    snapshot = await _run_blocking_modal_call(get_session_snapshot, session_id)
+                    if snapshot and snapshot.get("image_id"):
+                        try:
+                            snapshot_image = modal.Image.from_id(snapshot["image_id"])
+                            sandbox_image = snapshot_image
+                            restored_from_snapshot = True
+                            use_warm_pool = False
+                            _logger.info(
+                                "Restoring sandbox from session snapshot (async)",
+                                extra={
+                                    "session_id": session_id,
+                                    "snapshot_image_id": snapshot["image_id"],
+                                    "snapshot_created_at": snapshot.get("created_at"),
+                                },
+                            )
+                        except Exception:
+                            _logger.warning(
+                                "Failed to restore from snapshot, using base image",
+                                exc_info=True,
+                                extra={"session_id": session_id, "snapshot": snapshot},
+                            )
+
+                if use_warm_pool:
                     try:
-                        snapshot_image = modal.Image.from_id(snapshot["image_id"])
-                        sandbox_image = snapshot_image
-                        restored_from_snapshot = True
-                        # Don't use warm pool when restoring from snapshot - need specific image
-                        use_warm_pool = False
-                        _logger.info(
-                            "Restoring sandbox from session snapshot (async)",
-                            extra={
-                                "session_id": session_id,
-                                "snapshot_image_id": snapshot["image_id"],
-                                "snapshot_created_at": snapshot.get("created_at"),
-                            },
+                        claimed = await _run_blocking_modal_call(
+                            claim_warm_sandbox,
+                            session_id=session_id,
                         )
-                    except Exception:
-                        _logger.warning(
-                            "Failed to restore from snapshot, using base image",
-                            exc_info=True,
-                            extra={"session_id": session_id, "snapshot": snapshot},
-                        )
-
-            # Try to claim from warm pool (if enabled and no snapshot)
-            if use_warm_pool:
-                try:
-                    claimed = await _run_blocking_modal_call(
-                        claim_warm_sandbox,
-                        session_id=session_id,
-                    )
-                    if claimed:
-                        sandbox_id = claimed.get("sandbox_id")
-                        sandbox_name = claimed.get("sandbox_name")
-                        if sandbox_id:
-                            try:
-                                pool_sb = await modal.Sandbox.from_id.aio(sandbox_id)
-                                if await pool_sb.poll.aio() is None:
-                                    tunnels = await pool_sb.tunnels.aio()
-                                    if SERVICE_PORT in tunnels and getattr(
-                                        tunnels[SERVICE_PORT], "url", None
-                                    ):
-                                        pool_url = tunnels[SERVICE_PORT].url
-                                        await _wait_for_service_or_raise_readiness_timeout_aio(
-                                            sandbox=pool_sb,
-                                            service_url=pool_url,
-                                            timeout_seconds=timeout_seconds,
-                                            phase="warm_pool_claim",
-                                            startup_attempt=startup_attempt,
-                                            recycle_allowed=True,
-                                            from_warm_pool=True,
-                                        )
-                                        _set_background_sandbox_state(pool_sb, pool_url)
-                                        _logger.info(
-                                            "Claimed sandbox from warm pool (async)",
-                                            extra={
-                                                "sandbox_id": sandbox_id,
-                                                "sandbox_name": sandbox_name,
-                                                "session_id": session_id,
-                                            },
-                                        )
-                                        await pool_sb.set_tags.aio(
-                                            {
-                                                "pool": "agent_sdk",
-                                                "status": "claimed",
-                                                "role": "service",
-                                                "app": "modal-backend",
-                                                "port": str(SERVICE_PORT),
-                                            }
-                                        )
-                                        try:
-                                            await _spawn_modal_function(replenish_warm_pool)
-                                        except Exception:
-                                            pass  # Non-critical
-                                        claimed_secret = await _run_blocking_modal_call(
-                                            _resolve_sandbox_session_secret,
-                                            sandbox_id=sandbox_id,
-                                            secret=claimed.get("sandbox_session_secret"),
-                                        )
-                                        if not claimed_secret:
-                                            raise _SandboxStartupRetryableError(
+                        if claimed:
+                            sandbox_id = str(claimed.get("sandbox_id") or "").strip()
+                            sandbox_name = str(claimed.get("sandbox_name") or "").strip() or None
+                            claimed_image_version = str(claimed.get("image_version") or "").strip()
+                            target_image_version = await _current_image_version_id_aio()
+                            if (
+                                sandbox_id
+                                and claimed_image_version
+                                and target_image_version
+                                and claimed_image_version != target_image_version
+                            ):
+                                await _run_blocking_modal_call(remove_from_pool, sandbox_id)
+                                claimed = None
+                                sandbox_id = ""
+                            if sandbox_id:
+                                try:
+                                    pool_sb = await modal.Sandbox.from_id.aio(sandbox_id)
+                                    if await pool_sb.poll.aio() is None:
+                                        tunnels = await pool_sb.tunnels.aio()
+                                        if SERVICE_PORT in tunnels and getattr(
+                                            tunnels[SERVICE_PORT], "url", None
+                                        ):
+                                            pool_url = tunnels[SERVICE_PORT].url
+                                            await _wait_for_service_or_raise_readiness_timeout_aio(
                                                 sandbox=pool_sb,
                                                 service_url=pool_url,
-                                                phase="warm_pool_missing_scoped_secret",
+                                                timeout_seconds=timeout_seconds,
+                                                phase="warm_pool_claim",
                                                 startup_attempt=startup_attempt,
                                                 recycle_allowed=True,
                                                 from_warm_pool=True,
-                                                detail="Warm pool sandbox missing scoped session secret",
                                             )
-                                        try:
-                                            await _run_blocking_modal_call(
-                                                _set_store_value,
-                                                SESSIONS,
-                                                SANDBOX_NAME,
+                                            await pool_sb.set_tags.aio(
                                                 {
-                                                    "id": sandbox_id,
-                                                    "url": pool_url,
-                                                    "volume": PERSIST_VOL_NAME,
-                                                    "created_at": int(time.time()),
-                                                    "tags": {
-                                                        "role": "service",
-                                                        "app": "modal-backend",
-                                                        "port": str(SERVICE_PORT),
-                                                    },
-                                                    "status": "running",
-                                                    "sandbox_session_secret": claimed_secret,
-                                                },
+                                                    "pool": "agent_sdk",
+                                                    "status": "claimed",
+                                                    "role": "service",
+                                                    "app": "modal-backend",
+                                                    "port": str(SERVICE_PORT),
+                                                }
                                             )
-                                        except Exception:
-                                            _logger.warning(
-                                                "Failed to persist claimed sandbox session secret metadata (async)",
-                                                exc_info=True,
-                                                extra={"sandbox_id": sandbox_id},
+                                            claimed_secret = await _run_blocking_modal_call(
+                                                _resolve_sandbox_session_secret,
+                                                sandbox_id=sandbox_id,
+                                                secret=claimed.get("sandbox_session_secret"),
                                             )
-                                        return pool_sb, pool_url
-                            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                                raise
-                            except Exception:
-                                _logger.warning(
-                                    "Failed to use claimed pool sandbox (async), will create new",
-                                    exc_info=True,
-                                    extra={"sandbox_id": sandbox_id},
-                                )
-                                await _run_blocking_modal_call(remove_from_pool, sandbox_id)
-                except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
-                    raise
-                except Exception:
-                    _logger.warning(
-                        "Error checking warm pool (async), will create new sandbox",
-                        exc_info=True,
+                                            if not claimed_secret:
+                                                raise _SandboxStartupRetryableError(
+                                                    sandbox=pool_sb,
+                                                    service_url=pool_url,
+                                                    phase="warm_pool_missing_scoped_secret",
+                                                    startup_attempt=startup_attempt,
+                                                    recycle_allowed=True,
+                                                    from_warm_pool=True,
+                                                    detail="Warm pool sandbox missing scoped session secret",
+                                                )
+                                            pointer = await _run_blocking_modal_call(
+                                                _register_bootstrap_controller_as_active,
+                                                sandbox=pool_sb,
+                                                service_url=pool_url,
+                                                sandbox_name=sandbox_name,
+                                                sandbox_session_secret=claimed_secret,
+                                                source="warm_pool",
+                                                bootstrap_operation_id=bootstrap_operation_id,
+                                                image_version=claimed_image_version
+                                                or target_image_version,
+                                            )
+                                            if (
+                                                str(pointer.get("sandbox_id") or "").strip()
+                                                != pool_sb.object_id
+                                            ):
+                                                await _run_blocking_modal_call(
+                                                    _cleanup_bootstrap_loser,
+                                                    sandbox=pool_sb,
+                                                    claimed_from_pool=True,
+                                                )
+                                                return await _get_or_attach_active_controller_from_pointer_aio(
+                                                    pointer
+                                                )
+                                            await _run_blocking_modal_call(
+                                                remove_from_pool, sandbox_id
+                                            )
+                                            try:
+                                                await _spawn_modal_function(replenish_warm_pool)
+                                            except Exception:
+                                                _logger.warning(
+                                                    "Failed to spawn warm pool replenishment after bootstrap (async)",
+                                                    exc_info=True,
+                                                )
+                                            return await _get_or_attach_active_controller_from_pointer_aio(
+                                                pointer
+                                            )
+                                except (
+                                    _SandboxReadinessTimeoutError,
+                                    _SandboxStartupRetryableError,
+                                ):
+                                    raise
+                                except Exception:
+                                    _logger.warning(
+                                        "Failed to use claimed pool sandbox (async), will create new",
+                                        exc_info=True,
+                                        extra={"sandbox_id": sandbox_id},
+                                    )
+                                    await _run_blocking_modal_call(remove_from_pool, sandbox_id)
+                    except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError):
+                        raise
+                    except Exception:
+                        _logger.warning(
+                            "Error checking warm pool (async), will create new sandbox",
+                            exc_info=True,
+                        )
+
+                svc_vol = await _run_blocking_modal_call(_get_persist_volume)
+                sandbox_app = await modal.App.lookup.aio(SANDBOX_APP_NAME, create_if_missing=True)
+                sandbox_session_secret = _generate_sandbox_session_secret()
+                attached_existing = False
+                sandbox_name = _controller_service_name(1)
+                try:
+                    sandbox = await modal.Sandbox.create.aio(
+                        "uvicorn",
+                        "modal_backend.api.controller:app",
+                        "--host",
+                        "0.0.0.0",
+                        "--port",
+                        str(SERVICE_PORT),
+                        app=sandbox_app,
+                        image=sandbox_image,
+                        secrets=sandbox_runtime_secrets,
+                        env=_sandbox_runtime_env(sandbox_session_secret),
+                        workdir="/root/app",
+                        name=sandbox_name,
+                        encrypted_ports=_settings.service_ports,
+                        volumes={"/data": svc_vol},
+                        timeout=_settings.sandbox_timeout,
+                        idle_timeout=_settings.sandbox_idle_timeout,
+                        **_sandbox_resource_kwargs(),
+                        verbose=True,
+                    )
+                except modal_exc.AlreadyExistsError:
+                    attached_existing = True
+                    sandbox = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, sandbox_name)
+                    sandbox_session_secret = await _run_blocking_modal_call(
+                        _lookup_sandbox_session_secret,
+                        sandbox_id=sandbox.object_id,
                     )
 
-            # Create with persistent volume.
-            svc_vol = await _run_blocking_modal_call(_get_persist_volume)
-            sandbox_app = await modal.App.lookup.aio(SANDBOX_APP_NAME, create_if_missing=True)
-            sandbox_session_secret = _generate_sandbox_session_secret()
-            attached_existing = False
-            try:
-                sandbox = await modal.Sandbox.create.aio(
-                    "uvicorn",
-                    "modal_backend.api.controller:app",
-                    "--host",
-                    "0.0.0.0",
-                    "--port",
-                    str(SERVICE_PORT),
-                    app=sandbox_app,
-                    image=sandbox_image,
-                    secrets=sandbox_runtime_secrets,
-                    env=_sandbox_runtime_env(sandbox_session_secret),
-                    workdir="/root/app",
-                    name=SANDBOX_NAME,
-                    encrypted_ports=_settings.service_ports,
-                    volumes={"/data": svc_vol},
-                    timeout=_settings.sandbox_timeout,
-                    idle_timeout=_settings.sandbox_idle_timeout,
-                    **_sandbox_resource_kwargs(),
-                    verbose=True,
-                )
-            except modal_exc.AlreadyExistsError:
-                attached_existing = True
-                sandbox = await modal.Sandbox.from_name.aio(SANDBOX_APP_NAME, SANDBOX_NAME)
                 sandbox_session_secret = await _run_blocking_modal_call(
-                    _lookup_sandbox_session_secret,
-                    sandbox_id=sandbox.object_id,
+                    _resolve_sandbox_session_secret,
+                    sandbox_id=sandbox.object_id if sandbox else None,
+                    secret=sandbox_session_secret,
+                )
+                if attached_existing and not sandbox_session_secret:
+                    raise _SandboxStartupRetryableError(
+                        sandbox=sandbox,
+                        service_url=None,
+                        phase="attach_missing_scoped_secret",
+                        startup_attempt=startup_attempt,
+                        recycle_allowed=True,
+                        detail="Attached sandbox missing scoped session secret",
+                    )
+
+                _set_background_sandbox_state(sandbox, None, generation=1)
+                _remember_sandbox_session_secret(
+                    sandbox_id=sandbox.object_id if sandbox else None,
+                    secret=sandbox_session_secret,
                 )
 
-            sandbox_session_secret = await _run_blocking_modal_call(
-                _resolve_sandbox_session_secret,
-                sandbox_id=sandbox.object_id if sandbox else None,
-                secret=sandbox_session_secret,
-            )
-            if attached_existing and not sandbox_session_secret:
-                raise _SandboxStartupRetryableError(
+                await sandbox.set_tags.aio(
+                    {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)}
+                )
+
+                deadline = anyio.current_time() + 30
+                service_url = None
+                while anyio.current_time() < deadline:
+                    tunnels = await sandbox.tunnels.aio()
+                    if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+                        service_url = tunnels[SERVICE_PORT].url
+                        break
+                    await anyio.sleep(0.5)
+
+                if not service_url:
+                    _clear_background_sandbox_state(expected_sandbox_id=sandbox.object_id)
+                    raise _SandboxStartupRetryableError(
+                        sandbox=sandbox,
+                        service_url=None,
+                        phase="tunnel_discovery",
+                        startup_attempt=startup_attempt,
+                        recycle_allowed=True,
+                        detail="Failed to start background sandbox or get service URL",
+                    )
+
+                _set_background_sandbox_state(sandbox, service_url, generation=1)
+                await _wait_for_service_or_raise_readiness_timeout_aio(
                     sandbox=sandbox,
-                    service_url=None,
-                    phase="attach_missing_scoped_secret",
+                    service_url=service_url,
+                    timeout_seconds=timeout_seconds,
+                    phase="create_or_attach",
                     startup_attempt=startup_attempt,
                     recycle_allowed=True,
-                    detail="Attached sandbox missing scoped session secret",
                 )
-
-            _set_background_sandbox_state(sandbox, None)
-            _remember_sandbox_session_secret(
-                sandbox_id=sandbox.object_id if sandbox else None,
-                secret=sandbox_session_secret,
-            )
-
-            await sandbox.set_tags.aio(
-                {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)}
-            )
-
-            deadline = anyio.current_time() + 30
-            service_url = None
-            while anyio.current_time() < deadline:
-                tunnels = await sandbox.tunnels.aio()
-                if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
-                    service_url = tunnels[SERVICE_PORT].url
-                    break
-                await anyio.sleep(0.5)
-
-            if not service_url:
-                _clear_background_sandbox_state(expected_sandbox_id=sandbox.object_id)
-                raise _SandboxStartupRetryableError(
+                pointer = await _run_blocking_modal_call(
+                    _register_bootstrap_controller_as_active,
                     sandbox=sandbox,
-                    service_url=None,
-                    phase="tunnel_discovery",
-                    startup_attempt=startup_attempt,
-                    recycle_allowed=True,
-                    detail="Failed to start background sandbox or get service URL",
+                    service_url=service_url,
+                    sandbox_name=sandbox_name,
+                    sandbox_session_secret=sandbox_session_secret,
+                    source="snapshot" if restored_from_snapshot else "created",
+                    bootstrap_operation_id=bootstrap_operation_id,
+                    restored_from_session=session_id if restored_from_snapshot else None,
+                    restored_from_snapshot=restored_from_snapshot,
+                    image_version=await _current_image_version_id_aio(),
                 )
+                if str(pointer.get("sandbox_id") or "").strip() != sandbox.object_id:
+                    await _run_blocking_modal_call(
+                        _cleanup_bootstrap_loser,
+                        sandbox=sandbox,
+                        claimed_from_pool=False,
+                    )
+                    return await _get_or_attach_active_controller_from_pointer_aio(pointer)
+                return await _get_or_attach_active_controller_from_pointer_aio(pointer)
+            except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError) as timeout_exc:
+                await _handle_readiness_timeout_async(timeout_exc)
+                if startup_attempt < _SANDBOX_STARTUP_MAX_ATTEMPTS:
+                    _logger.warning(
+                        "Retrying background sandbox startup after retryable failure (async)",
+                        extra={
+                            "startup_attempt": startup_attempt,
+                            "next_attempt": startup_attempt + 1,
+                            "phase": timeout_exc.phase,
+                            "sandbox_id": timeout_exc.sandbox_id,
+                        },
+                    )
+                    continue
+                raise TimeoutError(
+                    "Background sandbox startup failed after "
+                    f"{_SANDBOX_STARTUP_MAX_ATTEMPTS} attempts"
+                ) from timeout_exc
 
-            _set_background_sandbox_state(sandbox, service_url)
-            await _wait_for_service_or_raise_readiness_timeout_aio(
-                sandbox=sandbox,
-                service_url=service_url,
-                timeout_seconds=timeout_seconds,
-                phase="create_or_attach",
-                startup_attempt=startup_attempt,
-                recycle_allowed=True,
-            )
+        raise RuntimeError("Unreachable background sandbox startup state (async)")
+    finally:
+        await _run_blocking_modal_call(release_rollout_lock, bootstrap_operation_id)
 
+
+def _rollout_synthetic_session_id(generation: int) -> str:
+    return f"__controller_rollout__gen_{generation}"
+
+
+def _prepare_rollout_candidate_sync(generation: int) -> dict[str, object]:
+    timeout_seconds = max(int(_settings.service_timeout), 1)
+    target_image_version = _current_image_version_id()
+
+    if _settings.enable_warm_pool:
+        claimed = claim_warm_sandbox(session_id=f"rollout-gen-{generation}")
+        if claimed:
+            sandbox_id = str(claimed.get("sandbox_id") or "").strip()
+            sandbox_name = str(claimed.get("sandbox_name") or "").strip() or None
+            claimed_image_version = str(claimed.get("image_version") or "").strip()
+            if (
+                sandbox_id
+                and claimed_image_version
+                and claimed_image_version != target_image_version
+            ):
+                remove_from_pool(sandbox_id)
+            elif sandbox_id:
+                pool_sb = modal.Sandbox.from_id(sandbox_id)
+                if pool_sb.poll() is None:
+                    tunnels = pool_sb.tunnels()
+                    if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+                        pool_url = tunnels[SERVICE_PORT].url
+                        _wait_for_service_or_raise_readiness_timeout(
+                            sandbox=pool_sb,
+                            service_url=pool_url,
+                            timeout_seconds=timeout_seconds,
+                            phase="rollout_warm_pool_claim",
+                            startup_attempt=1,
+                            recycle_allowed=True,
+                            from_warm_pool=True,
+                        )
+                        claimed_secret = _resolve_sandbox_session_secret(
+                            sandbox_id=sandbox_id,
+                            secret=str(claimed.get("sandbox_session_secret") or "").strip() or None,
+                        )
+                        if not claimed_secret:
+                            raise _SandboxStartupRetryableError(
+                                sandbox=pool_sb,
+                                service_url=pool_url,
+                                phase="rollout_warm_pool_missing_scoped_secret",
+                                startup_attempt=1,
+                                recycle_allowed=True,
+                                from_warm_pool=True,
+                                detail="Warm pool rollout candidate missing scoped session secret",
+                            )
+                        pool_sb.set_tags(
+                            {
+                                "pool": "agent_sdk",
+                                "status": "claimed",
+                                "role": "service",
+                                "app": "modal-backend",
+                                "port": str(SERVICE_PORT),
+                            }
+                        )
+                        return {
+                            "sandbox": pool_sb,
+                            "sandbox_id": sandbox_id,
+                            "sandbox_name": sandbox_name,
+                            "service_url": pool_url,
+                            "sandbox_session_secret": claimed_secret,
+                            "image_version": claimed_image_version or target_image_version,
+                            "source": "warm_pool",
+                            "claimed_from_pool": True,
+                        }
+                remove_from_pool(sandbox_id)
+
+    svc_vol = _get_persist_volume()
+    sandbox_app = modal.App.lookup(SANDBOX_APP_NAME, create_if_missing=True)
+    sandbox_session_secret = _generate_sandbox_session_secret()
+    sandbox_name = _controller_service_name(generation)
+    sandbox = modal.Sandbox.create(
+        "uvicorn",
+        "modal_backend.api.controller:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(SERVICE_PORT),
+        app=sandbox_app,
+        image=agent_sdk_image,
+        secrets=sandbox_runtime_secrets,
+        env=_sandbox_runtime_env(sandbox_session_secret),
+        workdir="/root/app",
+        name=sandbox_name,
+        encrypted_ports=_settings.service_ports,
+        volumes={"/data": svc_vol},
+        timeout=_settings.sandbox_timeout,
+        idle_timeout=_settings.sandbox_idle_timeout,
+        **_sandbox_resource_kwargs(),
+        verbose=True,
+    )
+    sandbox.set_tags({"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)})
+
+    deadline = time.time() + 30
+    service_url = None
+    while time.time() < deadline:
+        tunnels = sandbox.tunnels()
+        if SERVICE_PORT in tunnels and getattr(tunnels[SERVICE_PORT], "url", None):
+            service_url = tunnels[SERVICE_PORT].url
+            break
+        time.sleep(0.5)
+    if not service_url:
+        raise _SandboxStartupRetryableError(
+            sandbox=sandbox,
+            service_url=None,
+            phase="rollout_tunnel_discovery",
+            startup_attempt=1,
+            recycle_allowed=True,
+            detail="Failed to discover rollout candidate tunnel URL",
+        )
+
+    _wait_for_service_or_raise_readiness_timeout(
+        sandbox=sandbox,
+        service_url=service_url,
+        timeout_seconds=timeout_seconds,
+        phase="rollout_create_candidate",
+        startup_attempt=1,
+        recycle_allowed=True,
+    )
+    return {
+        "sandbox": sandbox,
+        "sandbox_id": sandbox.object_id,
+        "sandbox_name": sandbox_name,
+        "service_url": service_url,
+        "sandbox_session_secret": sandbox_session_secret,
+        "image_version": target_image_version,
+        "source": "created",
+        "claimed_from_pool": False,
+    }
+
+
+def _verify_rollout_candidate_sync(
+    *,
+    generation: int,
+    candidate: dict[str, object],
+) -> dict[str, object]:
+    sandbox_id = str(candidate["sandbox_id"])
+    service_url = str(candidate["service_url"])
+    sandbox_name = str(candidate.get("sandbox_name") or "").strip() or None
+    sandbox_session_secret = str(candidate.get("sandbox_session_secret") or "").strip()
+    image_version = str(candidate.get("image_version") or "").strip() or _current_image_version_id()
+    promotion_started_at = int(time.time())
+
+    service_record = _build_controller_service_record(
+        generation=generation,
+        sandbox_id=sandbox_id,
+        sandbox_name=sandbox_name,
+        service_url=service_url,
+        status="promoting",
+        sandbox_session_secret=sandbox_session_secret,
+        image_version=image_version,
+        source=str(candidate.get("source") or "created"),
+        promotion_started_at=promotion_started_at,
+    )
+    upsert_controller_service(service_record)
+
+    if not sandbox_session_secret:
+        raise RuntimeError("Rollout candidate missing scoped sandbox session secret metadata")
+
+    health_response = httpx.get(
+        f"{service_url.rstrip('/')}/health_check",
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+    if health_response.status_code != 200:
+        raise RuntimeError(
+            f"Rollout candidate /health_check returned {health_response.status_code}"
+        )
+
+    synthetic_session_id = _rollout_synthetic_session_id(generation)
+    headers: dict[str, str] = {}
+    _add_sandbox_auth_header(
+        headers=headers,
+        request_path="/query",
+        sandbox_id=sandbox_id,
+        session_id=synthetic_session_id,
+    )
+    query_response = httpx.post(
+        f"{service_url.rstrip('/')}/query",
+        json={
+            "question": "Return exactly: controller-rollout-ready",
+            "session_id": synthetic_session_id,
+            "trace_id": f"rollout:{generation}",
+        },
+        headers=headers,
+        timeout=httpx.Timeout(120.0, connect=30.0),
+    )
+    query_response.raise_for_status()
+    query_payload = query_response.json()
+    if not query_payload.get("ok"):
+        raise RuntimeError("Rollout candidate synthetic /query did not return ok=true")
+    if str(query_payload.get("session_id") or "").strip() != synthetic_session_id:
+        raise RuntimeError("Rollout candidate synthetic /query returned an unexpected session_id")
+    if not query_payload.get("messages"):
+        raise RuntimeError("Rollout candidate synthetic /query returned no messages")
+
+    verified_at = int(time.time())
+    update_controller_service(
+        sandbox_id,
+        {
+            "last_verified_readiness_at": verified_at,
+            "synthetic_session_id": synthetic_session_id,
+        },
+    )
+    return {
+        "verified_at": verified_at,
+        "synthetic_session_id": synthetic_session_id,
+    }
+
+
+def _abort_rollout_candidate(
+    *,
+    candidate: dict[str, object],
+    generation: int,
+    error: Exception,
+) -> None:
+    sandbox = candidate.get("sandbox")
+    sandbox_id = str(candidate.get("sandbox_id") or "").strip()
+    failure_reason = str(error)
+    if sandbox_id:
+        update_controller_service(
+            sandbox_id,
+            {
+                "generation": generation,
+                "status": "failed",
+                "failure_reason": failure_reason,
+                "failed_at": int(time.time()),
+            },
+        )
+        if candidate.get("claimed_from_pool"):
             try:
-                session_metadata: dict = {
-                    "id": sandbox.object_id,
-                    "url": service_url,
-                    "volume": PERSIST_VOL_NAME,
-                    "created_at": int(time.time()),
-                    "tags": {"role": "service", "app": "modal-backend", "port": str(SERVICE_PORT)},
-                    "status": "running",
-                }
-                if sandbox_session_secret:
-                    session_metadata["sandbox_session_secret"] = sandbox_session_secret
-                if restored_from_snapshot and session_id:
-                    session_metadata["restored_from_session"] = session_id
-                    session_metadata["restored_from_snapshot"] = True
-                await _run_blocking_modal_call(
-                    _set_store_value,
-                    SESSIONS,
-                    SANDBOX_NAME,
-                    session_metadata,
+                remove_from_pool(sandbox_id)
+            except Exception:
+                _logger.warning(
+                    "Failed to remove failed rollout candidate from warm pool",
+                    exc_info=True,
+                    extra={"sandbox_id": sandbox_id},
+                )
+    _terminate_sandbox_best_effort(
+        sandbox if isinstance(sandbox, modal.Sandbox) else None,
+        reason=f"rollout_candidate_failed:{failure_reason}",
+    )
+
+
+def _drain_controller_sandbox_sync(
+    sandbox_id: str,
+    expected_generation: int,
+    drain_deadline_at: int,
+) -> dict[str, object]:
+    """Wait for a draining controller to quiesce, then terminate it."""
+    call_id = _current_modal_function_call_id()
+    _logger.info(
+        "controller_drain.start",
+        extra={
+            "sandbox_id": sandbox_id,
+            "expected_generation": expected_generation,
+            "drain_deadline_at": drain_deadline_at,
+            "drain_call_id": call_id,
+        },
+    )
+    print(
+        "controller_drain.start "
+        f"drain_call_id={call_id or 'unknown'} "
+        f"sandbox_id={sandbox_id} "
+        f"expected_generation={expected_generation} "
+        f"drain_deadline_at={drain_deadline_at}"
+    )
+    while int(time.time()) < drain_deadline_at:
+        service = get_controller_service(sandbox_id)
+        if not service:
+            result = {
+                "ok": False,
+                "status": "missing",
+                "sandbox_id": sandbox_id,
+            }
+            if call_id:
+                result["drain_call_id"] = call_id
+            return result
+        if service.get("status") != "draining":
+            result = {
+                "ok": False,
+                "status": "aborted",
+                "sandbox_id": sandbox_id,
+                "reason": "service no longer draining",
+            }
+            if call_id:
+                result["drain_call_id"] = call_id
+            return result
+        inflight = get_controller_inflight(sandbox_id)
+        if int(inflight.get("total") or 0) == 0:
+            break
+        time.sleep(1)
+
+    inflight = get_controller_inflight(sandbox_id)
+    timed_out = int(inflight.get("total") or 0) > 0
+    try:
+        sandbox = modal.Sandbox.from_id(sandbox_id)
+        _terminate_sandbox(sandbox, wait_for_exit=True)
+    except modal_exc.NotFoundError:
+        pass
+    except modal_exc.SandboxTerminatedError:
+        pass
+
+    update_payload = {
+        "status": "terminated",
+        "terminated_at": int(time.time()),
+        "drain_timeout_reached": timed_out,
+        "inflight_at_termination": inflight,
+        "expected_generation": expected_generation,
+    }
+    if call_id:
+        update_payload["drain_execution_call_id"] = call_id
+    update_controller_service(sandbox_id, update_payload)
+    pointer = get_active_controller_pointer()
+    if pointer and pointer.get("rollback_target_sandbox_id") == sandbox_id:
+        cleared_pointer = dict(pointer)
+        cleared_pointer.pop("rollback_target_generation", None)
+        cleared_pointer.pop("rollback_target_sandbox_id", None)
+        set_active_controller_pointer(cleared_pointer)
+    print(
+        "controller_drain.complete "
+        f"drain_call_id={call_id or 'unknown'} "
+        f"sandbox_id={sandbox_id} "
+        f"timed_out={timed_out} "
+        f"inflight_total={int(inflight.get('total') or 0)}"
+    )
+    result = {
+        "ok": True,
+        "status": "terminated",
+        "sandbox_id": sandbox_id,
+        "drain_timeout_reached": timed_out,
+        "inflight": inflight,
+    }
+    if call_id:
+        result["drain_call_id"] = call_id
+    return result
+
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=function_runtime_secrets,
+    timeout=900,
+    **_retry_kwargs(),
+)
+def drain_controller_sandbox(
+    sandbox_id: str,
+    expected_generation: int,
+    drain_deadline_at: int,
+) -> dict[str, object]:
+    return _drain_controller_sandbox_sync(
+        sandbox_id=sandbox_id,
+        expected_generation=expected_generation,
+        drain_deadline_at=drain_deadline_at,
+    )
+
+
+def _schedule_controller_drain(
+    sandbox_id: str,
+    expected_generation: int,
+    drain_deadline_at: int,
+) -> dict[str, object] | None:
+    try:
+        call = drain_controller_sandbox.spawn(
+            sandbox_id,
+            expected_generation,
+            drain_deadline_at,
+        )
+        call_id = _function_call_id(call)
+        scheduled_at = int(time.time())
+        update_controller_service(
+            sandbox_id,
+            {
+                "drain_mode": "spawned",
+                "drain_call_id": call_id,
+                "drain_scheduled_at": scheduled_at,
+                "drain_expected_generation": expected_generation,
+                "drain_deadline_at": drain_deadline_at,
+            },
+        )
+        _logger.info(
+            "controller_drain.scheduled",
+            extra={
+                "sandbox_id": sandbox_id,
+                "expected_generation": expected_generation,
+                "drain_deadline_at": drain_deadline_at,
+                "drain_call_id": call_id,
+            },
+        )
+        print(
+            "controller_drain.scheduled "
+            f"drain_call_id={call_id or 'unknown'} "
+            f"sandbox_id={sandbox_id} "
+            f"expected_generation={expected_generation} "
+            f"drain_deadline_at={drain_deadline_at}"
+        )
+        return {
+            "ok": True,
+            "status": "scheduled",
+            "mode": "spawned",
+            "sandbox_id": sandbox_id,
+            "drain_call_id": call_id,
+            "scheduled_at": scheduled_at,
+        }
+    except Exception:
+        _logger.warning(
+            "Failed to spawn drain controller sandbox task; falling back to inline drain",
+            exc_info=True,
+            extra={"sandbox_id": sandbox_id},
+        )
+        try:
+            result = _drain_controller_sandbox_sync(
+                sandbox_id=sandbox_id,
+                expected_generation=expected_generation,
+                drain_deadline_at=drain_deadline_at,
+            )
+            return {
+                **result,
+                "mode": "inline",
+            }
+        except Exception as exc:
+            _logger.error(
+                "Inline drain controller sandbox fallback failed",
+                exc_info=True,
+                extra={"sandbox_id": sandbox_id},
+            )
+            try:
+                update_controller_service(
+                    sandbox_id,
+                    {
+                        "drain_mode": "inline",
+                        "drain_failure_reason": str(exc),
+                        "drain_failed_at": int(time.time()),
+                    },
                 )
             except Exception:
                 _logger.warning(
-                    "Failed to persist session metadata to Modal Dict (async)",
+                    "Failed to persist controller drain failure metadata",
                     exc_info=True,
-                    extra={"sandbox_id": sandbox.object_id if sandbox else None},
+                    extra={"sandbox_id": sandbox_id},
+                )
+            return {
+                "ok": False,
+                "status": "drain_failed",
+                "mode": "inline",
+                "sandbox_id": sandbox_id,
+                "error": str(exc),
+            }
+
+
+def _rollout_controller_sandbox_sync(*, reason: str) -> dict[str, object]:
+    operation_id = f"rollout:{pysecrets.token_hex(8)}"
+    lock = acquire_rollout_lock(operation_id)
+    if not lock.get("acquired"):
+        raise RuntimeError(
+            f"Controller rollout already in progress (operation_id={lock['entry'].get('operation_id')})"
+        )
+
+    try:
+        current_pointer = _ensure_active_pointer_from_registry()
+        current_service = None
+        current_generation = 0
+        drain_status: dict[str, object] | None = None
+        if current_pointer:
+            current_generation = int(current_pointer.get("active_generation") or 0)
+            current_service = get_controller_service(str(current_pointer.get("sandbox_id") or ""))
+            if current_service is None:
+                current_service = {
+                    "generation": current_generation,
+                    "sandbox_id": current_pointer.get("sandbox_id"),
+                    "sandbox_name": current_pointer.get("sandbox_name"),
+                    "service_url": current_pointer.get("service_url"),
+                    "image_version": current_pointer.get("image_version"),
+                    "status": "active",
+                }
+                upsert_controller_service(dict(current_service))
+
+        next_generation = current_generation + 1 if current_generation > 0 else 1
+        candidate = _prepare_rollout_candidate_sync(next_generation)
+        try:
+            verification = _verify_rollout_candidate_sync(
+                generation=next_generation,
+                candidate=candidate,
+            )
+        except Exception as exc:
+            _abort_rollout_candidate(candidate=candidate, generation=next_generation, error=exc)
+            raise
+
+        promoted_at = int(time.time())
+        sandbox = candidate["sandbox"]
+        sandbox_id = str(candidate["sandbox_id"])
+        sandbox_name = str(candidate.get("sandbox_name") or "").strip() or None
+        service_url = str(candidate["service_url"])
+        image_version = (
+            str(candidate.get("image_version") or "").strip() or _current_image_version_id()
+        )
+        expected_previous_sandbox_id = (
+            str(current_pointer.get("sandbox_id") or "").strip() if current_pointer else None
+        )
+
+        try:
+            pointer = _persist_active_controller_pointer(
+                generation=next_generation,
+                sandbox_id=sandbox_id,
+                sandbox_name=sandbox_name,
+                service_url=service_url,
+                image_version=image_version,
+                last_verified_readiness_at=int(verification["verified_at"]),
+                promoted_at=promoted_at,
+                rollback_target=current_service,
+                rollout_operation_id=operation_id,
+                expected_previous_generation=current_generation,
+                expected_previous_sandbox_id=expected_previous_sandbox_id,
+            )
+        except Exception as exc:
+            _abort_rollout_candidate(candidate=candidate, generation=next_generation, error=exc)
+            raise
+        update_controller_service(
+            sandbox_id,
+            {
+                "status": "active",
+                "promoted_at": promoted_at,
+                "last_verified_readiness_at": int(verification["verified_at"]),
+                "promotion_reason": reason,
+            },
+        )
+        if candidate.get("claimed_from_pool"):
+            remove_from_pool(sandbox_id)
+            try:
+                replenish_warm_pool.spawn()
+            except Exception:
+                _logger.warning(
+                    "Failed to spawn warm pool replenishment after rollout", exc_info=True
                 )
 
-            return sandbox, service_url
-        except (_SandboxReadinessTimeoutError, _SandboxStartupRetryableError) as timeout_exc:
-            await _handle_readiness_timeout_async(timeout_exc)
-            if startup_attempt < _SANDBOX_STARTUP_MAX_ATTEMPTS:
-                _logger.warning(
-                    "Retrying background sandbox startup after retryable failure (async)",
-                    extra={
-                        "startup_attempt": startup_attempt,
-                        "next_attempt": startup_attempt + 1,
-                        "phase": timeout_exc.phase,
-                        "sandbox_id": timeout_exc.sandbox_id,
+        drain_deadline_at = promoted_at + max(1, _settings.controller_drain_timeout_seconds)
+        if current_service and current_pointer:
+            old_sandbox_id = str(current_pointer.get("sandbox_id") or "").strip()
+            if old_sandbox_id:
+                update_controller_service(
+                    old_sandbox_id,
+                    {
+                        "status": "draining",
+                        "drain_started_at": promoted_at,
+                        "drain_deadline_at": drain_deadline_at,
+                        "replaced_by_generation": next_generation,
                     },
                 )
-                continue
-            raise TimeoutError(
-                "Background sandbox startup failed after "
-                f"{_SANDBOX_STARTUP_MAX_ATTEMPTS} attempts"
-            ) from timeout_exc
+                drain_status = _schedule_controller_drain(
+                    old_sandbox_id,
+                    current_generation,
+                    drain_deadline_at,
+                )
 
-    raise RuntimeError("Unreachable background sandbox startup state (async)")
+        _set_background_sandbox_state(
+            sandbox if isinstance(sandbox, modal.Sandbox) else None,
+            service_url,
+            generation=int(pointer.get("active_generation") or next_generation),
+        )
+        drain_ok = drain_status is None or bool(drain_status.get("ok"))
+        result = {
+            "ok": drain_ok,
+            "status": "promoted" if drain_ok else "promoted_with_drain_failure",
+            "reason": reason,
+            "active_generation": pointer.get("active_generation"),
+            "sandbox_id": sandbox_id,
+            "sandbox_name": sandbox_name,
+            "service_url": service_url,
+            "image_version": image_version,
+            "last_verified_readiness_at": verification["verified_at"],
+            "promoted_at": promoted_at,
+            "rollback_target_sandbox_id": pointer.get("rollback_target_sandbox_id"),
+        }
+        if drain_status is not None:
+            result["drain_status"] = drain_status
+            if not drain_ok:
+                result["error"] = "controller drain failed after promotion"
+        return result
+    finally:
+        release_rollout_lock(operation_id)
+
+
+def _prewarm_target_is_admissible(sandbox_id: str | None) -> bool:
+    admission = get_controller_request_admission(sandbox_id=sandbox_id)
+    return bool(admission.get("admissible"))
+
+
+async def _prewarm_target_is_admissible_aio(sandbox_id: str | None) -> bool:
+    return await _run_blocking_modal_call(_prewarm_target_is_admissible, sandbox_id)
+
+
+def _controller_route_generation(sandbox_id: str | None) -> int | None:
+    service = get_controller_service(sandbox_id)
+    if not isinstance(service, dict):
+        return None
+    generation = int(service.get("generation") or 0)
+    return generation or None
+
+
+async def _controller_route_generation_aio(sandbox_id: str | None) -> int | None:
+    return await _run_blocking_modal_call(_controller_route_generation, sandbox_id)
+
+
+def _admit_fresh_controller_request(
+    *,
+    sandbox: modal.Sandbox,
+    service_url: str,
+    session_id: str | None,
+    request_kind: Literal["query", "query_stream"],
+    request_id: str,
+) -> tuple[modal.Sandbox, str]:
+    current_sandbox = sandbox
+    current_url = service_url
+    last_error: Exception | None = None
+
+    for attempt in range(2):
+        route_generation = _controller_route_generation(
+            current_sandbox.object_id if current_sandbox else None
+        )
+        try:
+            start_controller_request(
+                sandbox_id=current_sandbox.object_id,
+                request_id=request_id,
+                session_id=session_id,
+                request_kind=request_kind,
+                generation=route_generation,
+                require_active=True,
+            )
+            return current_sandbox, current_url
+        except Exception as exc:
+            last_error = exc
+            if attempt == 1:
+                break
+            current_sandbox, current_url = get_or_start_background_sandbox(session_id=session_id)
+
+    raise RuntimeError(
+        "Controller route changed before request admission. "
+        f"Retry the request. detail={last_error}"
+    )
+
+
+async def _admit_fresh_controller_request_aio(
+    *,
+    sandbox: modal.Sandbox,
+    service_url: str,
+    session_id: str | None,
+    request_kind: Literal["query", "query_stream"],
+    request_id: str,
+    prewarm_claimed: dict | None,
+    warm_id: str | None,
+) -> tuple[modal.Sandbox, str, dict | None]:
+    current_sandbox = sandbox
+    current_url = service_url
+    current_prewarm = prewarm_claimed
+    last_error: Exception | None = None
+
+    for attempt in range(2):
+        route_generation = await _controller_route_generation_aio(
+            current_sandbox.object_id if current_sandbox else None
+        )
+        try:
+            await _run_blocking_modal_call(
+                start_controller_request,
+                sandbox_id=current_sandbox.object_id,
+                request_id=request_id,
+                session_id=session_id,
+                request_kind=request_kind,
+                generation=route_generation,
+                require_active=True,
+            )
+            return current_sandbox, current_url, current_prewarm
+        except Exception as exc:
+            last_error = exc
+            if current_prewarm and warm_id:
+                await _run_blocking_modal_call(
+                    mark_prewarm_failed,
+                    warm_id,
+                    f"Pre-warm target became stale before request admission: {exc}",
+                )
+            if attempt == 1:
+                break
+            current_sandbox, current_url = await get_or_start_background_sandbox_aio(
+                session_id=session_id
+            )
+            current_prewarm = None
+
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Controller route changed before request admission. "
+            f"Retry the request. detail={last_error}"
+        ),
+    )
+
+
+async def _resolve_controller_route_for_session_aio(
+    session_id: str | None,
+) -> tuple[modal.Sandbox, str]:
+    session_routes = await _run_blocking_modal_call(list_session_controller_routes, session_id)
+    routable_routes: list[tuple[int, int, dict[str, object], dict[str, object]]] = []
+    for session_route in session_routes:
+        sandbox_id = str(session_route.get("sandbox_id") or "").strip()
+        if not sandbox_id:
+            continue
+        service = await _run_blocking_modal_call(get_controller_service, sandbox_id)
+        if not isinstance(service, dict):
+            continue
+        admission = await _run_blocking_modal_call(
+            get_controller_request_admission,
+            sandbox_id=sandbox_id,
+            allow_draining=True,
+        )
+        if not admission.get("admissible"):
+            continue
+        service_url = str(service.get("service_url") or "").strip()
+        if not service_url:
+            continue
+        status = str(service.get("status") or "").strip()
+        priority = 0 if status == "draining" else 1
+        active_requests = max(0, int(session_route.get("active_requests") or 0))
+        routable_routes.append((priority, -active_requests, dict(session_route), service))
+
+    for _, _, session_route, service in sorted(
+        routable_routes,
+        key=lambda item: (
+            item[0],
+            item[1],
+            -int(item[2].get("updated_at") or 0),
+            str(item[2].get("sandbox_id") or ""),
+        ),
+    ):
+        sandbox_id = str(session_route.get("sandbox_id") or "").strip()
+        service_url = str(service.get("service_url") or "").strip()
+        try:
+            sb = await modal.Sandbox.from_id.aio(sandbox_id)
+            await _run_blocking_modal_call(
+                _resolve_sandbox_session_secret,
+                sandbox_id=sandbox_id,
+                secret=str(service.get("sandbox_session_secret") or "").strip() or None,
+            )
+            return sb, service_url
+        except (modal_exc.NotFoundError, modal_exc.SandboxTerminatedError):
+            continue
+    return await get_or_start_background_sandbox_aio(session_id=session_id)
 
 
 @app.cls(
@@ -4581,28 +5958,44 @@ def process_job_queue() -> None:
         )
         try:
             sb, url = get_or_start_background_sandbox()
+            request_id = _controller_request_id("job-query")
+            sb, url = _admit_fresh_controller_request(
+                sandbox=sb,
+                service_url=url,
+                session_id=record.get("session_id"),
+                request_kind="query",
+                request_id=request_id,
+            )
             update_job(job_id, {"sandbox_id": sb.object_id})
             _logger.info(
                 "job.start",
                 extra={"job_id": job_id, "attempt": attempt, "sandbox_id": sb.object_id},
             )
-            headers: dict[str, str] = {}
-            if settings.enforce_connect_token:
-                creds = sb.create_connect_token(user_metadata={"job_id": job_id})
-                headers = {"Authorization": f"Bearer {creds.token}"}
-            _add_sandbox_auth_header(
-                headers=headers,
-                request_path="/query",
-                sandbox_id=sb.object_id,
-                session_id=record.get("session_id"),
-            )
-            r = httpx.post(
-                f"{url.rstrip('/')}/query",
-                json={"question": question, "job_id": job_id},
-                headers=headers,
-                timeout=httpx.Timeout(120.0, connect=30.0),
-            )
-            r.raise_for_status()
+            try:
+                headers: dict[str, str] = {}
+                if settings.enforce_connect_token:
+                    creds = sb.create_connect_token(user_metadata={"job_id": job_id})
+                    headers = {"Authorization": f"Bearer {creds.token}"}
+                _add_sandbox_auth_header(
+                    headers=headers,
+                    request_path="/query",
+                    sandbox_id=sb.object_id,
+                    session_id=record.get("session_id"),
+                )
+                r = httpx.post(
+                    f"{url.rstrip('/')}/query",
+                    json={"question": question, "job_id": job_id},
+                    headers=headers,
+                    timeout=httpx.Timeout(120.0, connect=30.0),
+                )
+                r.raise_for_status()
+            finally:
+                finish_controller_request(
+                    sandbox_id=sb.object_id,
+                    request_id=request_id,
+                    session_id=record.get("session_id"),
+                    request_kind="query",
+                )
             result = r.json()
             _reload_persist_volume()
             manifest = _build_artifact_manifest(job_id)
@@ -4864,21 +6257,57 @@ def deliver_webhook(job_id: str, event: str) -> None:
 @app.function(
     image=agent_sdk_image,
     secrets=function_runtime_secrets,
+    timeout=900,
     **_retry_kwargs(),
 )
-def terminate_service_sandbox() -> dict:
-    """Terminate the background sandbox to flush writes to the volume.
+def rollout_service_sandbox(reason: str = "manual_rollout") -> dict:
+    """Create, verify, promote, and drain a replacement controller sandbox."""
+    try:
+        return _rollout_controller_sandbox_sync(reason=reason)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Unexpected error rolling out controller sandbox")
+        return {
+            "ok": False,
+            "error": str(exc),
+            "type": exc.__class__.__name__,
+        }
 
-    Sandbox writes are synced when the sandbox terminates. If volume commits are enabled
-    (via `volume_commit_interval`), writes may already be persisted without termination.
-    Call this function after the agent has created files to ensure they are persisted.
+
+@app.function(
+    image=agent_sdk_image,
+    secrets=function_runtime_secrets,
+    timeout=900,
+    **_retry_kwargs(),
+)
+def terminate_service_sandbox(immediate: bool = False) -> dict:
+    """Perform a safe controller recycle by default, or force immediate termination.
+
+    The default production-safe behavior is an A->B rollout:
+    create a private replacement controller, verify it, flip the active pointer,
+    drain the previous controller, and terminate the drained sandbox later.
+
+    Set ``immediate=True`` only for emergency teardown when graceful cutover is not required.
 
     Returns:
         Dict with termination status
     """
+    if not immediate:
+        return rollout_service_sandbox.local(reason="terminate_service_sandbox")
+
     try:
         sb, _ = get_or_start_background_sandbox()
         _terminate_sandbox(sb, wait_for_exit=True)
+        pointer = get_active_controller_pointer()
+        if pointer and pointer.get("sandbox_id") == getattr(sb, "object_id", None):
+            clear_active_controller_pointer()
+        update_controller_service(
+            getattr(sb, "object_id", ""),
+            {
+                "status": "terminated",
+                "terminated_at": int(time.time()),
+                "termination_reason": "immediate_terminate_service_sandbox",
+            },
+        )
         _clear_background_sandbox_state(expected_sandbox_id=getattr(sb, "object_id", None))
         return {"ok": True, "message": "Sandbox terminated, writes flushed to volume"}
     except modal_exc.NotFoundError as e:

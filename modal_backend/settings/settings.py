@@ -321,6 +321,27 @@ class Settings(BaseSettings):
         default=True,
         description="Track image versions to invalidate old warm pool sandboxes on deploy",
     )
+    controller_rollout_store_name: str = Field(
+        default="controller-rollout-store",
+        description=(
+            "Modal Dict name for authoritative controller rollout state. "
+            "Stores the active pointer, per-service lifecycle metadata, inflight counts, and session routes."
+        ),
+    )
+    controller_rollout_lock_max_age_seconds: int = Field(
+        default=900,
+        description=(
+            "Maximum age for the controller rollout lock before a subsequent rollout may treat it as stale. "
+            "Used to recover from interrupted promotion attempts."
+        ),
+    )
+    controller_drain_timeout_seconds: int = Field(
+        default=300,
+        description=(
+            "Maximum time to wait for a draining controller sandbox to finish in-flight work "
+            "before forcing termination."
+        ),
+    )
 
     # Session cancellation settings (stop/cancel mid-execution)
     session_cancellation_store_name: str = Field(

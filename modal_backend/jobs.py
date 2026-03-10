@@ -1161,6 +1161,12 @@ def delete_session_snapshot(session_id: str) -> bool:
 #   - Multiple callers may race; only one succeeds per sandbox
 
 WARM_POOL = modal.Dict.from_name(_settings.warm_pool_store_name, create_if_missing=True)
+_WARM_POOL_CLAIM_LOCK_PREFIX = "__claim_lock__:"
+_WARM_POOL_CLAIM_LOCK_MAX_AGE_SECONDS = 60
+
+
+def _warm_pool_claim_lock_key(sandbox_id: str) -> str:
+    return f"{_WARM_POOL_CLAIM_LOCK_PREFIX}{sandbox_id}"
 
 
 def generate_pool_sandbox_name() -> str:
@@ -1178,6 +1184,7 @@ def register_warm_sandbox(
     sandbox_id: str,
     sandbox_name: str,
     sandbox_session_secret: str | None = None,
+    image_version: str | None = None,
 ) -> dict[str, Any]:
     """Register a new sandbox in the warm pool.
 
@@ -1207,6 +1214,7 @@ def register_warm_sandbox(
         "sandbox_id": sandbox_id,
         "sandbox_name": sandbox_name,
         "sandbox_session_secret": sandbox_session_secret,
+        "image_version": image_version,
         "status": "warm",
         "created_at": now,
         "claimed_at": None,
@@ -1259,33 +1267,53 @@ def claim_warm_sandbox(
     """
     now = int(time.time())
 
-    # Get all pool entries
-    # Note: Modal Dict doesn't support atomic iteration with updates,
-    # so we iterate over keys and handle races
     try:
         all_entries = list(WARM_POOL.items())
     except Exception:
         return None
 
     for sandbox_id, entry in all_entries:
+        if not isinstance(sandbox_id, str) or sandbox_id.startswith(_WARM_POOL_CLAIM_LOCK_PREFIX):
+            continue
         if entry.get("status") != "warm":
             continue
 
-        # Attempt to claim this sandbox
-        # Re-fetch to minimize race window
-        current = WARM_POOL.get(sandbox_id)
-        if not current or current.get("status") != "warm":
+        lock_key = _warm_pool_claim_lock_key(sandbox_id)
+        existing_lock = WARM_POOL.get(lock_key)
+        if isinstance(existing_lock, dict):
+            acquired_at = int(existing_lock.get("acquired_at") or 0)
+            if now - acquired_at > _WARM_POOL_CLAIM_LOCK_MAX_AGE_SECONDS:
+                try:
+                    WARM_POOL.pop(lock_key)
+                except KeyError:
+                    pass
+
+        lock_entry = {
+            "sandbox_id": sandbox_id,
+            "session_id": session_id,
+            "acquired_at": now,
+        }
+        if not WARM_POOL.put(lock_key, lock_entry, skip_if_exists=True):
             continue
 
-        # Update to claimed status
-        claimed_entry = {
-            **current,
-            "status": "claimed",
-            "claimed_at": now,
-            "claimed_by": session_id,
-        }
-        WARM_POOL[sandbox_id] = claimed_entry
-        return claimed_entry
+        try:
+            current = WARM_POOL.get(sandbox_id)
+            if not current or current.get("status") != "warm":
+                continue
+
+            claimed_entry = {
+                **current,
+                "status": "claimed",
+                "claimed_at": now,
+                "claimed_by": session_id,
+            }
+            WARM_POOL[sandbox_id] = claimed_entry
+            return claimed_entry
+        finally:
+            try:
+                WARM_POOL.pop(lock_key)
+            except KeyError:
+                pass
 
     return None
 
@@ -1325,6 +1353,10 @@ def release_warm_sandbox(sandbox_id: str) -> bool:
         "claimed_by": None,
     }
     WARM_POOL[sandbox_id] = updated
+    try:
+        WARM_POOL.pop(_warm_pool_claim_lock_key(sandbox_id))
+    except KeyError:
+        pass
     return True
 
 
@@ -1348,6 +1380,10 @@ def remove_from_pool(sandbox_id: str) -> bool:
     """
     try:
         del WARM_POOL[sandbox_id]
+        try:
+            WARM_POOL.pop(_warm_pool_claim_lock_key(sandbox_id))
+        except KeyError:
+            pass
         return True
     except KeyError:
         return False
@@ -1366,7 +1402,11 @@ def get_warm_pool_entries() -> list[dict[str, Any]]:
         ```
     """
     try:
-        return [entry for _, entry in WARM_POOL.items()]
+        return [
+            entry
+            for key, entry in WARM_POOL.items()
+            if isinstance(key, str) and not key.startswith(_WARM_POOL_CLAIM_LOCK_PREFIX)
+        ]
     except Exception:
         return []
 
