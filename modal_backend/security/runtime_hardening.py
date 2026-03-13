@@ -17,6 +17,8 @@ SENSITIVE_ENV_KEYS = (
 
 @dataclass(slots=True)
 class RuntimeHardeningReport:
+    """Structured report describing runtime hardening actions and observations."""
+
     initial_uid: int
     final_uid: int
     initial_gid: int
@@ -28,6 +30,7 @@ class RuntimeHardeningReport:
     warnings: list[str]
 
     def model_dump(self) -> dict[str, object]:
+        """Return a JSON-serializable representation of the report."""
         return asdict(self)
 
 
@@ -62,7 +65,11 @@ def _parse_writable_roots(agent_fs_root: str) -> list[str]:
 
 
 def apply_runtime_hardening(agent_fs_root: str) -> RuntimeHardeningReport:
-    """Apply runtime hardening guards and return structured verification metadata."""
+    """Apply runtime hardening guards and return structured verification metadata.
+
+    Returns:
+        A report describing privilege changes, env scrubbing, and writable-path checks.
+    """
     warnings: list[str] = []
     scrubbed: list[str] = []
 

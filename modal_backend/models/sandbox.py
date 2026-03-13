@@ -37,11 +37,24 @@ class QueryBody(BaseSchema):
     @field_validator("job_id")
     @classmethod
     def validate_job_id(cls, value: str | None) -> str | None:
+        """Normalize job IDs to canonical UUID strings.
+
+        Returns:
+            The canonical UUID string, or `None` when the field is absent.
+        """
         return _validate_job_id(value)
 
     @field_validator("question")
     @classmethod
     def validate_question(cls, value: str) -> str:
+        """Reject oversized prompts while preserving empty-string compatibility.
+
+        Returns:
+            The original prompt when it fits within the boundary limit.
+
+        Raises:
+            ValueError: If the prompt exceeds the supported maximum size.
+        """
         if len(value) > 20_000:
             raise ValueError("question exceeds maximum length")
         return value
@@ -49,6 +62,14 @@ class QueryBody(BaseSchema):
     @field_validator("trace_id")
     @classmethod
     def validate_trace_id(cls, value: str | None) -> str | None:
+        """Restrict trace IDs to the documented safe character set.
+
+        Returns:
+            The validated trace identifier, or `None` when the field is absent.
+
+        Raises:
+            ValueError: If the trace identifier falls outside the documented pattern.
+        """
         if value is None:
             return None
         if not _TRACE_ID_RE.match(value):
@@ -78,6 +99,11 @@ class WarmRequest(BaseSchema):
     @field_validator("job_id")
     @classmethod
     def validate_job_id(cls, value: str | None) -> str | None:
+        """Normalize optional job IDs to canonical UUID strings.
+
+        Returns:
+            The canonical UUID string, or `None` when the field is absent.
+        """
         return _validate_job_id(value)
 
 

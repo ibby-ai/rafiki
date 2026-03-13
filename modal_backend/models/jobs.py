@@ -397,6 +397,7 @@ class JobStatusResponse(BaseSchema):
             "attempts": 1
         }
         ```
+
     """
 
     ok: bool = Field(default=True, description="Always true for valid job lookups")
@@ -491,6 +492,7 @@ class WorkspaceMetadata(BaseSchema):
         status: Workspace status ("active" or "deleted")
         deleted_at: Unix timestamp when workspace was deleted (None if active)
         job_status: Status of the associated job (queued, running, complete, failed, canceled)
+
     """
 
     job_id: str = Field(description="UUID of the job")
@@ -519,6 +521,7 @@ class WorkspaceCleanupRequest(BaseSchema):
         status_filter: Only clean up workspaces for jobs with these statuses.
                       If None, uses default (complete, failed, canceled).
         dry_run: If True, returns what would be deleted without actually deleting.
+
     """
 
     older_than_days: int | None = Field(
@@ -551,6 +554,7 @@ class WorkspaceCleanupResponse(BaseSchema):
         bytes_freed: Total bytes freed (or would be freed in dry-run)
         deleted_job_ids: List of job IDs whose workspaces were deleted
         errors: List of error messages encountered during cleanup
+
     """
 
     ok: bool = Field(default=True, description="True if cleanup completed successfully")
@@ -579,6 +583,7 @@ class WorkspaceRetentionStatusResponse(BaseSchema):
         total_size_bytes: Total size of all active workspaces
         oldest_workspace_age_days: Age in days of the oldest active workspace
         workspaces_pending_cleanup: Number of workspaces eligible for cleanup
+
     """
 
     enabled: bool = Field(description="Whether workspace retention is enabled")
@@ -603,6 +608,7 @@ class WorkspaceDeleteResponse(BaseSchema):
         job_id: UUID of the job whose workspace was deleted
         deleted: True if workspace was actually deleted (False if already deleted/not found)
         bytes_freed: Number of bytes freed by deletion
+
     """
 
     ok: bool = Field(default=True, description="True if operation completed successfully")

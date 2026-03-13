@@ -118,6 +118,7 @@ def build_webhook_payload(event: str, job_status: JobStatusResponse) -> dict[str
                 ...
             }
         }
+
     """
     return {
         "event": event,
@@ -150,6 +151,7 @@ def serialize_payload(payload: dict[str, Any]) -> str:
         >>> payload = {"event": "job.complete", "job": {"id": "123"}}
         >>> serialize_payload(payload)
         '{"event":"job.complete","job":{"id":"123"}}'
+
     """
     return json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=True)
 
@@ -196,6 +198,7 @@ def sign_payload(secret: str, timestamp: int, payload: str) -> str:
         Recipients must reconstruct the same message and compute their own signature
         using the shared secret, then compare using hmac.compare_digest() to prevent
         timing attacks.
+
     """
     message = f"{timestamp}.{payload}".encode()
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
@@ -276,6 +279,7 @@ def build_headers(
             "Content-Type": "application/json",
             "X-Custom": "value"
         }
+
     """
     headers = {"Content-Type": "application/json"}
     custom_headers = config.get("headers") or {}

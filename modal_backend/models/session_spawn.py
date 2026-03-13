@@ -44,6 +44,7 @@ class SpawnSessionRequest(BaseSchema):
         timeout_seconds: Maximum time the child session can run.
                         Prevents runaway sessions from consuming resources.
         allowed_tools: Comma-separated list of tools the child can use.
+
     """
 
     task: str = Field(description="Description of what the child session should accomplish")
@@ -75,6 +76,7 @@ class SpawnSessionResponse(BaseSchema):
         child_id: UUID of the spawned child job for tracking
         status: Initial status (always "queued" on successful spawn)
         error: Error message if spawn failed
+
     """
 
     ok: bool = Field(default=True, description="True if spawn was successful")
@@ -99,6 +101,7 @@ class ChildSessionStatus(BaseSchema):
         completed_at: Unix timestamp when finished (if complete/failed)
         duration_ms: Execution duration in milliseconds (if complete)
         error: Error message if status is "failed"
+
     """
 
     ok: bool = Field(default=True, description="True if status check was successful")
@@ -132,6 +135,7 @@ class ChildSessionResult(BaseSchema):
         summary: Summary information from the agent run
         artifacts: List of artifact paths created by the child
         error: Error message if retrieval failed or child failed
+
     """
 
     ok: bool = Field(default=True, description="True if result retrieval was successful")
@@ -159,6 +163,7 @@ class ChildSessionEntry(BaseSchema):
         status: Current status in the job lifecycle
         created_at: Unix timestamp when child was created
         completed_at: Unix timestamp when finished (if applicable)
+
     """
 
     child_id: str = Field(description="UUID of the child session")
@@ -183,6 +188,7 @@ class ChildSessionListResponse(BaseSchema):
         active: Number of children still running
         completed: Number of children that completed successfully
         failed: Number of children that failed
+
     """
 
     ok: bool = Field(default=True, description="True if list retrieval was successful")

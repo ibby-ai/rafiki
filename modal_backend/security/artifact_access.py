@@ -21,6 +21,7 @@ class ArtifactTokenError(ValueError):
     status_code: int
 
     def __init__(self, message: str, status_code: int = 401):
+        """Store a stable HTTP status code alongside the validation error."""
         super().__init__(message)
         self.status_code = status_code
 
@@ -39,6 +40,11 @@ def build_artifact_access_token(
     token_id: str | None = None,
     now_ms: int | None = None,
 ) -> str:
+    """Create a signed artifact token scoped to one session, job, and path.
+
+    Returns:
+        A signed artifact-access token for the requested download scope.
+    """
     issued_at = int(now_ms if now_ms is not None else time.time() * 1000)
     expires_at = issued_at + max(1, ttl_ms)
     artifact_hash = hashlib.sha256(f"{job_id}:{artifact_path}".encode()).hexdigest()[:32]
@@ -69,6 +75,14 @@ def verify_artifact_access_token(
     skew_ms: int = 60_000,
     is_revoked: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
+    """Verify a signed artifact token against the expected download scope.
+
+    Returns:
+        The validated token payload when the download scope matches.
+
+    Raises:
+        ArtifactTokenError: If the token is malformed, expired, revoked, or out of scope.
+    """
     token = raw_token.strip()
     parts = token.split(".")
     if len(parts) != 2:
@@ -95,11 +109,15 @@ def verify_artifact_access_token(
     if payload.get("service") != ARTIFACT_ACCESS_SERVICE:
         raise ArtifactTokenError("Invalid artifact token service", 401)
 
+    issued_at_raw = payload.get("issued_at")
+    expires_at_raw = payload.get("expires_at")
     try:
-        issued_at = int(payload.get("issued_at"))
-        expires_at = int(payload.get("expires_at"))
+        issued_at = int(issued_at_raw) if issued_at_raw is not None else None
+        expires_at = int(expires_at_raw) if expires_at_raw is not None else None
     except (TypeError, ValueError) as exc:
         raise ArtifactTokenError("Invalid artifact token timestamps", 401) from exc
+    if issued_at is None or expires_at is None:
+        raise ArtifactTokenError("Invalid artifact token timestamps", 401)
 
     current_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     if issued_at > current_ms + skew_ms:

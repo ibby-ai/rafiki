@@ -1960,6 +1960,7 @@ async def submit_job(body: JobSubmitRequest) -> JobSubmitResponse:
             enqueue_job,
             body.question,
             job_id=body.job_id,
+            session_id=body.session_id,
             tenant_id=body.tenant_id,
             user_id=body.user_id,
             schedule_at=body.schedule_at,

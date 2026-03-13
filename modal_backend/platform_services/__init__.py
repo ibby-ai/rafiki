@@ -1,3 +1,3 @@
 """Cross-cutting service helpers."""
 
-__all__ = []
+__all__: list[str] = []

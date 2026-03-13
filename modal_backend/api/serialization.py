@@ -15,7 +15,11 @@ def _safe_scalar(value: Any) -> str | int | float | bool | None:
 
 
 def serialize_content_block(block: Any) -> dict[str, Any]:
-    """Convert a content block into a JSON-serializable dict."""
+    """Convert a content block into a JSON-serializable dict.
+
+    Returns:
+        A provider-neutral dictionary representation of the content block.
+    """
     if isinstance(block, dict):
         block_type = block.get("type")
         if block_type == "text":
@@ -60,6 +64,12 @@ def serialize_message(message: Any) -> dict[str, Any]:
     """Convert a runtime message into a JSON-serializable dict.
 
     For OpenAI migration we keep wire compatibility by accepting already-serialized dicts.
+
+    Returns:
+        A JSON-serializable message payload.
+
+    Raises:
+        TypeError: If the message cannot be serialized from the supported shapes.
     """
     if isinstance(message, dict):
         msg = dict(message)
@@ -86,7 +96,11 @@ def serialize_message(message: Any) -> dict[str, Any]:
 
 
 def iter_text_blocks(messages: Iterable[Any]) -> list[str]:
-    """Extract text blocks from assistant messages in order."""
+    """Extract text blocks from assistant messages in order.
+
+    Returns:
+        A list of assistant text fragments in wire order.
+    """
     parts: list[str] = []
     for message in messages:
         msg = serialize_message(message)
@@ -109,7 +123,11 @@ def build_final_summary(
     result_message: dict[str, Any] | None,
     final_text: str | None,
 ) -> dict[str, Any]:
-    """Build a consistent summary for the completed agent run."""
+    """Build a consistent summary for the completed agent run.
+
+    Returns:
+        A normalized summary dictionary for the final query response.
+    """
     summary: dict[str, Any] = {
         "text": final_text,
         "is_complete": result_message is not None,

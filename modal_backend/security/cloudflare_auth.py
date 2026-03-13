@@ -8,9 +8,10 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from modal_backend.settings.settings import get_settings
@@ -42,6 +43,11 @@ def build_internal_token(
     ttl_ms: int = 300_000,
     extra_claims: dict[str, Any] | None = None,
 ) -> str:
+    """Create a signed internal-auth token for Worker or gateway traffic.
+
+    Returns:
+        A signed token string for internal service-to-service requests.
+    """
     now_ms = int(time.time() * 1000)
     payload: dict[str, Any] = {
         "service": service,
@@ -63,6 +69,11 @@ def build_scoped_sandbox_token(
     request_path: str,
     ttl_ms: int,
 ) -> str:
+    """Create a short-lived scoped token for gateway-to-sandbox requests.
+
+    Returns:
+        A signed token restricted to the target sandbox and request path.
+    """
     return build_internal_token(
         secret,
         service=SANDBOX_SESSION_AUTH_SERVICE,
@@ -76,7 +87,14 @@ def build_scoped_sandbox_token(
 
 
 def verify_internal_token(raw_token: str) -> dict[str, Any]:
-    """Verify internal auth token from Cloudflare Worker."""
+    """Verify internal auth token from Cloudflare Worker.
+
+    Returns:
+        The validated token payload.
+
+    Raises:
+        HTTPException: If the token is missing required claims, expired, or unsigned.
+    """
     token = raw_token.strip()
     if token.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Invalid token format")
@@ -138,6 +156,14 @@ def verify_scoped_sandbox_token(
     expected_sandbox_id: str | None = None,
     max_ttl_seconds: int = 120,
 ) -> dict[str, Any]:
+    """Verify a sandbox-scoped token against the target path and sandbox id.
+
+    Returns:
+        The validated scoped token payload.
+
+    Raises:
+        HTTPException: If the token is malformed, expired, or scoped to another path or sandbox.
+    """
     token = raw_token.strip()
     if token.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Invalid token format")
@@ -201,8 +227,15 @@ def verify_scoped_sandbox_token(
     return payload
 
 
-async def internal_auth_middleware(request: Request, call_next):  # type: ignore[override]
-    """Verify internal auth headers for Cloudflare requests."""
+async def internal_auth_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """Verify internal auth headers for Cloudflare requests.
+
+    Returns:
+        The downstream response when auth succeeds, or a JSON error response when it fails.
+    """
     if request.method == "OPTIONS":
         return await call_next(request)
 
