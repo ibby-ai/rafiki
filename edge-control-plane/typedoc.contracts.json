@@ -1,0 +1,24 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "src/auth/internal-auth.ts",
+    "src/auth/session-auth.ts",
+    "src/contracts/public-api.ts"
+  ],
+  "tsconfig": "tsconfig.json",
+  "entryPointStrategy": "expand",
+  "emit": "none",
+  "validation": {
+    "notDocumented": true,
+    "invalidLink": true
+  },
+  "requiredToBeDocumented": [
+    "Class",
+    "Function",
+    "Interface",
+    "Module",
+    "TypeAlias",
+    "Variable"
+  ],
+  "treatValidationWarningsAsErrors": true
+}

@@ -1,0 +1,56 @@
+[importlinter]
+root_package = modal_backend
+
+[importlinter:contract:models_foundation_stays_leaf]
+name = models stay out of runtime and orchestration layers
+type = forbidden
+source_modules =
+    modal_backend.models
+forbidden_modules =
+    modal_backend.agent_runtime
+    modal_backend.mcp_tools
+    modal_backend.jobs
+    modal_backend.schedules
+    modal_backend.controller_rollout
+    modal_backend.api
+    modal_backend.main
+
+[importlinter:contract:security_stays_cross_cutting]
+name = security stays out of runtime and orchestration layers
+type = forbidden
+source_modules =
+    modal_backend.security
+forbidden_modules =
+    modal_backend.agent_runtime
+    modal_backend.mcp_tools
+    modal_backend.jobs
+    modal_backend.schedules
+    modal_backend.controller_rollout
+    modal_backend.api
+    modal_backend.main
+
+[importlinter:contract:webhooks_boundary_stays_leaf]
+name = platform webhook helpers stay out of transport and runtime layers
+type = forbidden
+source_modules =
+    modal_backend.platform_services.webhooks
+forbidden_modules =
+    modal_backend.agent_runtime
+    modal_backend.mcp_tools
+    modal_backend.api
+    modal_backend.main
+as_packages = False
+
+[importlinter:contract:serialization_stays_transport_local]
+name = serialization helpers stay out of runtime and orchestration layers
+type = forbidden
+source_modules =
+    modal_backend.api.serialization
+forbidden_modules =
+    modal_backend.agent_runtime
+    modal_backend.mcp_tools
+    modal_backend.jobs
+    modal_backend.schedules
+    modal_backend.controller_rollout
+    modal_backend.main
+as_packages = False

@@ -11,6 +11,9 @@
     "tail:development": "wrangler tail --env development",
     "types": "wrangler types",
     "check": "ultracite check",
+    "check:boundaries": "depcruise --config dependency-cruiser.cjs src",
+    "check:contracts": "tsx --test tests/contracts/**/*.test.ts",
+    "docs:api": "typedoc --options typedoc.contracts.json",
     "fix": "ultracite fix",
     "test:integration": "tsx --test tests/integration/**/*.test.ts"
   },
@@ -27,11 +30,14 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^4.20250115.0"
+    "@cloudflare/workers-types": "^4.20250115.0",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.0",
+    "dependency-cruiser": "^16.10.4",
     "tsx": "^4.20.6",
+    "typedoc": "^0.28.13",
     "typescript": "^5.7.2",
     "ultracite": "^7.2.4",
     "wrangler": "^3.95.0"

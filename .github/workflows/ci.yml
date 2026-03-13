@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  python-validation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,5 +29,85 @@ jobs:
       - name: Check formatting
         run: uv run ruff format --check .
 
+      - name: Check governance docs wiring
+        run: uv run python scripts/quality/check_docs_governance.py
+
+      - name: Check Python governance
+        run: uv run python scripts/quality/check_python_governance.py
+
       - name: Run tests
         run: uv run pytest
+
+  worker-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: edge-control-plane/package-lock.json
+
+      - name: Install Worker dependencies
+        run: npm --prefix edge-control-plane ci
+
+      - name: Worker lint
+        run: npm --prefix edge-control-plane run check
+
+      - name: Worker typecheck
+        run: cd edge-control-plane && ./node_modules/.bin/tsc --noEmit
+
+      - name: Worker integration tests
+        run: npm --prefix edge-control-plane run test:integration
+
+      - name: Worker contract tests
+        run: npm --prefix edge-control-plane run check:contracts
+
+      - name: Worker API docs validation
+        run: npm --prefix edge-control-plane run docs:api
+
+      - name: Worker boundary validation
+        run: npm --prefix edge-control-plane run check:boundaries
+
+  governance-proof:
+    if: always()
+    needs:
+      - python-validation
+      - worker-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Python dependencies
+        run: uv sync --all-extras
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: edge-control-plane/package-lock.json
+
+      - name: Install Worker dependencies
+        run: npm --prefix edge-control-plane ci
+
+      - name: Generate governance proof artifact
+        if: always()
+        run: uv run python scripts/quality/write_code_quality_proof.py --output docs/generated/code-quality-governance-proof-ci.json
+
+      - name: Upload governance proof artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-quality-governance-proof
+          path: docs/generated/code-quality-governance-proof-ci.json

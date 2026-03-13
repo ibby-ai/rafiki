@@ -1,0 +1,272 @@
+{
+  "generated_at": "2026-03-13T11:59:49.636039+10:30",
+  "repo_root": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+  "proof_type": "code-quality-governance",
+  "all_passed": false,
+  "rollout_checks_passed": true,
+  "dirty_worktree": true,
+  "waiver_registry": "docs/references/code-quality-waivers.json",
+  "blocking_scope": {
+    "python": [
+      "modal_backend/models/**",
+      "modal_backend/security/**",
+      "modal_backend/platform_services/webhooks.py",
+      "modal_backend/api/serialization.py"
+    ],
+    "worker": [
+      "edge-control-plane/src/auth/**",
+      "edge-control-plane/src/contracts/**"
+    ]
+  },
+  "remaining_failures": {
+    "advisory_scope_exceptions": [],
+    "pre_existing_unrelated_failures": [
+      {
+        "command": "pytest",
+        "evidence": [
+          "tests/test_controller_rollout.py::test_ensure_active_pointer_from_registry_recovers_single_active_service",
+          "tests/test_controller_rollout.py::test_get_or_start_background_sandbox_aio_bootstraps_after_stale_registry_recovery_fails_closed",
+          "tests/test_controller_rollout.py::test_get_or_start_background_sandbox_bootstraps_after_stale_registry_recovery_fails_closed",
+          "tests/test_controller_rollout.py::test_persist_active_controller_pointer_allows_only_one_concurrent_writer",
+          "tests/test_controller_rollout.py::test_schedule_controller_drain_spawned_path_matches_inline_terminal_state",
+          "tests/test_sandbox_auth_header.py::test_async_warm_pool_claim_uses_poll_aio",
+          "tests/test_sandbox_auth_header.py::test_attach_missing_scoped_secret_retries_then_fails",
+          "tests/test_sandbox_auth_header.py::test_reuse_by_name_missing_scoped_secret_falls_back_to_create",
+          "tests/test_sandbox_auth_header.py::test_tunnel_discovery_failure_retries_then_fails"
+        ],
+        "reason": "Current pytest failures are limited to the known pre-existing controller rollout and sandbox auth suites outside wave-1 governance scope."
+      }
+    ],
+    "unclassified_blockers": [],
+    "waived_exceptions": []
+  },
+  "commands": [
+    {
+      "name": "validate_code_quality_waivers",
+      "category": "governance",
+      "command": [
+        "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3",
+        "scripts/quality/validate_code_quality_waivers.py"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "CODE_QUALITY_WAIVERS_OK\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "check_docs_governance",
+      "category": "governance",
+      "command": [
+        "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3",
+        "scripts/quality/check_docs_governance.py"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "DOCS_GOVERNANCE_OK\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "check_python_governance",
+      "category": "governance",
+      "command": [
+        "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3",
+        "scripts/quality/check_python_governance.py"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "CODE_QUALITY_WAIVERS_OK\nAll checks passed!\nSuccess: no issues found in 14 source files\n\n\u2554\u2550\u2550\u2557\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25b6\u2554\u2557 \u2554\u2557      \u2554\u2557\u25c0\u2500\u2500\u2500\u2510\n\u255a\u2563\u2560\u255d\u25c0\u2500\u2500\u2500\u2500\u2500\u2510  \u2554\u255d\u255a\u2557\u2551\u2551\u2500\u2500\u2500\u2500\u25b6\u2554\u255d\u255a\u2557   \u2502\n \u2551\u2551   \u2554\u2550\u2550\u2566\u2550\u2550\u2566\u2569\u2557\u2554\u255d\u2551\u2551  \u2554\u2566\u2550\u2569\u2557\u2554\u255d\u2554\u2550\u2566\u2550\u2550\u2557\n \u2551\u2551\u2554\u2550\u2550\u2563\u2554\u2557\u2551\u2554\u2557\u2551\u2554\u2563\u2551 \u2551\u2551 \u2554\u256c\u2563\u2554\u2557\u2551\u2551 \u2551\u2502\u2551\u2554\u2550\u255d\n\u2554\u2563\u2560\u2563\u2551\u2551\u2551\u255a\u255d\u2551\u255a\u255d\u2551\u2551\u2551\u255a\u2557\u2551\u255a\u2550\u255d\u2551\u2551\u2551\u2551\u2551\u255a\u2557\u2551\u2550\u2563\u2551\n\u255a\u2550\u2550\u2569\u2569\u2569\u2563\u2554\u2550\u2569\u2550\u2550\u2569\u255d\u255a\u2550\u255d\u255a\u2550\u2550\u2550\u2569\u2569\u255d\u255a\u2569\u2550\u2569\u2569\u2550\u2569\u255d\n  \u2514\u2500\u2500\u25b6\u2551\u2551                    \u25b2 \n      \u255a\u255d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n\n\n---------\nContracts\n---------\n\nAnalyzed 49 files, 83 dependencies.\n-----------------------------------\n\nmodels stay out of runtime and orchestration layers KEPT\nsecurity stays out of runtime and orchestration layers KEPT\nplatform webhook helpers stay out of transport and runtime layers KEPT\nserialization helpers stay out of runtime and orchestration layers KEPT\n\nContracts: 4 kept, 0 broken.\n$ /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3 scripts/quality/validate_code_quality_waivers.py\n$ /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/ruff check --preview --select D,DOC modal_backend/models modal_backend/security modal_backend/platform_services/webhooks.py modal_backend/api/serialization.py\n$ /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3 -m mypy --config-file mypy-governance.ini\n$ /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/lint-imports --config .importlinter\nPYTHON_GOVERNANCE_OK\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "ruff_check",
+      "category": "baseline",
+      "command": [
+        "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "All checks passed!\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "pytest",
+      "category": "baseline",
+      "command": [
+        "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/bin/python3",
+        "-m",
+        "pytest"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [
+          "tests/test_controller_rollout.py::test_ensure_active_pointer_from_registry_recovers_single_active_service",
+          "tests/test_controller_rollout.py::test_get_or_start_background_sandbox_aio_bootstraps_after_stale_registry_recovery_fails_closed",
+          "tests/test_controller_rollout.py::test_get_or_start_background_sandbox_bootstraps_after_stale_registry_recovery_fails_closed",
+          "tests/test_controller_rollout.py::test_persist_active_controller_pointer_allows_only_one_concurrent_writer",
+          "tests/test_controller_rollout.py::test_schedule_controller_drain_spawned_path_matches_inline_terminal_state",
+          "tests/test_sandbox_auth_header.py::test_async_warm_pool_claim_uses_poll_aio",
+          "tests/test_sandbox_auth_header.py::test_attach_missing_scoped_secret_retries_then_fails",
+          "tests/test_sandbox_auth_header.py::test_reuse_by_name_missing_scoped_secret_falls_back_to_create",
+          "tests/test_sandbox_auth_header.py::test_tunnel_discovery_failure_retries_then_fails"
+        ],
+        "kind": "pre_existing_unrelated",
+        "reason": "Current pytest failures are limited to the known pre-existing controller rollout and sandbox auth suites outside wave-1 governance scope."
+      },
+      "passed": false,
+      "returncode": 1,
+      "stdout_tail": "l_backend/jobs.py:2620: AsyncUsageWarning: A blocking Modal interface is being used in an async context.\n  \n  This may cause performance issues or bugs. Consider rewriting to use Modal's async interfaces:\n  https://modal.com/docs/guide/async\n  \n  Suggested rewrite:\n    metadata = await store.get.aio(session_id)\n  \n  Original line:\n    metadata = store.get(session_id)\n\ntests/test_controller_runtime_openai.py::test_query_agent_continues_when_metrics_store_auth_is_unavailable\ntests/test_controller_runtime_openai.py::test_query_agent_continues_when_metrics_store_auth_is_unavailable\n  /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/modal_backend/jobs.py:2650: AsyncUsageWarning: A blocking Modal interface is being used in an async context.\n  \n  This may cause performance issues or bugs. Consider rewriting to use Modal's async interfaces:\n  https://modal.com/docs/guide/async\n  \n  Suggested rewrite:\n    You can't use `store[session_id] = metadata` syntax asynchronously - there may be an alternative api, e.g. store.put.aio(session_id, metadata)\n  \n  Original line:\n    store[session_id] = metadata\n\ntests/test_controller_runtime_openai.py::test_query_agent_continues_when_metrics_store_auth_is_unavailable\n  /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/modal_backend/api/controller.py:277: AsyncUsageWarning: A blocking Modal interface is being used in an async context.\n  \n  This may cause performance issues or bugs. Consider rewriting to use Modal's async interfaces:\n  https://modal.com/docs/guide/async\n  \n  Suggested rewrite:\n    await _get_persist_volume().commit.aio()\n  \n  Original line:\n    _get_persist_volume().commit()\n\ntests/test_controller_runtime_openai.py::test_watch_for_cancellation_uses_after_turn_mode\ntests/test_controller_runtime_openai.py::test_execute_agent_query_suppresses_watcher_cancelled_error\ntests/test_controller_runtime_openai.py::test_execute_agent_query_preserves_tool_sequence_and_handoff_model\n  /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/modal_backend/jobs.py:2002: AsyncUsageWarning: A blocking Modal interface is being used in an async context.\n  \n  This may cause performance issues or bugs. Consider rewriting to use Modal's async interfaces:\n  https://modal.com/docs/guide/async\n  \n  Suggested rewrite:\n    return await SESSION_CANCELLATIONS.get.aio(session_id)\n  \n  Original line:\n    return SESSION_CANCELLATIONS.get(session_id)\n\ntests/test_sandbox_auth_header.py::test_process_job_queue_reroutes_stale_route_before_dispatch\n  /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/.venv/lib/python3.14/site-packages/modal/_functions.py:1827: UserWarning: The process_job_queue function is executing locally and will not have access to the mounted Volume or NetworkFileSystem data\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_controller_rollout.py::test_ensure_active_pointer_from_registry_recovers_single_active_service\nFAILED tests/test_controller_rollout.py::test_get_or_start_background_sandbox_bootstraps_after_stale_registry_recovery_fails_closed\nFAILED tests/test_controller_rollout.py::test_get_or_start_background_sandbox_aio_bootstraps_after_stale_registry_recovery_fails_closed\nFAILED tests/test_controller_rollout.py::test_persist_active_controller_pointer_allows_only_one_concurrent_writer\nFAILED tests/test_controller_rollout.py::test_schedule_controller_drain_spawned_path_matches_inline_terminal_state\nFAILED tests/test_sandbox_auth_header.py::test_reuse_by_name_missing_scoped_secret_falls_back_to_create\nFAILED tests/test_sandbox_auth_header.py::test_attach_missing_scoped_secret_retries_then_fails\nFAILED tests/test_sandbox_auth_header.py::test_async_warm_pool_claim_uses_poll_aio\nFAILED tests/test_sandbox_auth_header.py::test_tunnel_discovery_failure_retries_then_fails\n============ 9 failed, 273 passed, 2 skipped, 12 warnings in 42.41s ============\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_check",
+      "category": "baseline",
+      "command": [
+        "npm",
+        "--prefix",
+        "edge-control-plane",
+        "run",
+        "check"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "\n> rafiki-control-plane@1.0.0 check\n> ultracite check\n\nChecked 20 files in 50ms. No fixes applied.\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_tsc",
+      "category": "baseline",
+      "command": [
+        "./node_modules/.bin/tsc",
+        "--noEmit"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki/edge-control-plane",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_integration_tests",
+      "category": "baseline",
+      "command": [
+        "npm",
+        "--prefix",
+        "edge-control-plane",
+        "run",
+        "test:integration"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "\n> rafiki-control-plane@1.0.0 test:integration\n> tsx --test tests/integration/**/*.test.ts\n\n\u2714 GET /jobs/:id/artifacts enforces ownership precheck before proxying (29.000375ms)\n\u2714 GET /jobs/:id/artifacts/:path forwards scoped artifact access token (3.270209ms)\n\u2714 GET /jobs/:id/artifacts/:path returns deterministic 400 for malformed encoding (1.055ms)\n\u2714 GET /jobs/:id rejects invalid ownership payloads with 502 (1.966625ms)\n\u2714 POST /schedules rejects malformed JSON before auth or forwarding (23.276917ms)\n\u2714 GET /schedules/:id rejects invalid upstream payloads with 502 (7.834333ms)\n\u2714 session tokens reject malformed identity claims (0.539333ms)\n\u2714 stop proxy preserves GET as a read-only status request (0.185625ms)\n\u2714 stop proxy preserves POST stop mode and reason (0.393666ms)\n\u2714 stop proxy rejects client-controlled requested_by (0.485666ms)\n\u2714 stop proxy rejects invalid upstream stop payloads with 502 (0.218417ms)\n\u2139 tests 11\n\u2139 suites 0\n\u2139 pass 11\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 196.541417\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_contract_tests",
+      "category": "governance",
+      "command": [
+        "npm",
+        "--prefix",
+        "edge-control-plane",
+        "run",
+        "check:contracts"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "\n> rafiki-control-plane@1.0.0 check:contracts\n> tsx --test tests/contracts/**/*.test.ts\n\n\u2714 query request schema rejects malformed public payloads (1.223667ms)\n\u2714 query response schema rejects payloads missing required summary data (0.205042ms)\n\u2714 streaming query schema rejects caller-supplied identity fields (0.10775ms)\n\u2714 queue prompt schema rejects spoofed user_id fields (0.073042ms)\n\u2714 artifact list schema rejects legacy manifest keys (0.122958ms)\n\u2714 session stop request schema rejects unsupported stop modes (0.114792ms)\n\u2714 session stop request schema rejects client-controlled requested_by (0.125083ms)\n\u2714 session stop response schema rejects invalid status payloads (0.682125ms)\n\u2714 typedoc configuration stays limited to public contract scope (0.890375ms)\n\u2714 dependency-cruiser blocks relative-import boundary bypasses (2.375084ms)\n\u2139 tests 10\n\u2139 suites 0\n\u2139 pass 10\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 178.91425\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_api_docs",
+      "category": "governance",
+      "command": [
+        "npm",
+        "--prefix",
+        "edge-control-plane",
+        "run",
+        "docs:api"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "\n> rafiki-control-plane@1.0.0 docs:api\n> typedoc --options typedoc.contracts.json\n\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "worker_boundaries",
+      "category": "governance",
+      "command": [
+        "npm",
+        "--prefix",
+        "edge-control-plane",
+        "run",
+        "check:boundaries"
+      ],
+      "cwd": "/Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki",
+      "classification": {
+        "evidence": [],
+        "kind": "passed",
+        "reason": "Command passed."
+      },
+      "passed": true,
+      "returncode": 0,
+      "stdout_tail": "\n> rafiki-control-plane@1.0.0 check:boundaries\n> depcruise --config dependency-cruiser.cjs src\n\n\n\u2714 no dependency violations found (12 modules, 21 dependencies cruised)\n\n",
+      "stderr_tail": ""
+    }
+  ]
+}

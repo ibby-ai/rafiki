@@ -11,7 +11,7 @@ MODAL_PROXY_KEY ?=
 MODAL_PROXY_SECRET ?=
 CURL_PROXY_HEADERS = $(if $(and $(MODAL_PROXY_KEY),$(MODAL_PROXY_SECRET)),-H Modal-Key:$(MODAL_PROXY_KEY) -H Modal-Secret:$(MODAL_PROXY_SECRET),)
 
-.PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs run deploy lint typecheck test format
+.PHONY: serve dev-url curl curl-q ask stream health info terminate snapshot tail-logs run deploy lint typecheck test format governance-python governance-worker governance-docs governance governance-proof release-quality quality-contracts
 
 serve:
 	@echo "Serving Modal app..."; \
@@ -78,6 +78,31 @@ test:
 format:
 	@echo "Formatting code..."; \
 	uv run ruff format modal_backend/ tests/
+
+governance-python:
+	uv run python scripts/quality/check_python_governance.py
+
+governance-worker:
+	npm --prefix edge-control-plane run check:contracts
+	npm --prefix edge-control-plane run docs:api
+	npm --prefix edge-control-plane run check:boundaries
+
+governance-docs:
+	uv run python scripts/quality/check_docs_governance.py
+
+governance: governance-python governance-worker governance-docs
+
+release-quality:
+	uv run ruff check .
+	uv run pytest
+	npm --prefix edge-control-plane run check
+	cd edge-control-plane && ./node_modules/.bin/tsc --noEmit
+	npm --prefix edge-control-plane run test:integration
+
+governance-proof:
+	uv run python scripts/quality/write_code_quality_proof.py
+
+quality-contracts: release-quality governance
 
 # Back-compat aliases
 ask: curl
