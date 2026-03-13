@@ -1,23 +1,27 @@
 # ExecPlans
 
-ExecSpecs (and their associated tasks) are used to plan and track the progress of complex features or refactoring. The resulting files are living documents and should be updated as the work proceeds. The sections `Progress`, `Suprises & Discoveries`, `Decision Log` and `Outcomes & Retrospective` must be kept up to date as the work proceeds.
-
-This file outlines what an ExecPlan is and what it should contain.
+ExecPlans and their task files are the canonical way to plan and track complex
+implementation or refactor work in this repository. They are living documents
+and must stay current as the work proceeds. The sections `Progress`,
+`Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` are
+required and must be updated in the same change wave as code or docs changes.
 
 ## Purpose / Big Picture
 
-Explain in a few sentences what someone gains after this changes and how they can see it working. State the user-visible behavior you will enable.
+Explain the intended outcome in a few sentences. State the user-visible or
+operator-visible result and how someone can tell the work succeeded.
 
-## Suprises & Discoveries
+## Surprises & Discoveries
 
-Document unexpected behaviors, bugs, optimizations, or insights discovered during implementation. Provide consice evidence.
+Document unexpected behaviors, bugs, optimizations, or architectural findings
+discovered during implementation. Pair each observation with evidence.
 
 - Observation: ...
 - Evidence: ...
 
 ## Decision Log
 
-Record every decision made while working on the plan in the format:
+Record every material decision in this format:
 
 - Decision: ...
 - Rationale: ...
@@ -25,19 +29,25 @@ Record every decision made while working on the plan in the format:
 
 ## Outcomes & Retrospective
 
-Summarise outcomes, gaps, and lessons learned at major milestones or at completion. Compare the result against the original purpose.
+Summarize outcomes, gaps, and lessons learned at major milestones or at
+completion. Compare the result against the original purpose.
 
 ## Context and Orientation
 
-Decribe the current state relevant to this task as if the reader knows nothing. Name the key files and modules by full path. Define any non-obvious term you will use. Do not refer to prior plans.
+Describe the current state as if the reader knows nothing. Name the key files,
+modules, and contracts by full path. Define non-obvious terms. Do not assume
+knowledge of prior plans.
 
 ## Plan of Work
 
-Describe, in prose, the sequence of edits and additions. For each edit, name the file and location and what to insert or change.
+Describe the sequence of edits and additions in prose. For each change, name
+the file and location and state what will change.
 
 ## Concrete Steps
 
-Write each edit as a separate markdown file in the docs/exec-plans/active/{feature_name}/tasks/ directory, with a YAML frontmatter linking it to its parent plan. For example:
+Write each major edit as a separate markdown task file in
+`docs/exec-plans/active/{feature_name}/tasks/`, using YAML frontmatter that
+links the task back to its parent plan. Example:
 
 ```yaml
 ---
@@ -46,22 +56,41 @@ plan_id: PLAN_{feature_name}
 plan_file: ../PLAN_{feature_name}.md
 title: Audit current implementation and define input mapping
 phase: Phase 1 - Data Model & Request Construction
+---
 ```
 
 ## Progress
 
-Use a list with checkboxes to summarize granular steps. Every stopping point must be documented here, even if it requires splitting a partially completed task into two ("done" vs "remaining"). This section must always reflect the current state of the work.
+Use a checkbox list for granular progress. Every stopping point must be
+documented here, including partial completion states.
 
-[x] (TASK*01*{feature_name}.md) (2025-10-11 12:00) Example completed step.
+- [x] `(tasks/TASK_01_feature_name.md)` `(2026-03-13 11:55 ACDT)` Example completed step.
+- [ ] `(tasks/TASK_02_feature_name.md)` Example incomplete step.
+- [ ] `(tasks/TASK_03_feature_name.md)` Example partial step with remaining work called out.
 
-[ ] (TASK*02*{feature_name}.md) Example incomplete step.
+## Sub-Agent Collaboration Evidence
 
-[ ] (TASK_03_feature_name.md) Example partially completed step (complted: X, remaining: Y)
+Record the required reviewer activity here for the active plan.
+
+- Reviewer: `<sub-agent id or name>`
+  - Scope: ...
+  - Findings: ...
+  - Resolution: applied | deferred (with reason)
+
+Include `boundary-enforcer` whenever the work changes architecture boundaries,
+contract-scope docs, runtime validation, agent definitions, or governance/process docs.
 
 ## Testing Approach
 
-Describe the testing approach for the feature.
+Describe the validation strategy for the feature. Name the exact command bundles
+that must pass and distinguish blocking checks from advisory checks if needed.
+
+## Proof / Evidence Artifacts
+
+List any generated proof artifacts or machine-readable evidence files under
+`docs/generated/` that should ship with the change.
 
 ## Constraints & Considerations
 
-Describe any constraints or considerations you encountered while working on the feature.
+Describe important constraints, rollout boundaries, baseline debt, or explicit
+non-goals encountered while working on the feature.

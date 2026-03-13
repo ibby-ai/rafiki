@@ -97,3 +97,39 @@
 
 ### Residual Security Risk
 - `modal-auth-secret` remains a high-value secret on the sandbox surface when enabled; rotation and sandbox recycle still need to stay coupled operationally.
+
+## 2026-03-13 Security Update - Code Quality Governance
+
+### Security-Relevant Outcomes
+- Public Worker request bodies and Worker-to-Modal JSON seams now use runtime validation, reducing silent contract drift at untrusted boundaries.
+- Public `/jobs/**` reads now reject missing upstream ownership identity instead
+  of silently trusting partial payloads, closing the Oracle fail-open actor-scope gap.
+- Auth and contract modules in `edge-control-plane` are now covered by TypeDoc and dependency-cruiser gates, preserving boundary separation between shared contracts, auth helpers, and transport orchestration.
+- Session stop audit identity is now derived from authenticated actor scope rather
+  than a client-controlled `requested_by` field, closing a transport trust gap on
+  persisted cancellation records.
+- Python waiver handling is now explicit, time-bounded, and audited in CI; anonymous suppressions are not accepted as governance-approved exceptions.
+- Waiver auditing now verifies that suppressions stay within the waiver's
+  declared `scope` and correspond to the waiver's declared `rule`, and the live
+  `.importlinter` / `dependency-cruiser` configs now have integrity coverage.
+- The public session/event-bus surface is now explicit: documented DO-backed
+  state/messages/queue routes plus `/ws` / `/events` remain public, while
+  undocumented session alias/query passthrough paths are blocked at the Worker edge.
+
+### Verification Evidence
+- `uv run python scripts/quality/validate_code_quality_waivers.py` -> pass
+- `uv run python scripts/quality/check_python_governance.py` -> pass
+- `uv run python scripts/quality/check_python_boundary_config.py` -> pass
+- `uv run python -m pytest tests/test_code_quality_waivers.py tests/test_python_boundary_config.py`
+  -> pass (`4 passed`)
+- `npm --prefix edge-control-plane run docs:api` -> pass
+- `npm --prefix edge-control-plane run check:boundaries` -> pass
+- `npm --prefix edge-control-plane run test:integration` -> pass (`15 passed`) with deterministic `400`/`502` checks on malformed Worker request and proxy-response payloads, including stop-route contract enforcement, fail-closed `/jobs/**` ownership, and CORS/session-route contract coverage
+- `docs/generated/code-quality-governance-proof-2026-03-13T11-59-01+1030.json` records the current command matrix and classifies remaining baseline pytest failures as pre-existing unrelated
+
+### Residual Security Risk
+- `edge-control-plane/src/auth/session-auth.ts` still uses string equality
+  rather than constant-time verification for session-token signature checks;
+  this remains an explicit dated deferral from the Oracle review.
+- Advisory modules such as `modal_backend/main.py`, `modal_backend/jobs.py`, and `edge-control-plane/src/index.ts` are reviewed but not yet blocking under the new governance contract.
+- Full repo pytest still has unrelated failures in controller-rollout and sandbox-runtime suites; those are outside this rollout scope but still matter for release-level confidence.

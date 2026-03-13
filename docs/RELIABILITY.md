@@ -141,3 +141,39 @@
 
 ### Residual Reliability Risk
 - `env.development` currently reuses the checked-in KV and rate-limit binding IDs; local `wrangler dev` remains safe, but a remote deploy of the development environment should get dedicated non-production bindings before it is treated as an isolated shared environment.
+
+## 2026-03-13 Reliability Update - Code Quality Governance
+
+### Delivered Reliability Controls
+- Worker transport boundaries now reject malformed request bodies deterministically via Zod before forwarding to Modal.
+- Worker proxy seams now reject malformed upstream schedule/job JSON with deterministic `502` responses instead of accepting drifted payloads.
+- Worker `/jobs/**` ownership checks now fail closed when upstream job payloads
+  omit `session_id`, `user_id`, or `tenant_id` fields required for actor-scope
+  enforcement.
+- Session stop routes now preserve `GET` read-only status semantics, reject invalid
+  stop bodies with deterministic `400`, and reject malformed upstream stop payloads
+  with deterministic `502`.
+- Worker public session ingress is now explicit: documented DO-backed
+  `/state`, `/messages`, queue, and stop routes remain public, while
+  undocumented `/session/{id}` aliases and `/session/{id}/query` passthroughs
+  are blocked at the edge.
+- Blocking Python governance now covers leaf-like models/security/serialization/webhook modules with doc, type, and import-boundary checks.
+- CI and local task runners now include dedicated governance commands plus a proof-packet generator.
+
+### Validation Evidence
+- `uv run python scripts/quality/check_docs_governance.py` -> pass
+- `uv run python scripts/quality/check_python_governance.py` -> pass
+- `uv run python scripts/quality/check_python_boundary_config.py` -> pass
+- `uv run python -m pytest tests/test_code_quality_waivers.py tests/test_python_boundary_config.py`
+  -> pass (`4 passed`)
+- `npm --prefix edge-control-plane run check:contracts` -> pass (`12 passed`)
+- `npm --prefix edge-control-plane run test:integration` -> pass (`15 passed`)
+- `npm --prefix edge-control-plane run check:boundaries` -> pass
+- `docs/generated/code-quality-governance-proof-2026-03-13T11-59-01+1030.json` captures the full command matrix, marks `rollout_checks_passed=true`, and classifies the remaining pytest baseline as pre-existing unrelated
+
+### Residual Reliability Risk
+- Full `uv run pytest` still has unrelated baseline failures in rollout and sandbox-runtime suites. Those failures are outside this rollout's changed files but still block a fully green repo-wide release bundle.
+- Wave-1 governance keeps orchestration hubs advisory, so transport and boundary regressions in those modules still rely on review plus existing tests until later ratchet waves.
+- jobs-proxy passthrough errors can still mislabel some non-JSON upstream
+  errors as JSON; this remains an explicit non-blocking residual risk from the
+  Oracle review.

@@ -1,9 +1,9 @@
 # QUALITY SCORE
 
 ## Metadata
-- Review date (YYYY-MM-DD): 2026-03-10
+- Review date (YYYY-MM-DD): 2026-03-13
 - Owner: Platform Engineering
-- Scope: Repository knowledge system, architecture docs, and execution plan governance
+- Scope: Repository knowledge system, architecture docs, execution-plan governance, and code-quality governance enforcement
 
 ## Rubric (1-5)
 - `1`: Missing or unreliable
@@ -15,11 +15,11 @@
 ## Scorecard
 | Dimension | Score (1-5) | Evidence | Required Action |
 |---|---|---|---|
-| Product intent clarity | 3 | Canonical product-spec index exists, but no specs yet | Add initial product specs for core capabilities. |
-| Architecture clarity | 4 | Canonical design-doc taxonomy and index established | Keep architecture docs updated with each design change. |
-| Plan/task traceability | 4 | Active/completed plan split with linked tasks in repo | Ensure active plans close out and move to completed. |
-| Operational references | 4 | References taxonomy and migrated docs in place | Audit quarterly for stale examples and endpoint drift. |
-| Security/reliability governance | 3 | Baseline governance docs added | Add measurable SLO/security review cadence entries. |
+| Product intent clarity | 4 | Canonical product-spec index now includes governance, runtime-readiness, and rollout specs | Expand spec coverage as remaining advisory modules are promoted into blocking scope. |
+| Architecture clarity | 5 | Architecture index plus governance layer map now define blocking vs advisory scope explicitly | Keep the layer map current when modules move between advisory and blocking scope. |
+| Plan/task traceability | 5 | Active/completed plan split plus governance task pack, reviewer evidence, and proof artifact are in repo | Preserve proof artifacts and close active plans promptly once rollout follow-ups finish. |
+| Operational references | 5 | References index now includes the governance contract, waiver registry, and public API validation expectations | Re-run docs sanity checks whenever contract-scope docs or indexes change. |
+| Security/reliability governance | 5 | Governance contract, CI gates, waiver registry, and reliability/security ledgers now reflect the rollout | Ratchet additional advisory modules only with evidence-backed validation. |
 
 ## Action Item Expectations
 - Every score below `4` must have a dated action item in the next active ExecPlan.
@@ -103,7 +103,7 @@
 ## Re-Score (2026-03-09) - Modal SDK 1.3.5 Upgrade
 
 ### Change Wave Scope
-- ExecPlan: `docs/exec-plans/active/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md`
+- ExecPlan: `docs/exec-plans/completed/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md`
 - Runtime/test/docs updates for Modal dependency freshness, async-interface safety, and deterministic teardown behavior
 
 ### Evidence Snapshot
@@ -176,3 +176,35 @@
 | Architecture clarity | 5 | 5 | Worker environment separation is clearer, but overall architecture score is unchanged. |
 | Operational references | 5 | 5 | Production deploys no longer depend on ad hoc CLI overrides; docs now encode the safer default directly. |
 | Security/reliability governance | 5 | 5 | The P3 operator-footgun is closed in config/scripts/docs, with validation evidence captured in the same wave. |
+
+## Re-Score (2026-03-13) - Code Quality Governance
+
+### Change Wave Scope
+- Product spec: `docs/product-specs/code-quality-governance.md`
+- ExecPlan: `docs/exec-plans/completed/code-quality-governance/PLAN_code-quality-governance.md`
+- Runtime/test/docs/CI updates for enforceable API docs, boundary checks,
+  waiver auditing, review workflow, and the Oracle must-fix follow-up batch
+
+### Evidence Snapshot
+- `uv run python scripts/quality/check_docs_governance.py` -> pass
+- `uv run python scripts/quality/check_python_governance.py` -> pass
+- `uv run python scripts/quality/check_python_boundary_config.py` -> pass
+- `uv run python -m pytest tests/test_code_quality_waivers.py tests/test_python_boundary_config.py`
+  -> pass (`4 passed`)
+- `uv run ruff check .` -> pass
+- `npm --prefix edge-control-plane run check` -> pass
+- `cd edge-control-plane && ./node_modules/.bin/tsc --noEmit` -> pass
+- `npm --prefix edge-control-plane run test:integration` -> pass (`15 passed`)
+- `npm --prefix edge-control-plane run check:contracts` -> pass (`12 passed`)
+- `npm --prefix edge-control-plane run docs:api` -> pass
+- `npm --prefix edge-control-plane run check:boundaries` -> pass
+- `uv run pytest` -> failed with unrelated baseline failures in `tests/test_controller_rollout.py` and `tests/test_sandbox_auth_header.py`; current reruns fluctuate between `8` and `9` failures in those unchanged suites.
+- Generated proof artifact: `docs/generated/code-quality-governance-proof-2026-03-13T11-59-01+1030.json` (`rollout_checks_passed=true`, remaining failures classified as pre-existing unrelated)
+
+### Score Impact
+| Dimension | Previous | New | Rationale |
+|---|---|---|---|
+| Architecture clarity | 5 | 5 | The architecture entry point now includes an explicit governance layer map and wave-1 boundary scope. |
+| Plan/task traceability | 5 | 5 | The rollout ships with a canonical plan pack, reviewer workflow changes, and a machine-readable proof artifact. |
+| Operational references | 5 | 5 | Governance rules, waivers, API validation behavior, public session/event routes, and required commands are now documented together. |
+| Security/reliability governance | 5 | 5 | Boundary validation, waiver auditing, config-integrity assertions, and CI enforcement are durable even though unrelated baseline pytest failures remain outside this rollout scope. |

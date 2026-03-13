@@ -8,6 +8,7 @@ For guided Cloudflare + Modal runtime onboarding, start at `runtime-docs-overvie
 - [Runtime Docs Overview](./runtime-docs-overview.md)
 - [Next.js + Supabase BFF Integration](./nextjs-supabase-bff-integration.md)
 - [API Usage](./api-usage.md)
+- [Code Quality Governance](./code-quality-governance.md)
 - [Configuration](./configuration.md)
 - [Tool Development](./tool-development.md)
 - [Troubleshooting](./troubleshooting.md)
