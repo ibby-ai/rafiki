@@ -2,11 +2,34 @@
  * Type definitions for Rafiki Control Plane
  *
  * This file defines the TypeScript interfaces and types for:
- * - API request/response schemas
+ * - environment bindings and non-contract runtime types
  * - Durable Object state models
  * - WebSocket message formats
  * - Modal backend integration
  */
+
+import type {
+  ArtifactManifest as ContractArtifactManifest,
+  JobStatusResponse as ContractJobStatusResponse,
+  JobSubmitRequest as ContractJobSubmitRequest,
+  JobSubmitResponse as ContractJobSubmitResponse,
+  Message as ContractMessage,
+  MessageContent as ContractMessageContent,
+  QueryRequest as ContractQueryRequest,
+  QueryResponse as ContractQueryResponse,
+  QueuePromptRequest as ContractQueuePromptRequest,
+  ScheduleCreateRequest as ContractScheduleCreateRequest,
+  ScheduleListResponse as ContractScheduleListResponse,
+  ScheduleResponse as ContractScheduleResponse,
+  ScheduleType as ContractScheduleType,
+  ScheduleUpdateRequest as ContractScheduleUpdateRequest,
+  SessionStopMode as ContractSessionStopMode,
+  SessionStopRequest as ContractSessionStopRequest,
+  SessionStopResponse as ContractSessionStopResponse,
+  StreamingQueryRequest as ContractStreamingQueryRequest,
+  Summary as ContractSummary,
+  WebhookConfig as ContractWebhookConfig,
+} from "./contracts/public-api";
 
 // =============================================================================
 // Environment Bindings
@@ -38,163 +61,26 @@ export interface Env {
   SESSION_SIGNING_SECRET: string;
 }
 
-// =============================================================================
-// API Request/Response Schemas (matches Modal schemas)
-// =============================================================================
-
-export interface QueryRequest {
-  agent_type?: string;
-  fork_session?: boolean;
-  job_id?: string | null;
-  question: string;
-  session_id?: string | null;
-  session_key?: string | null;
-  tenant_id?: string | null;
-  user_id?: string | null;
-  warm_id?: string | null;
-}
-
-export interface QueryResponse {
-  error?: string;
-  messages: Message[];
-  ok: boolean;
-  session_id: string;
-}
-
-/**
- * Message from Modal backend.
- *
- * Note: Modal serializes messages with "type" field (user, assistant, system, result),
- * not "role". We keep both for compatibility, but "type" is the primary field from Modal.
- */
-export interface Message {
-  content: MessageContent[];
-  /** Legacy role field - may not be present from Modal */
-  role?: "user" | "assistant";
-  /** Message type from Modal serialization (primary field) */
-  type?: "user" | "assistant" | "system" | "result" | "stream_event";
-}
-
-export interface MessageContent {
-  content?: unknown;
-  input?: Record<string, unknown>;
-  is_error?: boolean;
-  name?: string;
-  text?: string;
-  tool_use_id?: string;
-  type: "text" | "tool_use" | "tool_result";
-}
-
-export interface JobSubmitRequest {
-  agent_type?: string;
-  job_id?: string | null;
-  question: string;
-  schedule_at?: number | null;
-  session_id?: string | null;
-  session_key?: string | null;
-  tenant_id?: string | null;
-  user_id?: string | null;
-  webhook?: WebhookConfig | null;
-}
-
-export interface WebhookConfig {
-  headers?: Record<string, string>;
-  max_attempts?: number;
-  secret_ref?: string;
-  signing_secret?: string;
-  timeout_seconds?: number;
-  url: string;
-}
-
-export interface JobSubmitResponse {
-  job_id: string;
-  ok: boolean;
-}
-
-export interface JobStatusResponse {
-  agent_type?: string;
-  artifacts?: ArtifactManifest | null;
-  completed_at?: number | null;
-  created_at: number;
-  error?: string | null;
-  job_id: string;
-  question?: string;
-  result?: QueryResponse | null;
-  session_id?: string | null;
-  started_at?: number | null;
-  status: "queued" | "running" | "complete" | "failed" | "canceled";
-  tenant_id?: string | null;
-  user_id?: string | null;
-}
-
-export type ScheduleType = "one_off" | "cron";
-
-export interface ScheduleCreateRequest {
-  agent_type?: string | null;
-  cron?: string | null;
-  enabled?: boolean;
-  metadata?: Record<string, unknown> | null;
-  name: string;
-  question: string;
-  run_at?: number | null;
-  schedule_type: ScheduleType;
-  timezone?: string | null;
-  webhook?: WebhookConfig | null;
-}
-
-export interface ScheduleUpdateRequest {
-  agent_type?: string | null;
-  cron?: string | null;
-  enabled?: boolean | null;
-  metadata?: Record<string, unknown> | null;
-  name?: string | null;
-  question?: string | null;
-  run_at?: number | null;
-  timezone?: string | null;
-  webhook?: WebhookConfig | null;
-}
-
-export interface ScheduleResponse {
-  agent_type?: string | null;
-  created_at: number;
-  cron?: string | null;
-  enabled: boolean;
-  last_error?: string | null;
-  last_job_id?: string | null;
-  last_run_at?: number | null;
-  metadata?: Record<string, unknown> | null;
-  name: string;
-  next_run_at?: number | null;
-  question: string;
-  run_at?: number | null;
-  schedule_id: string;
-  schedule_type: ScheduleType;
-  tenant_id?: string | null;
-  timezone: string;
-  updated_at: number;
-  user_id?: string | null;
-  webhook?: WebhookConfig | null;
-}
-
-export interface ScheduleListResponse {
-  ok: boolean;
-  schedules: ScheduleResponse[];
-}
-
-export interface ArtifactManifest {
-  collected_at: number;
-  files: ArtifactFile[];
-  job_id: string;
-  total_size_bytes: number;
-  workspace_path: string;
-}
-
-export interface ArtifactFile {
-  mime_type?: string;
-  modified_at: number;
-  path: string;
-  size_bytes: number;
-}
+export type QueryRequest = ContractQueryRequest;
+export type StreamingQueryRequest = ContractStreamingQueryRequest;
+export type QueryResponse = ContractQueryResponse;
+export type Message = ContractMessage;
+export type MessageContent = ContractMessageContent;
+export type Summary = ContractSummary;
+export type WebhookConfig = ContractWebhookConfig;
+export type JobSubmitRequest = ContractJobSubmitRequest;
+export type JobSubmitResponse = ContractJobSubmitResponse;
+export type JobStatusResponse = ContractJobStatusResponse;
+export type QueuePromptRequest = ContractQueuePromptRequest;
+export type ScheduleType = ContractScheduleType;
+export type ScheduleCreateRequest = ContractScheduleCreateRequest;
+export type ScheduleUpdateRequest = ContractScheduleUpdateRequest;
+export type ScheduleResponse = ContractScheduleResponse;
+export type ScheduleListResponse = ContractScheduleListResponse;
+export type SessionStopMode = ContractSessionStopMode;
+export type SessionStopRequest = ContractSessionStopRequest;
+export type SessionStopResponse = ContractSessionStopResponse;
+export type ArtifactManifest = ContractArtifactManifest;
 
 // =============================================================================
 // WebSocket Message Types
@@ -257,7 +143,7 @@ export interface QueryCompleteMessage extends WebSocketMessage {
   data: {
     messages: Message[];
     duration_ms: number;
-    summary?: Record<string, unknown>;
+    summary?: Summary;
   };
   type: "query_complete";
 }

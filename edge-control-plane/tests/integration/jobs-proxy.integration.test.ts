@@ -300,3 +300,79 @@ test("GET /jobs/:id/artifacts/:path returns deterministic 400 for malformed enco
   assert.equal(fetchRequests.length, 1);
   assert.equal(new URL(fetchRequests[0].url).pathname, "/jobs/job-malformed");
 });
+
+test("GET /jobs/:id rejects invalid ownership payloads with 502", async () => {
+  const token = buildSessionToken(SESSION_ID);
+  const env = createEnv();
+  const ctx = createExecutionContext();
+
+  await withMockedFetch(
+    () =>
+      Promise.resolve(
+        jsonResponse({
+          ok: true,
+        })
+      ),
+    async () => {
+      const request = createRequest(
+        "/jobs/job-invalid?session_id=sess-123&user_id=user-1&tenant_id=tenant-1",
+        token
+      );
+      const response = await handleJobsEndpoint({
+        ctx,
+        env,
+        path: new URL(request.url).pathname,
+        request,
+        scheduleJobEvent: () => {
+          // no-op in tests
+        },
+      });
+
+      assert.equal(response.status, 502);
+      assert.deepEqual(await response.json(), {
+        error: "Invalid job status response from Modal backend",
+        ok: false,
+      });
+    }
+  );
+});
+
+test("GET /jobs/:id rejects ownership payloads missing user identity required by auth", async () => {
+  const token = buildSessionToken(SESSION_ID);
+  const env = createEnv();
+  const ctx = createExecutionContext();
+
+  await withMockedFetch(
+    () =>
+      Promise.resolve(
+        jsonResponse({
+          created_at: 4,
+          job_id: "job-missing-user",
+          session_id: SESSION_ID,
+          status: "queued",
+          tenant_id: TENANT_ID,
+        })
+      ),
+    async () => {
+      const request = createRequest(
+        "/jobs/job-missing-user?session_id=sess-123&user_id=user-1&tenant_id=tenant-1",
+        token
+      );
+      const response = await handleJobsEndpoint({
+        ctx,
+        env,
+        path: new URL(request.url).pathname,
+        request,
+        scheduleJobEvent: () => {
+          // no-op in tests
+        },
+      });
+
+      assert.equal(response.status, 502);
+      assert.deepEqual(await response.json(), {
+        error: "Job status response missing user_id for ownership enforcement",
+        ok: false,
+      });
+    }
+  );
+});

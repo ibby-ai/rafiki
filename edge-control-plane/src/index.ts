@@ -15,25 +15,36 @@
 
 import { buildInternalAuthToken } from "./auth/internal-auth";
 import { AuthError, authenticateClientRequest } from "./auth/session-auth";
+import {
+  JobSubmitRequestSchema,
+  QueryRequestSchema,
+} from "./contracts/public-api";
 import { EventBus as EventBusClass } from "./durable-objects/event-bus";
 import { SessionAgent as SessionAgentClass } from "./durable-objects/session-agent";
 import { handleJobsEndpoint as handleJobsProxyEndpoint } from "./routes/jobs-proxy";
+import {
+  buildCorsHeaders,
+  getPublicSessionRoutePolicy,
+} from "./routes/public-worker-contract";
+import { handleSchedulesEndpoint as handleSchedulesProxyEndpoint } from "./routes/schedules-proxy";
 import type {
   Env,
   JobEventMessage,
-  JobSubmitRequest,
   JobSubmitResponse,
   QueryRequest,
-  ScheduleCreateRequest,
-  ScheduleListResponse,
-  ScheduleResponse,
-  ScheduleUpdateRequest,
 } from "./types";
 
 export const EventBus = EventBusClass;
 export const SessionAgent = SessionAgentClass;
 
 const SESSION_PATH_REGEX = /^\/session\/([^/]+)(\/.*)?$/;
+
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 /**
  * Main Worker fetch handler
@@ -48,12 +59,7 @@ export default {
     const path = url.pathname;
 
     // CORS headers for browser clients
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Max-Age": "86400",
-    };
+    const corsHeaders = buildCorsHeaders();
 
     // Handle preflight requests
     if (request.method === "OPTIONS") {
@@ -85,7 +91,7 @@ export default {
             scheduleJobEvent(env, ctx, auth, message),
         });
       } else if (path === "/schedules" || path.startsWith("/schedules/")) {
-        response = await handleSchedulesEndpoint(request, env, path);
+        response = await handleSchedulesProxyEndpoint(request, env, path);
       } else if (path.startsWith("/session/")) {
         response = await handleSessionEndpoint(request, env, path);
       } else if (path === "/ws" || path === "/events") {
@@ -206,13 +212,13 @@ async function handleQuery(request: Request, env: Env): Promise<Response> {
   try {
     requestBody = await request.json();
   } catch {
-    return new Response(
-      JSON.stringify({ ok: false, error: "Invalid JSON request body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonError("Invalid JSON request body", 400);
   }
-
-  const body = requestBody as QueryRequest;
+  const parsedBody = QueryRequestSchema.safeParse(requestBody);
+  if (!parsedBody.success) {
+    return jsonError("Invalid query request body", 400);
+  }
+  const body = parsedBody.data;
 
   const auth = await authenticateClientRequest({
     request,
@@ -317,7 +323,17 @@ async function handleJobSubmit(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const body = (await request.json()) as JobSubmitRequest;
+  let requestBody: unknown;
+  try {
+    requestBody = await request.json();
+  } catch {
+    return jsonError("Invalid JSON request body", 400);
+  }
+  const parsedBody = JobSubmitRequestSchema.safeParse(requestBody);
+  if (!parsedBody.success) {
+    return jsonError("Invalid job submission body", 400);
+  }
+  const body = parsedBody.data;
 
   const auth = await authenticateClientRequest({
     request,
@@ -404,6 +420,13 @@ async function handleSessionEndpoint(
 
   const sessionId = match[1];
   const subpath = match[2] || "";
+  const routePolicy = getPublicSessionRoutePolicy(subpath);
+  if (!routePolicy) {
+    return new Response("Not found", { status: 404 });
+  }
+  if (!routePolicy.allowedMethods.includes(request.method)) {
+    return new Response("Method not allowed", { status: 405 });
+  }
 
   const auth = await authenticateClientRequest({
     request,
@@ -421,7 +444,7 @@ async function handleSessionEndpoint(
   const doId = env.SESSION_AGENT.idFromName(auth.session_id);
   const doStub = env.SESSION_AGENT.get(doId);
 
-  const forwardUrl = new URL(`https://internal${subpath || "/state"}`);
+  const forwardUrl = new URL(`https://internal${routePolicy.forwardPath}`);
   forwardUrl.searchParams.set("session_id", auth.session_id);
   if (auth.session_key) {
     forwardUrl.searchParams.set("session_key", auth.session_key);
@@ -441,79 +464,6 @@ async function handleSessionEndpoint(
       body: request.body,
     })
   );
-
-  return response;
-}
-
-/**
- * Handle schedule CRUD endpoints by forwarding to Modal backend.
- */
-async function handleSchedulesEndpoint(
-  request: Request,
-  env: Env,
-  path: string
-): Promise<Response> {
-  let body: ScheduleCreateRequest | ScheduleUpdateRequest | undefined;
-  if (
-    request.method === "PATCH" ||
-    (request.method === "POST" && path === "/schedules")
-  ) {
-    body = (await request.json()) as
-      | ScheduleCreateRequest
-      | ScheduleUpdateRequest;
-  }
-
-  const url = new URL(request.url);
-  const auth = await authenticateClientRequest({
-    request,
-    env,
-    sessionId: url.searchParams.get("session_id"),
-    sessionKey: url.searchParams.get("session_key"),
-    userId: url.searchParams.get("user_id"),
-    tenantId: url.searchParams.get("tenant_id"),
-  });
-
-  const modalUrl = new URL(`${env.MODAL_API_BASE_URL}${path}`);
-  for (const [key, value] of url.searchParams.entries()) {
-    if (key === "token") {
-      continue;
-    }
-    modalUrl.searchParams.set(key, value);
-  }
-
-  const authToken = await buildInternalAuthToken(env.INTERNAL_AUTH_SECRET);
-  const response = await fetch(modalUrl.toString(), {
-    method: request.method,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Internal-Auth": authToken,
-      "X-Session-Id": auth.session_id,
-      "X-Session-Key": auth.session_key || "",
-      "X-User-Id": auth.user_id || "",
-      "X-Tenant-Id": auth.tenant_id || "",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  // Narrow response shapes for TS and keep passthrough payload unchanged.
-  if (response.ok && request.method === "GET" && path === "/schedules") {
-    const payload = (await response.clone().json()) as ScheduleListResponse;
-    return new Response(JSON.stringify(payload), {
-      status: response.status,
-      headers: response.headers,
-    });
-  }
-  if (
-    response.ok &&
-    request.method === "GET" &&
-    path.startsWith("/schedules/")
-  ) {
-    const payload = (await response.clone().json()) as ScheduleResponse;
-    return new Response(JSON.stringify(payload), {
-      status: response.status,
-      headers: response.headers,
-    });
-  }
 
   return response;
 }

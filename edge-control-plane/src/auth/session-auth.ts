@@ -1,8 +1,57 @@
-import type { AuthContext, Env, SessionToken } from "../types";
+/**
+ * Worker session-token verification and request-authentication helpers.
+ *
+ * @module auth/session-auth
+ */
+
+import { z } from "zod";
+
+interface SessionTokenClaims {
+  expires_at: number;
+  issued_at: number;
+  session_id?: string;
+  session_ids?: string[];
+  tenant_id?: string;
+  user_id?: string;
+}
+
+/**
+ * Environment bindings required for public session authentication.
+ */
+export interface SessionAuthEnv {
+  SESSION_CACHE: KVNamespace;
+  SESSION_KEY_TTL_SECONDS?: string;
+  SESSION_SIGNING_SECRET: string;
+}
+
+/**
+ * Actor scope resolved from a verified public session token.
+ */
+export interface VerifiedSessionContext {
+  expires_at: number;
+  issued_at: number;
+  session_ids?: string[];
+  tenant_id?: string;
+  user_id?: string;
+}
 
 const encoder = new TextEncoder();
 const DEFAULT_SKEW_MS = 60_000;
+const tokenClaimIdSchema = z.string().trim().min(1);
+const SessionTokenClaimsSchema = z
+  .object({
+    expires_at: z.number(),
+    issued_at: z.number(),
+    session_id: tokenClaimIdSchema.optional(),
+    session_ids: z.array(tokenClaimIdSchema).optional(),
+    tenant_id: tokenClaimIdSchema.optional(),
+    user_id: tokenClaimIdSchema.optional(),
+  })
+  .strict();
 
+/**
+ * Error returned when public request authentication fails.
+ */
 export class AuthError extends Error {
   status: number;
   constructor(message: string, status = 401) {
@@ -11,9 +60,25 @@ export class AuthError extends Error {
   }
 }
 
-export interface AuthenticatedRequest extends AuthContext {
+/**
+ * Authenticated request context resolved from a public session token.
+ */
+export interface AuthenticatedRequest extends VerifiedSessionContext {
   session_id: string;
   session_key?: string | null;
+}
+
+/**
+ * Input contract for `authenticateClientRequest`.
+ */
+export interface AuthenticateClientRequestOptions {
+  env: SessionAuthEnv;
+  request: Request;
+  requireUserOrTenant?: boolean;
+  sessionId?: string | null;
+  sessionKey?: string | null;
+  tenantId?: string | null;
+  userId?: string | null;
 }
 
 function base64DecodeToBytes(value: string): Uint8Array {
@@ -49,12 +114,15 @@ function requireSecret(secret?: string): string {
   return secret.trim();
 }
 
+/**
+ * Verify a signed session token and return the authorized actor context.
+ */
 export async function verifySessionToken(
   rawToken: string,
   secret: string,
   nowMs: number = Date.now(),
   skewMs: number = DEFAULT_SKEW_MS
-): Promise<AuthContext> {
+): Promise<VerifiedSessionContext> {
   const token = normalizeToken(rawToken);
   if (!token) {
     throw new AuthError("Missing authorization token", 401);
@@ -73,16 +141,15 @@ export async function verifySessionToken(
     throw new AuthError("Invalid token payload", 401);
   }
 
-  let payload: SessionToken;
+  let payload: SessionTokenClaims;
   try {
-    payload = JSON.parse(
-      new TextDecoder().decode(payloadBytes)
-    ) as SessionToken;
+    const decodedPayload = JSON.parse(new TextDecoder().decode(payloadBytes));
+    const parsedPayload = SessionTokenClaimsSchema.safeParse(decodedPayload);
+    if (!parsedPayload.success) {
+      throw new AuthError("Invalid token payload", 401);
+    }
+    payload = parsedPayload.data;
   } catch {
-    throw new AuthError("Invalid token payload", 401);
-  }
-
-  if (!payload || typeof payload !== "object") {
     throw new AuthError("Invalid token payload", 401);
   }
 
@@ -168,7 +235,7 @@ function normalizeOptionalId(value?: string | null): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function resolveSessionTtlSeconds(env: Env): number {
+function resolveSessionTtlSeconds(env: SessionAuthEnv): number {
   const raw = env.SESSION_KEY_TTL_SECONDS;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(parsed) && parsed > 0) {
@@ -182,7 +249,7 @@ function buildSessionKeyCacheKey(scope: string, sessionKey: string): string {
 }
 
 function assertRequestedContextMatches(
-  context: AuthContext,
+  context: VerifiedSessionContext,
   requestedUserId: string | undefined,
   requestedTenantId: string | undefined
 ): void {
@@ -221,7 +288,7 @@ function enforceSessionAuthorization(
 }
 
 async function resolveSessionIdFromKey(options: {
-  env: Env;
+  env: SessionAuthEnv;
   resolvedSessionId: string | undefined;
   sessionKey: string | undefined;
   cacheScope: string;
@@ -251,15 +318,12 @@ async function resolveSessionIdFromKey(options: {
   return generatedSessionId;
 }
 
-export async function authenticateClientRequest(options: {
-  request: Request;
-  env: Env;
-  sessionId?: string | null;
-  sessionKey?: string | null;
-  userId?: string | null;
-  tenantId?: string | null;
-  requireUserOrTenant?: boolean;
-}): Promise<AuthenticatedRequest> {
+/**
+ * Authenticate a public Worker request and resolve its session scope.
+ */
+export async function authenticateClientRequest(
+  options: AuthenticateClientRequestOptions
+): Promise<AuthenticatedRequest> {
   const token = extractAuthToken(options.request);
   if (!token) {
     throw new AuthError("Missing authorization token", 401);

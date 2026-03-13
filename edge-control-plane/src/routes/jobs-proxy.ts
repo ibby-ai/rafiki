@@ -3,6 +3,10 @@ import {
   buildInternalAuthToken,
 } from "../auth/internal-auth";
 import { authenticateClientRequest } from "../auth/session-auth";
+import {
+  ArtifactListResponseSchema,
+  JobStatusResponseSchema,
+} from "../contracts/public-api";
 import type { Env, JobEventMessage, JobStatusResponse } from "../types";
 
 const ARTIFACT_PREFIX = "/artifacts/";
@@ -29,6 +33,13 @@ interface JobOwnershipFetchResult {
 
 interface JobEventScheduler {
   scheduleJobEvent: (auth: JobRouteEventAuth, message: JobEventMessage) => void;
+}
+
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 function parseJobRoute(
@@ -100,14 +111,34 @@ async function fetchJobOwnership(options: {
       }),
     };
   }
-  return { ownership: (await response.json()) as JobStatusResponse };
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return {
+      response: jsonError(
+        "Invalid job status response from Modal backend",
+        502
+      ),
+    };
+  }
+  const parsedOwnership = JobStatusResponseSchema.safeParse(payload);
+  if (!parsedOwnership.success) {
+    return {
+      response: jsonError(
+        "Invalid job status response from Modal backend",
+        502
+      ),
+    };
+  }
+  return { ownership: parsedOwnership.data };
 }
 
 function validateOwnershipScope(
   ownership: JobStatusResponse,
   auth: JobRouteAuth
 ): Response | null {
-  if (ownership.session_id && ownership.session_id !== auth.session_id) {
+  if (ownership.session_id !== auth.session_id) {
     return new Response(
       JSON.stringify({ ok: false, error: "Job session mismatch" }),
       {
@@ -116,7 +147,13 @@ function validateOwnershipScope(
       }
     );
   }
-  if (auth.user_id && ownership.user_id && ownership.user_id !== auth.user_id) {
+  if (auth.user_id && !ownership.user_id) {
+    return jsonError(
+      "Job status response missing user_id for ownership enforcement",
+      502
+    );
+  }
+  if (auth.user_id && ownership.user_id !== auth.user_id) {
     return new Response(
       JSON.stringify({ ok: false, error: "Job user mismatch" }),
       {
@@ -125,11 +162,13 @@ function validateOwnershipScope(
       }
     );
   }
-  if (
-    auth.tenant_id &&
-    ownership.tenant_id &&
-    ownership.tenant_id !== auth.tenant_id
-  ) {
+  if (auth.tenant_id && !ownership.tenant_id) {
+    return jsonError(
+      "Job status response missing tenant_id for ownership enforcement",
+      502
+    );
+  }
+  if (auth.tenant_id && ownership.tenant_id !== auth.tenant_id) {
     return new Response(
       JSON.stringify({ ok: false, error: "Job tenant mismatch" }),
       {
@@ -197,17 +236,23 @@ function scheduleJobStatusEventFromResponse(
   options.ctx.waitUntil(
     (async () => {
       try {
-        const payload = (await clone.json()) as JobStatusResponse;
+        const payload = JobStatusResponseSchema.safeParse(await clone.json());
+        if (!payload.success) {
+          console.warn("Failed to publish job_status event", {
+            reason: "invalid job status response",
+          });
+          return;
+        }
         const jobEvent: JobEventMessage = {
           type: "job_status",
-          session_id: payload.session_id || options.auth.session_id,
+          session_id: payload.data.session_id,
           timestamp: Date.now(),
           data: {
-            job_id: payload.job_id || options.jobId,
-            status: payload.status,
-            user_id: payload.user_id || options.auth.user_id,
-            tenant_id: payload.tenant_id || options.auth.tenant_id,
-            payload,
+            job_id: payload.data.job_id || options.jobId,
+            status: payload.data.status,
+            user_id: payload.data.user_id || options.auth.user_id,
+            tenant_id: payload.data.tenant_id || options.auth.tenant_id,
+            payload: payload.data,
           },
         };
         options.scheduleJobEvent(options.auth, jobEvent);
@@ -294,6 +339,29 @@ export async function handleJobsEndpoint(
       artifactAccessToken: artifactToken.token,
     }),
   });
+
+  if (mode.isArtifactList && response.ok) {
+    let payload: unknown;
+    try {
+      payload = await response.clone().json();
+    } catch {
+      return jsonError(
+        "Invalid artifact list response from Modal backend",
+        502
+      );
+    }
+    const parsedArtifacts = ArtifactListResponseSchema.safeParse(payload);
+    if (!parsedArtifacts.success) {
+      return jsonError(
+        "Invalid artifact list response from Modal backend",
+        502
+      );
+    }
+    return new Response(JSON.stringify(parsedArtifacts.data), {
+      status: response.status,
+      headers: response.headers,
+    });
+  }
 
   scheduleJobStatusEventFromResponse({
     auth,

@@ -17,6 +17,16 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildInternalAuthToken } from "../auth/internal-auth";
+import {
+  QueryRequestSchema,
+  QueryResponseSchema,
+  QueuePromptRequestSchema,
+  StreamingQueryRequestSchema,
+} from "../contracts/public-api";
+import {
+  buildSessionStopProxyResponse,
+  parseSessionStopProxyRequest,
+} from "../routes/session-stop-proxy";
 import type {
   Env,
   Message,
@@ -26,9 +36,12 @@ import type {
   QueryCompleteMessage,
   QueryRequest,
   QueryResponse,
+  QueuePromptRequest,
   SessionMessage,
   SessionState,
+  SessionStopRequest,
   SessionUpdateMessage,
+  StreamingQueryRequest,
   WebSocketMessage,
 } from "../types";
 
@@ -40,6 +53,11 @@ interface BudgetDenial {
 }
 
 const TRAILING_CARRIAGE_RETURN_REGEX = /\r$/;
+
+type QueryExecutionInput = Pick<
+  QueryRequest,
+  "agent_type" | "fork_session" | "job_id" | "question" | "trace_id" | "warm_id"
+>;
 
 class BudgetDeniedError extends Error {
   readonly status = 429;
@@ -561,7 +579,8 @@ export class SessionAgent extends DurableObject<Env> {
       const msg = JSON.parse(data) as Record<string, unknown>;
 
       if (msg.type === "stop") {
-        const stopped = await this.stopExecution();
+        const stopResponse = await this.stopExecution({ mode: "graceful" });
+        const stopped = stopResponse.ok;
         ws.send(
           JSON.stringify({
             type: "execution_state",
@@ -628,95 +647,49 @@ export class SessionAgent extends DurableObject<Env> {
     return this.sessionState?.session_id ?? this.ctx.id.toString();
   }
 
-  private parseNullableString(value: unknown): string | null | undefined {
-    if (value === undefined) {
-      return undefined;
-    }
-    if (value === null) {
+  private parseQueryRequestPayload(payload: unknown): QueryRequest | null {
+    const parsed = QueryRequestSchema.safeParse(payload);
+    if (!parsed.success) {
       return null;
     }
-    if (typeof value === "string") {
-      return value;
-    }
-    return undefined;
+    return parsed.data;
   }
 
-  private parseQueryRequestPayload(payload: unknown): QueryRequest | null {
-    if (!payload || typeof payload !== "object") {
+  private parseStreamingQueryRequestPayload(
+    payload: unknown
+  ): StreamingQueryRequest | null {
+    const parsed = StreamingQueryRequestSchema.safeParse(payload);
+    if (!parsed.success) {
       return null;
     }
-
-    const record = payload as Record<string, unknown>;
-    if (typeof record.question !== "string") {
-      return null;
-    }
-
-    const parsed: QueryRequest = { question: record.question };
-
-    if (typeof record.agent_type === "string") {
-      parsed.agent_type = record.agent_type;
-    }
-    if (typeof record.fork_session === "boolean") {
-      parsed.fork_session = record.fork_session;
-    }
-
-    const sessionId = this.parseNullableString(record.session_id);
-    if (sessionId !== undefined) {
-      parsed.session_id = sessionId;
-    }
-
-    const sessionKey = this.parseNullableString(record.session_key);
-    if (sessionKey !== undefined) {
-      parsed.session_key = sessionKey;
-    }
-
-    const jobId = this.parseNullableString(record.job_id);
-    if (jobId !== undefined) {
-      parsed.job_id = jobId;
-    }
-
-    const userId = this.parseNullableString(record.user_id);
-    if (userId !== undefined) {
-      parsed.user_id = userId;
-    }
-
-    const tenantId = this.parseNullableString(record.tenant_id);
-    if (tenantId !== undefined) {
-      parsed.tenant_id = tenantId;
-    }
-
-    const warmId = this.parseNullableString(record.warm_id);
-    if (warmId !== undefined) {
-      parsed.warm_id = warmId;
-    }
-
-    return parsed;
+    return parsed.data;
   }
 
   private parseQueryResponsePayload(payload: unknown): QueryResponse | null {
-    if (!payload || typeof payload !== "object") {
+    const parsed = QueryResponseSchema.safeParse(payload);
+    if (!parsed.success) {
       return null;
     }
+    return parsed.data;
+  }
 
-    const record = payload as Record<string, unknown>;
-    if (
-      !Array.isArray(record.messages) ||
-      typeof record.session_id !== "string"
-    ) {
-      return null;
+  private buildTrustedQueryRequest(body: QueryExecutionInput): QueryRequest {
+    if (!this.sessionState) {
+      throw new Error("Session state not initialized");
     }
 
-    const response: QueryResponse = {
-      ok: typeof record.ok === "boolean" ? record.ok : true,
-      session_id: record.session_id,
-      messages: record.messages as Message[],
+    return {
+      agent_type: body.agent_type,
+      fork_session: body.fork_session,
+      job_id: body.job_id,
+      question: body.question,
+      session_id: this.sessionState.session_id,
+      session_key: this.sessionState.session_key,
+      tenant_id: this.sessionState.tenant_id,
+      trace_id: body.trace_id,
+      user_id: this.sessionState.user_id,
+      warm_id: body.warm_id,
     };
-
-    if (typeof record.error === "string" && record.error.length > 0) {
-      response.error = record.error;
-    }
-
-    return response;
   }
 
   private extractErrorMessage(payload: unknown): string | undefined {
@@ -769,14 +742,14 @@ export class SessionAgent extends DurableObject<Env> {
 
   private extractQueryRequest(
     msg: Record<string, unknown>
-  ): QueryRequest | null {
-    const directPayload = this.parseQueryRequestPayload(msg);
+  ): StreamingQueryRequest | null {
+    const directPayload = this.parseStreamingQueryRequestPayload(msg);
     if (directPayload) {
       return directPayload;
     }
 
     if (msg.type === "query") {
-      const nestedPayload = this.parseQueryRequestPayload(msg.data);
+      const nestedPayload = this.parseStreamingQueryRequestPayload(msg.data);
       if (nestedPayload) {
         return nestedPayload;
       }
@@ -806,7 +779,7 @@ export class SessionAgent extends DurableObject<Env> {
 
   private async handleStreamingQuery(
     ws: WebSocket,
-    body: QueryRequest
+    body: StreamingQueryRequest
   ): Promise<void> {
     if (!this.sessionState) {
       ws.send(
@@ -820,12 +793,7 @@ export class SessionAgent extends DurableObject<Env> {
       return;
     }
 
-    await this.reconcileSessionIdentity({
-      sessionId: body.session_id,
-      sessionKey: body.session_key,
-      userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined,
-    });
+    const trustedBody = this.buildTrustedQueryRequest(body);
 
     if (this.sessionState.status === "executing") {
       ws.send(
@@ -839,7 +807,7 @@ export class SessionAgent extends DurableObject<Env> {
       return;
     }
 
-    const budgetReservation = await this.reserveBudget(body.question);
+    const budgetReservation = await this.reserveBudget(trustedBody.question);
     if (!budgetReservation.ok) {
       const deniedMessage = {
         type: "query_error",
@@ -861,11 +829,8 @@ export class SessionAgent extends DurableObject<Env> {
     }
 
     this.sessionState.status = "executing";
-    this.sessionState.current_prompt = body.question;
+    this.sessionState.current_prompt = trustedBody.question;
     this.sessionState.last_active_at = Date.now();
-    if (body.user_id) {
-      this.sessionState.user_id = body.user_id;
-    }
     await this.saveSessionState();
 
     this.broadcastToWebSockets({
@@ -874,7 +839,7 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question,
+        current_prompt: trustedBody.question,
       },
     } satisfies SessionUpdateMessage);
     this.broadcastToEventBus({
@@ -883,7 +848,7 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question,
+        current_prompt: trustedBody.question,
       },
     } satisfies SessionUpdateMessage);
 
@@ -892,8 +857,8 @@ export class SessionAgent extends DurableObject<Env> {
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
       data: {
-        question: body.question,
-        agent_type: body.agent_type || "default",
+        question: trustedBody.question,
+        agent_type: trustedBody.agent_type || "default",
       },
     });
     this.broadcastToEventBus({
@@ -901,8 +866,8 @@ export class SessionAgent extends DurableObject<Env> {
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
       data: {
-        question: body.question,
-        agent_type: body.agent_type || "default",
+        question: trustedBody.question,
+        agent_type: trustedBody.agent_type || "default",
       },
     });
 
@@ -919,8 +884,7 @@ export class SessionAgent extends DurableObject<Env> {
     try {
       await this.streamModalSSE(
         {
-          ...body,
-          session_id: this.sessionState.session_id,
+          ...trustedBody,
         },
         // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Streaming event fan-out requires ordered, inline handling for state and websocket parity.
         async (event, data) => {
@@ -1289,15 +1253,16 @@ export class SessionAgent extends DurableObject<Env> {
     preflightBudgetReserved = false
   ): Promise<QueryResponse> {
     const startedAt = Date.now();
+    const trustedBody = this.buildTrustedQueryRequest(body);
     await this.reconcileSessionIdentity({
-      sessionId: body.session_id,
-      sessionKey: body.session_key,
-      userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined,
+      sessionId: trustedBody.session_id,
+      sessionKey: trustedBody.session_key,
+      userId: trustedBody.user_id,
+      tenantId: trustedBody.tenant_id ?? undefined,
     });
 
     if (!preflightBudgetReserved) {
-      const budgetReservation = await this.reserveBudget(body.question);
+      const budgetReservation = await this.reserveBudget(trustedBody.question);
       if (!budgetReservation.ok) {
         throw new BudgetDeniedError(budgetReservation);
       }
@@ -1312,14 +1277,8 @@ export class SessionAgent extends DurableObject<Env> {
     }
 
     this.sessionState.status = "executing";
-    this.sessionState.current_prompt = body.question;
+    this.sessionState.current_prompt = trustedBody.question;
     this.sessionState.last_active_at = Date.now();
-    if (body.user_id) {
-      this.sessionState.user_id = body.user_id;
-    }
-    if (body.tenant_id) {
-      this.sessionState.tenant_id = body.tenant_id;
-    }
     await this.saveSessionState();
 
     this.broadcastToWebSockets({
@@ -1328,7 +1287,7 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question,
+        current_prompt: trustedBody.question,
       },
     } satisfies SessionUpdateMessage);
     this.broadcastToEventBus({
@@ -1337,7 +1296,7 @@ export class SessionAgent extends DurableObject<Env> {
       timestamp: Date.now(),
       data: {
         status: "executing",
-        current_prompt: body.question,
+        current_prompt: trustedBody.question,
       },
     } satisfies SessionUpdateMessage);
 
@@ -1346,8 +1305,8 @@ export class SessionAgent extends DurableObject<Env> {
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
       data: {
-        question: body.question,
-        agent_type: body.agent_type || "default",
+        question: trustedBody.question,
+        agent_type: trustedBody.agent_type || "default",
       },
     });
     this.broadcastToEventBus({
@@ -1355,8 +1314,8 @@ export class SessionAgent extends DurableObject<Env> {
       session_id: this.sessionState.session_id,
       timestamp: Date.now(),
       data: {
-        question: body.question,
-        agent_type: body.agent_type || "default",
+        question: trustedBody.question,
+        agent_type: trustedBody.agent_type || "default",
       },
     });
 
@@ -1364,8 +1323,7 @@ export class SessionAgent extends DurableObject<Env> {
       endpoint: "/query",
       method: "POST",
       body: {
-        ...body,
-        session_id: this.sessionState.session_id,
+        ...trustedBody,
       },
     });
 
@@ -1394,7 +1352,9 @@ export class SessionAgent extends DurableObject<Env> {
     const result = this.parseQueryResponsePayload(modalResponse.data);
     if (!result?.ok) {
       const modalError =
-        result?.error || modalResponse.error || "Invalid Modal response";
+        this.extractErrorMessage(modalResponse.data) ||
+        modalResponse.error ||
+        "Invalid Modal response";
       this.sessionState.status = "error";
       this.sessionState.current_prompt = undefined;
       this.sessionState.last_active_at = Date.now();
@@ -1689,8 +1649,8 @@ export class SessionAgent extends DurableObject<Env> {
       );
     }
 
-    const body = this.parseQueryRequestPayload(requestBody);
-    if (!body) {
+    const parsedBody = QueuePromptRequestSchema.safeParse(requestBody);
+    if (!parsedBody.success) {
       return new Response(
         JSON.stringify({
           ok: false,
@@ -1700,19 +1660,16 @@ export class SessionAgent extends DurableObject<Env> {
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
+    const body: QueuePromptRequest = parsedBody.data;
 
-    if (!body.question) {
-      return new Response(
-        JSON.stringify({ ok: false, queued: false, error: "Missing question" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
+    const { sessionId, sessionKey, userId, tenantId } =
+      this.extractSessionInfoFromUrl(request);
 
     await this.reconcileSessionIdentity({
-      sessionId: body.session_id,
-      sessionKey: body.session_key,
-      userId: body.user_id,
-      tenantId: body.tenant_id ?? undefined,
+      sessionId,
+      sessionKey,
+      userId,
+      tenantId,
     });
     await this.pruneExpiredQueueEntries();
     const { maxQueueSize, expirySeconds } = this.getQueueConfig();
@@ -1764,7 +1721,7 @@ export class SessionAgent extends DurableObject<Env> {
       id,
       body.question,
       body.agent_type || "default",
-      body.user_id || null,
+      this.sessionState?.user_id || null,
       queuedAt,
       0
     );
@@ -2062,39 +2019,63 @@ export class SessionAgent extends DurableObject<Env> {
       tenantId,
     });
 
-    const ok = await this.stopExecution();
-    return new Response(JSON.stringify({ ok }), {
-      status: ok ? 200 : 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    const stopRequest = await parseSessionStopProxyRequest(request);
+    if (stopRequest instanceof Response) {
+      return stopRequest;
+    }
+
+    if (stopRequest.method === "GET") {
+      return this.forwardStopStatus();
+    }
+
+    return this.stopExecution(stopRequest.body);
   }
 
-  private async stopExecution(): Promise<boolean> {
+  private async forwardStopStatus(): Promise<Response> {
     if (!this.sessionState) {
-      return false;
+      return new Response(
+        JSON.stringify({ ok: false, error: "Session not initialized" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const modalResponse = await this.callModalBackend({
       endpoint: `/session/${this.sessionState.session_id}/stop`,
-      method: "POST",
-      body: {},
+      method: "GET",
     });
 
-    this.sessionState.status = "idle";
-    this.sessionState.current_prompt = undefined;
-    this.sessionState.last_active_at = Date.now();
-    await this.saveSessionState();
+    return buildSessionStopProxyResponse(
+      modalResponse,
+      "Invalid session stop status response from Modal backend"
+    );
+  }
 
-    const update: SessionUpdateMessage = {
-      type: "session_update",
-      session_id: this.sessionState.session_id,
-      timestamp: Date.now(),
-      data: { status: "idle" },
-    };
-    this.broadcastToWebSockets(update);
-    this.broadcastToEventBus(update);
+  private async stopExecution(body: SessionStopRequest): Promise<Response> {
+    if (!this.sessionState) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Session not initialized" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
-    return modalResponse.ok;
+    const requestedBy =
+      this.sessionState.user_id ||
+      this.sessionState.tenant_id ||
+      this.sessionState.session_id;
+
+    const modalResponse = await this.callModalBackend({
+      endpoint: `/session/${this.sessionState.session_id}/stop`,
+      method: "POST",
+      body: {
+        ...body,
+        requested_by: requestedBy,
+      },
+    });
+
+    return buildSessionStopProxyResponse(
+      modalResponse,
+      "Invalid session stop response from Modal backend"
+    );
   }
 
   /**

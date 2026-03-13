@@ -1,3 +1,9 @@
+/**
+ * Worker-internal token helpers for requests sent to Modal and artifact routes.
+ *
+ * @module auth/internal-auth
+ */
+
 import type { ArtifactAccessToken, InternalAuthToken } from "../types";
 
 const encoder = new TextEncoder();
@@ -27,6 +33,9 @@ async function signPayload(
   return base64EncodeBytes(signature);
 }
 
+/**
+ * Build a signed token string from an arbitrary JSON payload.
+ */
 export async function buildSignedInternalToken(
   secret: string,
   payload: object
@@ -38,6 +47,9 @@ export async function buildSignedInternalToken(
   return `${payloadB64}.${signatureB64}`;
 }
 
+/**
+ * Mint the short-lived auth token used for Worker-to-Modal requests.
+ */
 export function buildInternalAuthToken(
   secret: string,
   nowMs: number = Date.now(),
@@ -51,6 +63,9 @@ export function buildInternalAuthToken(
   return buildSignedInternalToken(secret, payload);
 }
 
+/**
+ * Mint a scoped artifact token for a single job artifact download path.
+ */
 export async function buildArtifactAccessToken(options: {
   secret: string;
   sessionId: string;
