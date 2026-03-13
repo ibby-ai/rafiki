@@ -1,10 +1,8 @@
-# Rafiki (Modal + OpenAI Agents SDK)
-
-<!-- ⚠️ WARNING: This project is experimental. Features and behavior may change without warning. -->
+# Rafiki
 
 ![CI](https://github.com/Saidiibrahim/rafiki/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
-![Modal](https://img.shields.io/badge/Modal-1.2.1+-8B5CF6.svg)
+![Modal](https://img.shields.io/badge/Modal-1.3.5+-8B5CF6.svg)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020.svg?logo=cloudflare&logoColor=white)
 ![Cloudflare Durable Objects](https://img.shields.io/badge/Cloudflare-Durable%20Objects-F38020.svg?logo=cloudflare&logoColor=white)
 ![Cloudflare KV](https://img.shields.io/badge/Cloudflare-KV-F38020.svg?logo=cloudflare&logoColor=white)
@@ -15,8 +13,8 @@
 
 ![Rafiki](docs/images/readme-image.png)
 
-Rafiki is a production ready agent harness: the operational shell that makes an agent executable, stateful, secure, routable, and observable in production.
-Cloudflare Workers + Durable Objects provide the public control plane, while Modal runs the internal execution backend for the current OpenAI Agents SDK-based runtime.
+Rafiki is a Cloudflare-first agent harness for running stateful OpenAI Agents workflows with secure Modal execution.
+Cloudflare Workers + Durable Objects provide the public control plane, while Modal runs the internal execution backend for the current runtime.
 The harness remains the stable system boundary even if the underlying agent loop changes.
 This project was inspired by Ramp's blog post, [Why we built our background agent](https://builders.ramp.com/post/why-we-built-our-background-agent).
 
@@ -30,14 +28,12 @@ This project was inspired by Ramp's blog post, [Why we built our background agen
 ## Setup
 
 ```bash
+uv sync --extra dev
 source .venv/bin/activate
-uv sync
-uv run pre-commit install
 
 # Modal auth + required API secret
-pip install modal
-modal setup
-modal secret create openai-secret OPENAI_API_KEY=<your-key>
+uv run modal setup
+uv run modal secret create openai-secret OPENAI_API_KEY=<your-key>
 ```
 
 ## Quickstart
@@ -45,14 +41,14 @@ modal secret create openai-secret OPENAI_API_KEY=<your-key>
 ### Local Modal smoke check
 
 ```bash
-modal run -m modal_backend.main
-modal run -m modal_backend.main::run_agent_remote --question "Explain REST vs gRPC"
+uv run modal run -m modal_backend.main
+uv run modal run -m modal_backend.main::run_agent_remote --question "Explain REST vs gRPC"
 ```
 
 ### Local service mode
 
 ```bash
-modal serve -m modal_backend.main
+uv run modal serve -m modal_backend.main
 # or
 make serve
 ```
@@ -60,7 +56,7 @@ make serve
 ### Deploy Internal Modal Backend
 
 ```bash
-modal deploy -m modal_backend.deploy
+uv run modal deploy -m modal_backend.deploy
 ```
 
 ## Cloudflare Control Plane (Required for Client Traffic)
@@ -69,8 +65,6 @@ modal deploy -m modal_backend.deploy
 cd edge-control-plane
 npm install
 wrangler login
-wrangler secret put MODAL_TOKEN_ID
-wrangler secret put MODAL_TOKEN_SECRET
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
 wrangler kv:namespace create SESSION_CACHE
@@ -80,11 +74,13 @@ npm run deploy
 The Worker also depends on matching Modal-side auth secrets:
 
 ```bash
-modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
-modal secret create modal-auth-secret \
+uv run modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+uv run modal secret create modal-auth-secret \
   SANDBOX_MODAL_TOKEN_ID=<token-id> \
   SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
+
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` are not part of the canonical public Worker request path. If you need a non-canonical route that depends on them, follow the edge control plane docs explicitly.
 
 For the canonical setup and verification flow, start with `docs/references/runbooks/cloudflare-modal-e2e.md` and `edge-control-plane/README.md`.
 
@@ -96,13 +92,13 @@ For the canonical setup and verification flow, start with `docs/references/runbo
 
 ```bash
 # Terminate background sandbox
-modal run -m modal_backend.main::terminate_service_sandbox
+uv run modal run -m modal_backend.main::terminate_service_sandbox
 
 # Snapshot service filesystem
-modal run -m modal_backend.main::snapshot_service
+uv run modal run -m modal_backend.main::snapshot_service
 
 # Run tests
-uv run pytest
+uv run python -m pytest
 ```
 
 ## Docs
