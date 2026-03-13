@@ -22,11 +22,11 @@
 - [Modal Advanced Features](./completed/modal-advanced-features/PLAN_modal-advanced-features.md)
 - [Modal Advanced Followups](./completed/modal-advanced-followups/PLAN_modal-advanced-followups.md)
 - [Multi Agent Support](./completed/multi_agent_support/PLAN_multi_agent_support.md)
+- [Sandbox Persistence Tasks](./completed/sandbox_persistence/)
+
+## Historical / Superseded Plans
 - [Claude CLI Sandbox](./completed/claude_cli_sandbox/PLAN_claude_cli_sandbox.md)
 - [Claude Code CLI](./completed/claude_code_cli/PLAN_claude_code_cli.md)
 - [CLI Sandbox Controller](./completed/cli-sandbox-controller/PLAN_cli-sandbox-controller.md)
-- [Sandbox Persistence Tasks](./completed/sandbox_persistence/)
 - [Historical Reports](./completed/reports/)
-
-## Historical / Superseded Plans
 - [Production Readiness (Claude Agent SDK, superseded pre-OpenAI cutover)](./completed/prod_readiness_claude_agent_sdk/PLAN_prod_readiness_claude_agent_sdk.md)

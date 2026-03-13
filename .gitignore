@@ -237,6 +237,7 @@ notes/
 # Agent working files
 .agent/
 .serena/
+.claude/plans/
 
 # Editor-specific directories
 .cursor/

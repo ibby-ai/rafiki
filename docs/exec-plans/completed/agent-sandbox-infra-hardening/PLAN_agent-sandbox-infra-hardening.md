@@ -15,7 +15,7 @@ Adopt the highest-impact security and scaling ideas from the X article "How We B
 - Observation: `npm --prefix edge-control-plane run check` was non-zero during this wave and required a dedicated follow-up remediation pass; `tsc --noEmit` remained green.
 - Evidence: control-plane validation commands on 2026-03-02.
 - Observation: Queue budget denials were previously only visible during drain-time execution; adding queue preflight budget checks gives deterministic `429` denial contracts before enqueue.
-- Evidence: `edge-control-plane/src/durable-objects/SessionAgent.ts`, budget smoke outputs in runbook commands.
+- Evidence: `edge-control-plane/src/durable-objects/session-agent.ts`, budget smoke outputs in runbook commands.
 
 ## Decision Log
 - Decision: Treat the article as a reference architecture pattern, not a direct stack migration mandate.
@@ -76,8 +76,8 @@ External reference that motivated this plan:
 Key surfaces impacted by this plan:
 - Control plane routing/auth/session orchestration:
   - `edge-control-plane/src/index.ts`
-  - `edge-control-plane/src/durable-objects/SessionAgent.ts`
-  - `edge-control-plane/src/auth/sessionAuth.ts`
+  - `edge-control-plane/src/durable-objects/session-agent.ts`
+  - `edge-control-plane/src/auth/session-auth.ts`
 - Modal runtime and sandbox lifecycle:
   - `modal_backend/main.py`
   - `modal_backend/api/controller.py`

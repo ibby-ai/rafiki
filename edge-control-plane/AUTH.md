@@ -531,28 +531,11 @@ wscat -c "wss://worker.example.com/ws?user_id=test-user-123" \
 
 ---
 
-## Migration from Modal-only to Cloudflare
+## Migration Status
 
-### Phase 1: Parallel Deployment
+Cloudflare-first cutover is complete.
 
-- Deploy Cloudflare Worker alongside existing Modal gateway
-- Route subset of traffic (by user ID or percentage) to Cloudflare
-- Monitor metrics (latency, error rates, WebSocket connections)
-
-### Phase 2: Gradual Rollout
-
-- Increase traffic percentage to Cloudflare: 10% → 50% → 90%
-- Keep Modal gateway as fallback
-- Implement feature flags for easy rollback
-
-### Phase 3: Full Cutover
-
-- Route all traffic to Cloudflare Worker
-- Deprecate Modal `@modal.asgi_app()` gateway
-- Keep Modal backend for execution only
-
-### Phase 4: Cleanup
-
-- Remove unused Modal gateway code
-- Update documentation
-- Archive old deployment configs
+- Cloudflare Worker + Durable Objects are the only supported client-facing ingress.
+- Modal `http_app` remains the internal execution gateway for Worker forwarding and local/operator diagnostics.
+- Modal-only public fallback is not part of the current runtime contract.
+- Historical rollout sequencing lives in the completed exec plans under `docs/exec-plans/completed/phase-3-cloudflare-first/`.

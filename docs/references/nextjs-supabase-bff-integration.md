@@ -250,8 +250,8 @@ Also propagate request correlation IDs:
 
 ## References
 
-- `edge-control-plane/src/auth/sessionAuth.ts`
-- `edge-control-plane/src/auth/internalAuth.ts`
+- `edge-control-plane/src/auth/session-auth.ts`
+- `edge-control-plane/src/auth/internal-auth.ts`
 - `edge-control-plane/src/index.ts`
 - `modal_backend/security/cloudflare_auth.py`
 - `docs/references/runbooks/cloudflare-modal-e2e.md`

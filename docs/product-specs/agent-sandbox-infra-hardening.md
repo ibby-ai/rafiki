@@ -22,12 +22,12 @@ Operators can run multi-tenant agent workloads with lower secret blast radius an
 ## Gap Matrix
 | Pattern | Status | Owner | Risk | Evidence | Acceptance Criteria |
 | --- | --- | --- | --- | --- | --- |
-| Control plane owns public auth/session identity | `already` | Edge Platform | Medium | `edge-control-plane/src/auth/sessionAuth.ts`, `edge-control-plane/src/index.ts` | Preserve current session-token validation and DO routing semantics. |
+| Control plane owns public auth/session identity | `already` | Edge Platform | Medium | `edge-control-plane/src/auth/session-auth.ts`, `edge-control-plane/src/index.ts` | Preserve current session-token validation and DO routing semantics. |
 | Sandbox secret allowlist (`OPENAI_API_KEY` + optional tracing only) | `gap` | Runtime Platform | High | `modal_backend/settings/settings.py`, `modal_backend/main.py` | Sandbox runtime excludes `INTERNAL_AUTH_SECRET` and `MODAL_TOKEN_*`; before/after evidence recorded. |
 | Session-scoped short-lived gateway->sandbox auth credentials | `gap` | Runtime Platform | High | `modal_backend/security/cloudflare_auth.py`, `modal_backend/main.py` | Sandbox accepts scoped TTL-bound token path; legacy shared-secret path has documented rollback gate. |
 | Runtime privilege hardening + env scrubbing | `gap` | Runtime Platform | High | `modal_backend/api/controller.py`, `modal_backend/main.py` | UID/writable-path checks and env scrubbing evidence recorded with compensating controls if non-root drop is blocked. |
 | High-risk tool execution safety (`eval` removal + policy tightening) | `gap` | Agent Runtime | High | `modal_backend/mcp_tools/calculate_tool.py`, `modal_backend/mcp_tools/registry.py` | Malicious payloads denied deterministically; behavior covered by regression tests. |
-| Control-plane budget pre-flight rails | `partial` | Edge Platform | Medium | `edge-control-plane/src/index.ts`, `edge-control-plane/src/durable-objects/SessionAgent.ts` | Deterministic per-session budget denials emitted before Modal forwarding, including queue/replay paths. |
+| Control-plane budget pre-flight rails | `partial` | Edge Platform | Medium | `edge-control-plane/src/index.ts`, `edge-control-plane/src/durable-objects/session-agent.ts` | Deterministic per-session budget denials emitted before Modal forwarding, including queue/replay paths. |
 | Scoped artifact transfer (signed claims + expiry + revocation) | `gap` | Edge + Runtime Platform | High | `edge-control-plane/src/index.ts`, `modal_backend/main.py` | Expired/tampered/cross-session token attempts denied with stable errors; signer claims documented. |
 | Governance and evidence synchronization | `partial` | Platform Docs | Medium | `docs/design-docs/cloudflare-hybrid-architecture.md`, `docs/references/runbooks/cloudflare-modal-e2e.md`, `docs/QUALITY_SCORE.md`, `docs/RELIABILITY.md`, `docs/SECURITY.md` | Dated command evidence and rollback notes published in same change wave as runtime behavior changes. |
 

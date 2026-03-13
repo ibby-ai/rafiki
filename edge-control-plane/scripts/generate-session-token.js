@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 
 function printHelp() {
-  console.log(`Generate a Cloudflare session token compatible with src/auth/sessionAuth.ts.
+  console.log(`Generate a Cloudflare session token compatible with src/auth/session-auth.ts.
 
 Usage:
   node edge-control-plane/scripts/generate-session-token.js [options]

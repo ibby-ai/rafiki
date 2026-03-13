@@ -1,7 +1,7 @@
 # Generated DB Schema
 
-- Last generated: 2026-02-21
-- Source of truth: `edge-control-plane/src/durable-objects/SessionAgent.ts` (`initializeSchema()`)
+- Last generated: 2026-03-12
+- Source of truth: `edge-control-plane/src/durable-objects/session-agent.ts` (`initializeSchema()`)
 - Runtime: Cloudflare Durable Object SQLite (`this.ctx.storage.sql`)
 
 ## Schema Snapshot
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS execution_state (
 1. Inspect the current schema block in source:
    ```bash
    source .venv/bin/activate
-   sed -n '50,110p' edge-control-plane/src/durable-objects/SessionAgent.ts
+   sed -n '75,120p' edge-control-plane/src/durable-objects/session-agent.ts
    ```
 2. Replace the SQL snapshot in this file with the latest schema.
 3. Update the `Last generated` date.

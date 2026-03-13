@@ -5,8 +5,8 @@ This document describes the current integration behavior in the Phase 3 Cloudfla
 ## Scope and Source of Truth
 
 - Worker routing: `edge-control-plane/src/index.ts`
-- Session state + queue behavior: `edge-control-plane/src/durable-objects/SessionAgent.ts`
-- Event fan-out behavior: `edge-control-plane/src/durable-objects/EventBus.ts`
+- Session state + queue behavior: `edge-control-plane/src/durable-objects/session-agent.ts`
+- Event fan-out behavior: `edge-control-plane/src/durable-objects/event-bus.ts`
 - Public API contracts: `edge-control-plane/API.md`
 - Architecture context: `docs/design-docs/cloudflare-hybrid-architecture.md`
 
@@ -15,7 +15,7 @@ This document describes the current integration behavior in the Phase 3 Cloudfla
 | Capability | Cloudflare Layer | Modal Layer |
 | --- | --- | --- |
 | Public HTTP/WebSocket entry | Worker | No |
-| Client auth (`Authorization` / `token`) | Worker (`sessionAuth.ts`) | No |
+| Client auth (`Authorization` / `token`) | Worker (`session-auth.ts`) | No |
 | Session key caching (`SESSION_CACHE`) | Worker | No |
 | Session state + messages + prompt queue | SessionAgent DO (SQLite) | No |
 | Event fan-out / presence | EventBus DO | No |

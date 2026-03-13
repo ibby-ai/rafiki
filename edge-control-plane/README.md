@@ -21,8 +21,8 @@ edge-control-plane/
 │   ├── index.ts                      # Worker entry point
 │   ├── types.ts                      # TypeScript type definitions
 │   └── durable-objects/
-│       ├── SessionAgent.ts           # Per-session DO
-│       └── EventBus.ts               # Real-time event bus DO
+│       ├── session-agent.ts          # Per-session DO
+│       └── event-bus.ts              # Real-time event bus DO
 ├── scripts/
 │   └── generate-session-token.js     # Session token helper for E2E tests
 ├── wrangler.jsonc                    # Cloudflare configuration

@@ -7,7 +7,7 @@ phase: Phase 2 - Cloudflare Control Plane
 ---
 
 ## Steps
-- Add session token auth verification (`sessionAuth.ts`) and new types in `edge-control-plane/src/types.ts`.
+- Add session token auth verification (`session-auth.ts`) and new types in `edge-control-plane/src/types.ts`.
 - Enforce auth + rate limiting in `edge-control-plane/src/index.ts` for non-health endpoints.
 - Implement session_key KV mapping and routing logic.
 - Add queue endpoints that forward to SessionAgent DO.
