@@ -11,6 +11,7 @@
 - None currently.
 
 ## Completed Plans
+- [README Onboarding Polish](./completed/readme-onboarding-polish/PLAN_readme-onboarding-polish.md)
 - [Code Quality Governance](./completed/code-quality-governance/PLAN_code-quality-governance.md)
 - [Controller Rollout Cutover Safety](./completed/controller-rollout-cutover-safety/PLAN_controller-rollout-cutover-safety.md)
 - [Modal SDK 1.3.5 Upgrade](./completed/modal-sdk-1-3-5-upgrade/PLAN_modal-sdk-1-3-5-upgrade.md)
