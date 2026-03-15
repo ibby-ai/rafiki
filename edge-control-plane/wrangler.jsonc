@@ -98,11 +98,12 @@
       "id": "a202e8cacbd04ddc94bfb7df5f1f73bc"
     }
   ],
-  // Secrets to be added via wrangler secret put:
-  // - MODAL_TOKEN_ID: Modal API token ID
-  // - MODAL_TOKEN_SECRET: Modal API token secret
+  // Canonical public Worker secrets to add via wrangler secret put:
   // - INTERNAL_AUTH_SECRET: Internal signing secret for Worker <-> Modal auth
   // - SESSION_SIGNING_SECRET: Secret for signing session tokens (client auth)
+  // Non-canonical routes that use explicit Modal workspace auth may also need:
+  // - MODAL_TOKEN_ID
+  // - MODAL_TOKEN_SECRET
   "migrations": [
     {
       "tag": "v1",

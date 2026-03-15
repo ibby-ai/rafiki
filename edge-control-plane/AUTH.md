@@ -456,15 +456,14 @@ WebSocket connections.
 ### Required Secrets
 
 ```bash
-# Modal API access
-wrangler secret put MODAL_TOKEN_ID
-wrangler secret put MODAL_TOKEN_SECRET
-
-# Internal authentication
+# Canonical public Worker path
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
-
 ```
+
+If you deliberately enable a non-canonical Worker route that authenticates to
+Modal with workspace credentials, document that flow separately and add
+`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` only for that route.
 
 ### Secret Rotation
 

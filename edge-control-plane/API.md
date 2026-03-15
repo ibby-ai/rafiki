@@ -936,14 +936,14 @@ When exceeded, the Worker returns `429 Too Many Requests` with a JSON error body
 ### Setup Secrets
 
 ```bash
-# Modal API credentials
-# wrangler secret put MODAL_TOKEN_ID
-# wrangler secret put MODAL_TOKEN_SECRET
-
-# Internal signing secrets
+# Canonical public Worker secrets
 wrangler secret put INTERNAL_AUTH_SECRET
 wrangler secret put SESSION_SIGNING_SECRET
 ```
+
+If a non-canonical Worker flow later requires explicit Modal workspace auth,
+document that separately instead of adding `MODAL_TOKEN_ID` /
+`MODAL_TOKEN_SECRET` to the baseline setup.
 
 ### Deploy
 
