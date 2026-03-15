@@ -24,6 +24,14 @@ Passing internal Modal checks is not enough for rollout acceptance because real 
 
 ### Required secrets
 
+Local repo environment:
+
+```bash
+cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-internal-secret>
+```
+
 Modal (must exist in the authenticated Modal workspace):
 
 ```bash
@@ -66,6 +74,9 @@ Notes:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-internal-secret>
+uv sync --extra dev
 source .venv/bin/activate
 uv run modal serve -m modal_backend.main
 ```
@@ -85,6 +96,9 @@ Run this in a third terminal before cURL/WebSocket tests:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-internal-secret>
+uv sync --extra dev
 source .venv/bin/activate
 
 export DEV_URL="https://saidiibrahim--modal-backend-http-app-dev.modal.run"
@@ -102,6 +116,7 @@ Validation note:
 Auth consistency expectations:
 
 - `INTERNAL_AUTH_SECRET` must be the same value in both:
+  - local `.env`
   - Cloudflare Worker secret `INTERNAL_AUTH_SECRET`
   - Modal secret `internal-auth-secret` (`INTERNAL_AUTH_SECRET=...`)
 - Session tokens for Worker requests must be signed with `SESSION_SIGNING_SECRET`.

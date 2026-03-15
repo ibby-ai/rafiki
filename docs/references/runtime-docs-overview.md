@@ -18,6 +18,9 @@ For local E2E execution, activate the repo virtualenv first:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-secret>
+uv sync --extra dev
 source .venv/bin/activate
 ```
 
@@ -37,16 +40,23 @@ If you only need a quick internal Modal runtime smoke check:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-secret>
 uv sync --extra dev
 source .venv/bin/activate
 uv run modal setup
 
 # Create required secrets
 uv run modal secret create openai-secret OPENAI_API_KEY=<your-key>
-uv run modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-cloudflare>
+uv run modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-.env>
 uv run modal secret create modal-auth-secret \
   SANDBOX_MODAL_TOKEN_ID=<token-id> \
   SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
+
+# Optional: only if ENABLE_LANGSMITH_TRACING=true
+uv run modal secret create langsmith-secret \
+  LANGSMITH_API_KEY=<your-langsmith-key> \
+  LANGSMITH_PROJECT=<your-project>
 ```
 
 Run a smoke check:
@@ -57,7 +67,10 @@ uv run modal run -m modal_backend.main
 
 If startup fails, verify:
 - `OPENAI_API_KEY` is valid and present in `openai-secret`
+- `.env` exists and `INTERNAL_AUTH_SECRET` is set locally
 - `modal setup` completed successfully
+- `modal-auth-secret` exists because `ENABLE_MODAL_AUTH_SECRET=true` by default
+- if tracing is enabled, `langsmith-secret` exists or `ENABLE_LANGSMITH_TRACING=false`
 - `.venv` is synced (`uv sync --extra dev`) and `uv run python - <<'PY' ... importlib.metadata.version("modal") ... PY` reports `1.3.5` or newer
 
 ## Start Here
@@ -92,6 +105,7 @@ If startup fails, verify:
   - `http_app` receives internal Worker traffic plus local/operator diagnostic traffic.
   - Controller sandbox executes agent runs and streams SSE events.
 - **Session Memory**: OpenAI `SQLiteSession` with persisted session IDs and optional fork behavior.
+- **LangSmith tracing**: optional OpenAI Agents trace correlation for debugging, operations, and incident triage.
 - **Readiness Hardening**: gateway startup waits on controller `/health_check`, logs bounded diagnostics on timeout, performs one recycle+retry, and fails deterministically after a second timeout.
 - **Active-Pointer Rollout Authority**:
   - requests consult shared rollout state before reusing per-worker controller caches.

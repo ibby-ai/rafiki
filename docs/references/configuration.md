@@ -6,16 +6,37 @@ This document covers runtime configuration for the Modal + OpenAI Agents deploym
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-secret>
 uv sync --extra dev
 source .venv/bin/activate
 uv run modal setup
 uv run modal secret create openai-secret OPENAI_API_KEY=your-api-key-here
+uv run modal secret create internal-auth-secret INTERNAL_AUTH_SECRET=<same-as-.env>
+uv run modal secret create modal-auth-secret \
+  SANDBOX_MODAL_TOKEN_ID=<token-id> \
+  SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 uv run modal run -m modal_backend.main
 ```
 
 All Modal CLI commands in this doc are expected to run from the activated repo `.venv` (or prefixed with `uv run`).
 This repo now expects the `.venv` to resolve `modal>=1.3.5`.
 For Python validation, prefer `uv run python -m pytest ...` so the repo interpreter is used even when a global `pytest` is on `PATH`.
+
+## Required Local Environment
+
+Local Modal commands load settings from `.env`, so first-time setup must define
+`INTERNAL_AUTH_SECRET` locally before `modal run` or `modal serve`.
+
+```bash
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-secret>
+```
+
+When you also use the Cloudflare Worker path, keep this value aligned with:
+
+- Worker secret `INTERNAL_AUTH_SECRET`
+- Modal secret `internal-auth-secret`
 
 ## Required Secrets
 
@@ -60,6 +81,27 @@ modal secret create modal-auth-secret \
   SANDBOX_MODAL_TOKEN_SECRET=<token-secret>
 ```
 
+This secret is part of the default onboarding contract because
+`ENABLE_MODAL_AUTH_SECRET=true` unless you intentionally disable it.
+
+## Optional LangSmith Tracing
+
+Rafiki includes LangSmith for request-level trace correlation when debugging or
+operating OpenAI Agents runs across local and deployed environments. Enable it
+only when you want that tracing surface.
+
+When `ENABLE_LANGSMITH_TRACING=true`, create Modal secret `langsmith-secret`
+with `LANGSMITH_API_KEY` and optionally `LANGSMITH_PROJECT`:
+
+```bash
+modal secret create langsmith-secret \
+  LANGSMITH_API_KEY=<your-langsmith-key> \
+  LANGSMITH_PROJECT=<your-project>
+```
+
+If you are not setting up tracing yet, keep `ENABLE_LANGSMITH_TRACING=false`
+in `.env` or unset it for the runtime you are using.
+
 ## Secret Surface Contract (Task 02)
 
 Rafiki now uses split secret injection by execution surface:
@@ -68,11 +110,11 @@ Rafiki now uses split secret injection by execution surface:
   - `openai-secret` (`OPENAI_API_KEY`)
   - `internal-auth-secret` (`INTERNAL_AUTH_SECRET`)
   - `modal-auth-secret` (`SANDBOX_MODAL_TOKEN_ID`, `SANDBOX_MODAL_TOKEN_SECRET`) when `ENABLE_MODAL_AUTH_SECRET=true` (default)
-  - optional tracing secret (`LANGSMITH_API_KEY`)
+  - `langsmith-secret` (`LANGSMITH_API_KEY`, optionally `LANGSMITH_PROJECT`) when `ENABLE_LANGSMITH_TRACING=true`
 - Sandbox/controller surface (`get_modal_secrets(surface="sandbox")`):
   - `openai-secret` (`OPENAI_API_KEY`)
   - `modal-auth-secret` (`SANDBOX_MODAL_TOKEN_ID`, `SANDBOX_MODAL_TOKEN_SECRET`) when `ENABLE_MODAL_AUTH_SECRET=true` (default)
-  - optional tracing secret (`LANGSMITH_API_KEY`)
+  - `langsmith-secret` (`LANGSMITH_API_KEY`, optionally `LANGSMITH_PROJECT`) when `ENABLE_LANGSMITH_TRACING=true`
   - explicitly excludes `INTERNAL_AUTH_SECRET`
 
 Scoped sandbox auth is now session/sandbox/path bound via `X-Sandbox-Session-Auth` and

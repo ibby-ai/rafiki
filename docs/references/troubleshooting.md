@@ -10,6 +10,7 @@ Before diving into specific issues, run these checks:
 
 ```bash
 cd /Users/ibrahimsaidi/Desktop/Builds/Modal_Builds/rafiki
+test -f .env && grep '^INTERNAL_AUTH_SECRET=' .env
 source .venv/bin/activate
 
 # Local Worker dev now uses edge-control-plane/wrangler.jsonc -> env.development
@@ -39,6 +40,25 @@ All Modal CLI commands in this troubleshooting guide are expected to run from th
 
 ## Startup & Configuration Issues
 
+### "`internal_auth_secret` must be set"
+
+```
+ValueError: internal_auth_secret must be set
+```
+
+**Cause**: Local settings loaded from `.env` do not define `INTERNAL_AUTH_SECRET`.
+
+**Solution**:
+```bash
+cp .env.example .env
+# edit .env and set INTERNAL_AUTH_SECRET=<shared-secret>
+```
+
+When using the Cloudflare path, keep this value aligned with the Worker
+`INTERNAL_AUTH_SECRET` and Modal `internal-auth-secret`.
+
+---
+
 ### "Secret not found" Error
 
 ```
@@ -57,6 +77,31 @@ modal secret create openai-secret OPENAI_API_KEY=your-key-here
 modal secret list
 # Should show: openai-secret
 ```
+
+---
+
+### "Secret 'langsmith-secret' not found"
+
+```
+modal.exception.NotFoundError: Secret 'langsmith-secret' not found
+```
+
+**Cause**: `ENABLE_LANGSMITH_TRACING=true`, but the optional tracing secret was
+not created for the Modal runtime.
+
+Rafiki uses LangSmith for correlated OpenAI Agents trace inspection during local
+debugging and deployed incident triage. It is optional for first-time setup.
+
+**Solutions**:
+
+1. Create the Modal tracing secret:
+   ```bash
+   modal secret create langsmith-secret \
+     LANGSMITH_API_KEY=<your-langsmith-key> \
+     LANGSMITH_PROJECT=<your-project>
+   ```
+2. Or disable tracing for now by keeping `ENABLE_LANGSMITH_TRACING=false` in
+   `.env`.
 
 ---
 
@@ -178,7 +223,8 @@ modal setup
 
 ### Worker `/query` returns `500` with `Token missing. Could not authenticate client`
 
-**Cause**: The sandbox controller cannot authenticate Modal SDK calls at runtime (missing `modal-auth-secret` on sandbox surface or stale sandbox still running old env).
+**Cause**: The sandbox controller cannot authenticate Modal SDK calls at runtime
+(missing `modal-auth-secret` on sandbox surface or stale sandbox still running old env).
 
 **Fast checks**:
 
@@ -194,8 +240,9 @@ curl -sS -X POST "$DEV_URL/query" \
 **Fix**:
 
 1. Confirm `modal-auth-secret` exists and contains `SANDBOX_MODAL_TOKEN_ID` + `SANDBOX_MODAL_TOKEN_SECRET`.
-2. Ensure sandbox secret surface includes `modal-auth-secret` when `ENABLE_MODAL_AUTH_SECRET=true`.
-3. Recycle the service sandbox and clear stale metadata if needed:
+2. Remember that `modal-auth-secret` is required by default because `ENABLE_MODAL_AUTH_SECRET=true` unless you intentionally disable it.
+3. Ensure sandbox secret surface includes `modal-auth-secret` when `ENABLE_MODAL_AUTH_SECRET=true`.
+4. Recycle the service sandbox and clear stale metadata if needed:
    ```bash
    # deployed app path
    modal run -m modal_backend.main::terminate_service_sandbox
@@ -203,7 +250,7 @@ curl -sS -X POST "$DEV_URL/query" \
    # local modal serve path
    uv run python -c "from modal_backend.main import terminate_service_sandbox; print(terminate_service_sandbox.local())"
    ```
-4. Re-run Worker `/query` smoke.
+5. Re-run Worker `/query` smoke.
 
 ---
 
