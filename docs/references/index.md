@@ -13,6 +13,10 @@ For guided Cloudflare + Modal runtime onboarding, start at `runtime-docs-overvie
 - [Tool Development](./tool-development.md)
 - [Troubleshooting](./troubleshooting.md)
 
+## Developer Tooling
+
+- [agent-browser (Browser Automation)](./agent-browser.md)
+
 ## Supplemental References
 - [Oracle Cheatsheet](./oracle/CHEATSHEET.md)
 - [Oracle User Manual](./oracle/USER_MANUAL.md)
